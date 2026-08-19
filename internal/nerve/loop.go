@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // loop.go — decision loop: pure orchestration, no default implementation.
 package nerve
 

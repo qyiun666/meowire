@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // assemble.go — composition root: the single assembly point.
 package meowire
 

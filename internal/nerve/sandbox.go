@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // sandbox.go — execution boundary declaration (optional port, nil = allow all).
 package nerve
 

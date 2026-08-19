@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // meow.go — Agent facade: the sole entry point for the host.
 package meowire
 

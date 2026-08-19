@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // signal.go — neural signal: inter-individual message carrier.
 //
 // The framework does not consume Signal — inboxes and consumption are host

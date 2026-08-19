@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // Package meowire is the public facade of the meowire harness.
 //
 // Architecture:

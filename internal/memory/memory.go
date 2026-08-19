@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // memory.go — data layer: memory CRUD contract (bottom-most package).
 //
 // This package depends on nothing above it: it holds only pure interfaces

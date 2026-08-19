@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // meow_test.go — integration tests: New/Stimulate/Close, event consumption.
 package meowire_test
 

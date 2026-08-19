@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // loop_test.go — DecisionLoop white-box tests.
 package nerve
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // direct.go — Direct: a connection-table synapse with Resolver-based delivery.
 package synapse
 

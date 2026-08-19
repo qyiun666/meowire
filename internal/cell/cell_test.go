@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // cell_test.go — Cell white-box tests: basic event flow, close behavior.
 package cell
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // types.go — public contract types: aliases of the internal definitions.
 //
 // The api package is the primary importable surface of meowire. All

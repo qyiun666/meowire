@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // context.go — context size limit (optional port, nil = no trimming).
 package nerve
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // meow_review_test.go — port wiring and event sequence tests.
 package meowire_test
 

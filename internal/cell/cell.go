@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // cell.go — Cell: minimal agent kernel (ID + ports + DecisionLoop).
 package cell
 

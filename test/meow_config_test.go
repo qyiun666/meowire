@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // meow_config_test.go — Config fields applied correctly.
 package meowire_test
 

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // mock.go — shared test-only port stubs for meow package tests.
 package testutil
 

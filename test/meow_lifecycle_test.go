@@ -1,3 +1,6 @@
+// Copyright (c) 2026 qyiun666
+// SPDX-License-Identifier: MIT
+
 // meow_lifecycle_test.go — lifecycle tests: Close behavior.
 package meowire_test
 
