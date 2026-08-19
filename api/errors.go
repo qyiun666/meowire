@@ -1,4 +1,4 @@
-// errors.go — root package errors (re-export lower package errors).
+// errors.go — api package errors (re-export lower package errors).
 package meowire
 
 import (

@@ -1,6 +1,6 @@
 # MeowAgent synapse module context (capability layer: synapse)
 
-> Package lives at internal/synapse — sealed from external import; hosts use only the root package API.
+> Package lives at internal/synapse — sealed from external import; hosts use only the api package API.
 
 ## Purpose
 

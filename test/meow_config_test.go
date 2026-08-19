@@ -1,40 +1,37 @@
 // meow_config_test.go — Config fields applied correctly.
-package meowire
+package meowire_test
 
 import (
 	"context"
 	"testing"
 
-	"github.com/qyiun666/meowire/internal/nerve"
-	"github.com/qyiun666/meowire/internal/testutil"
+	meowire "github.com/qyiun666/meowire/api"
 )
 
 // TestConfigApplied verifies MaxRounds etc. flow through to LoopContext.
 func TestConfigApplied(t *testing.T) {
 	thinkCalls := 0
-	a, err := New(testOrgans(Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+	a, err := meowire.New(testOrgans(meowire.Organs{
+		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			thinkCalls++
-			// Always return tool calls to force looping
-			return &nerve.Decision{
+			return &meowire.Decision{
 				Text:      "t",
-				ToolCalls: []nerve.ToolCall{{ID: "x", Name: "tool"}},
+				ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}},
 			}, nil
 		}},
-	}), Config{MaxRounds: 2})
+	}), meowire.Config{MaxRounds: 2})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
-	var events []nerve.Event
+	var events []meowire.Event
 	for ev := range a.Stimulate(context.Background(), "loop") {
 		events = append(events, ev)
 	}
 
-	// Count thinking states - should be exactly 2 (MaxRounds)
 	thinkCount := 0
 	for _, e := range events {
-		if e.Kind == nerve.EventState && e.State == nerve.StateThinking {
+		if e.Kind == meowire.EventState && e.State == meowire.StateThinking {
 			thinkCount++
 		}
 	}
@@ -45,19 +42,18 @@ func TestConfigApplied(t *testing.T) {
 
 // TestConfigMaxToolOutput verifies MaxToolOutput truncation.
 func TestConfigMaxToolOutput(t *testing.T) {
-	a, err := New(testOrgans(Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-			return &nerve.Decision{Text: "done"}, nil
+	a, err := meowire.New(testOrgans(meowire.Organs{
+		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			return &meowire.Decision{Text: "done"}, nil
 		}},
-	}), Config{MaxToolOutput: 10})
+	}), meowire.Config{MaxToolOutput: 10})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
 
-	// Just verify it doesn't panic and completes
 	var gotDone bool
 	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == nerve.EventDone {
+		if ev.Kind == meowire.EventDone {
 			gotDone = true
 		}
 	}

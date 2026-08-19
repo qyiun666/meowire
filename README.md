@@ -15,10 +15,10 @@ you can rely on.
   backend — it injects six host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~1.5k lines of source. The entire loop is one file
+- **Small and readable.** ~1.2k lines of source. The entire loop is one file
   (`internal/nerve/loop.go`, ~370 lines with tests).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
-  the only importable surface is the root package (`New` / `Stimulate` / `Close` + contract types).
+  the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
 
 ## Features
 
@@ -39,16 +39,17 @@ you can rely on.
 ## Architecture
 
 ```
-meowire (root: facade + composition root — the only public surface)
-  ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
-  ├── internal/nerve    decision loop, ports, hooks, events, guards
-  ├── internal/synapse  inter-agent connection & delivery contract (host reference)
-  └── internal/memory   memory CRUD contract (host reference, not consumed by the framework)
+meowire (module root)
+  └── api/            facade + composition root — the sole public surface
+      ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
+      ├── internal/nerve    decision loop, ports, hooks, events, guards
+      ├── internal/synapse  inter-agent connection & delivery contract (host reference)
+      └── internal/memory   memory CRUD contract (host reference, not consumed by the framework)
 ```
 
 | Concept | Where | Role |
 |---|---|---|
-| `Agent` / `New` / `Stimulate` / `Close` | root | Facade: the entire public surface |
+| `Agent` / `New` / `Stimulate` / `Close` | `api/` | Facade: the entire public surface |
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | Pure orchestration: Think → Act → yield |
 | `Cell` | `internal/cell/cell.go` | Minimal kernel: ID + ports + loop |
 | `Thinker` / `Effector` / `Closer` | ports | Host-provided capabilities |
@@ -67,7 +68,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/qyiun666/meowire"
+	meowire "github.com/qyiun666/meowire/api"
 )
 
 // thinker implements meowire.Thinker — the LLM port.
@@ -176,4 +177,14 @@ GOWORK=off go vet ./...
 
 ## License
 
-To be chosen before publishing (MIT / Apache-2.0 recommended).
+[MIT](LICENSE)
+
+## Links
+
+| | |
+|---|---|
+| MeowAgent | [github.com/meowagent/meowagent](https://github.com/meowagent/meowagent) |
+| MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
+| MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
+| Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
+| Email | qyiun666@163.com |

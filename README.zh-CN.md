@@ -13,9 +13,9 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入六个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
 - **零依赖。** 仅标准库。没有需要审计的传递依赖树。
-- **小巧可读。** 源码约 1500 行。整个循环只有一个文件（`internal/nerve/loop.go`，含测试约 370 行）。
+- **小巧可读。** 源码约 1200 行。整个循环只有一个文件（`internal/nerve/loop.go`，含测试约 370 行）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
-  根包（`New` / `Stimulate` / `Close` + 契约类型）。
+  `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
 
 ## 特性
 
@@ -36,16 +36,17 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 ## 架构
 
 ```
-meowire (根包：门面 + 组合根 —— 唯一对外表面)
-  ├── internal/cell     agent 内核（ID + 端口 + DecisionLoop）
-  ├── internal/nerve    决策循环、端口、钩子、事件、守卫
-  ├── internal/synapse  个体间连接与信号投递契约（宿主参考）
-  └── internal/memory   记忆 CRUD 契约（宿主参考，框架不消费）
+meowire (模块根)
+  └── api/            门面 + 组合根 —— 唯一对外表面
+      ├── internal/cell     agent 内核（ID + 端口 + DecisionLoop）
+      ├── internal/nerve    决策循环、端口、钩子、事件、守卫
+      ├── internal/synapse  个体间连接与信号投递契约（宿主参考）
+      └── internal/memory   记忆 CRUD 契约（宿主参考，框架不消费）
 ```
 
 | 概念 | 位置 | 职责 |
 |---|---|---|
-| `Agent` / `New` / `Stimulate` / `Close` | 根包 | 门面：整个对外表面 |
+| `Agent` / `New` / `Stimulate` / `Close` | `api/` | 门面：整个对外表面 |
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | 纯编排：Think → Act → 产出事件 |
 | `Cell` | `internal/cell/cell.go` | 极简内核：ID + 端口 + 循环 |
 | `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
@@ -64,7 +65,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/qyiun666/meowire"
+	meowire "github.com/qyiun666/meowire/api"
 )
 
 // thinker 实现 meowire.Thinker —— LLM 端口。
@@ -170,4 +171,14 @@ GOWORK=off go vet ./...
 
 ## License
 
-发布前选择（推荐 MIT / Apache-2.0）。
+[MIT](LICENSE)
+
+## Links
+
+| | |
+|---|---|
+| MeowAgent | [github.com/meowagent/meowagent](https://github.com/meowagent/meowagent) |
+| MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
+| MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
+| Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
+| Email | qyiun666@163.com |

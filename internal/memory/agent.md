@@ -1,6 +1,6 @@
 # MeowAgent memory module context (data layer, standalone contract)
 
-> Package lives at internal/memory — sealed from external import; hosts use only the root package API (Memory/Record/Query aliases).
+> Package lives at internal/memory — sealed from external import; hosts use only the api package API (Memory/Record/Query aliases).
 
 ## Purpose
 

@@ -1,6 +1,6 @@
 # MeowAgent cell module context (capability layer: agent kernel)
 
-> Package lives at internal/cell — sealed from external import; hosts use only the root package API.
+> Package lives at internal/cell — sealed from external import; hosts use only the api package API.
 
 ## Purpose
 

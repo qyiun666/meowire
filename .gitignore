@@ -3,6 +3,7 @@
 
 # IDE / agent tooling
 .qoder/
+.idea/
 
 # stray directory created during an earlier move
 ~/

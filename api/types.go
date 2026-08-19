@@ -1,6 +1,6 @@
 // types.go — public contract types: aliases of the internal definitions.
 //
-// The root package is the only importable surface of meowire. All
+// The api package is the primary importable surface of meowire. All
 // implementation packages live under internal/ and are sealed by the Go
 // compiler; hosts interact with the framework through New/Stimulate/Close
 // plus the contract types below (ports, data packets, events, memory).
@@ -9,6 +9,7 @@ package meowire
 import (
 	"github.com/qyiun666/meowire/internal/memory"
 	"github.com/qyiun666/meowire/internal/nerve"
+	"github.com/qyiun666/meowire/internal/synapse"
 )
 
 // Ports — host-provided capabilities (all required, no stubs).
@@ -48,6 +49,15 @@ type (
 	Query  = memory.Query
 )
 
+// Inter-agent messaging (host reference).
+type (
+	Synapse     = synapse.Synapse
+	Signal      = nerve.Signal
+	SignalKind  = nerve.SignalKind
+	Message     = nerve.Message
+	MessageRole = nerve.MessageRole
+)
+
 // LoopState constants.
 const (
 	StateIdle     LoopState = nerve.StateIdle
@@ -67,6 +77,20 @@ const (
 	EventDone       EventKind = nerve.EventDone
 	EventError      EventKind = nerve.EventError
 	EventUsage      EventKind = nerve.EventUsage
+)
+
+// SignalKind constants.
+const (
+	KindStimulus SignalKind = nerve.KindStimulus
+	KindResponse SignalKind = nerve.KindResponse
+	KindNotice   SignalKind = nerve.KindNotice
+)
+
+// MessageRole constants.
+const (
+	RoleUser      MessageRole = nerve.RoleUser
+	RoleAssistant MessageRole = nerve.RoleAssistant
+	RoleTool      MessageRole = nerve.RoleTool
 )
 
 // DefaultMaxRounds is the default round limit when Config.MaxRounds <= 0.

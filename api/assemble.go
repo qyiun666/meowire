@@ -8,7 +8,7 @@ import (
 )
 
 // Organs holds all host-provided ports (all required — no defaults, no stubs).
-// Unlike internal packages, which tolerate nil ports defensively, the root
+// Unlike internal packages, which tolerate nil ports defensively, the api
 // layer rejects a missing port at assembly time.
 type Organs struct {
 	ID      string         // Agent unique identifier (empty = "agent")

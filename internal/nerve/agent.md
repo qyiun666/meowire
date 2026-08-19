@@ -1,6 +1,6 @@
 # MeowAgent nerve module context (capability layer: decision loop + ports)
 
-> Package lives at internal/nerve — sealed from external import; hosts use only the root package API.
+> Package lives at internal/nerve — sealed from external import; hosts use only the api package API.
 
 ## Purpose
 
