@@ -9,17 +9,18 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sync"
+	"sync/atomic"
 
 	"github.com/qyiun666/meowire/internal/cell"
 )
 
 // Agent is the facade — the sole entry point for the host.
+// cell and closer are set once at construction and never replaced;
+// only closed needs synchronization.
 type Agent struct {
 	cell   *cell.Cell
 	closer Closer
-	mu     sync.RWMutex
-	closed bool
+	closed atomic.Bool
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
@@ -27,10 +28,8 @@ type Agent struct {
 // the stop point do not execute (see doc.go: event stream & resume model).
 func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 	return func(yield func(Event) bool) {
-		a.mu.RLock()
-		closed := a.closed
+		closed := a.closed.Load()
 		c := a.cell
-		a.mu.RUnlock()
 		if closed {
 			yield(Event{Kind: EventError, Err: ErrCellClosed})
 			return
@@ -45,12 +44,9 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 
 // Close shuts down the agent.
 func (a *Agent) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.closed {
+	if !a.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	a.closed = true
 	var errs []error
 	if err := a.cell.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("meow: cell: %w", err))

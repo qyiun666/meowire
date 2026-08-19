@@ -5,6 +5,7 @@
 package meowire
 
 import (
+	"cmp"
 	"fmt"
 
 	"github.com/qyiun666/meowire/internal/cell"
@@ -60,7 +61,7 @@ func New(o Organs, cfg Config) (*Agent, error) {
 	}
 
 	c := &cell.Cell{
-		ID:            defaultID(o.ID),
+		ID:            cmp.Or(o.ID, "agent"),
 		Identity:      o.Identity,
 		Think:         o.Think,
 		Act:           o.Act,
@@ -78,10 +79,3 @@ func New(o Organs, cfg Config) (*Agent, error) {
 	return &Agent{cell: c, closer: o.Closer}, nil
 }
 
-// defaultID returns "agent" when id is empty.
-func defaultID(id string) string {
-	if id == "" {
-		return "agent"
-	}
-	return id
-}

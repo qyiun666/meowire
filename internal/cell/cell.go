@@ -8,7 +8,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"sync"
+	"slices"
+	"sync/atomic"
 
 	"github.com/qyiun666/meowire/internal/nerve"
 )
@@ -37,16 +38,13 @@ type Cell struct {
 	Tools   []nerve.ToolSpec
 	Context []string // Default context (host injected)
 
-	mu     sync.RWMutex
-	closed bool
+	closed atomic.Bool
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
 func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
-		c.mu.RLock()
-		closed := c.closed
-		c.mu.RUnlock()
+		closed := c.closed.Load()
 		if closed {
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
 			return
@@ -69,8 +67,8 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 			State:         nerve.StateIdle,
 			Input:         text,
 			System:        c.System,
-			Tools:         append([]nerve.ToolSpec(nil), c.Tools...), // copy
-			Context:       append([]string(nil), c.Context...),       // copy
+			Tools:         slices.Clone(c.Tools),
+			Context:       slices.Clone(c.Context),
 		}
 		nerve.DecisionLoop{}.Cycle(ctx, lc, yield)
 	}
@@ -78,18 +76,11 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 
 // Close marks the cell as closed (idempotent).
 func (c *Cell) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil
-	}
-	c.closed = true
+	c.closed.Store(true)
 	return nil
 }
 
 // IsClosed returns whether the cell is closed.
 func (c *Cell) IsClosed() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.closed
+	return c.closed.Load()
 }

@@ -258,7 +258,7 @@ func toolFeedback(tc ToolCall, eff *Effect, err error, maxLen int) string {
 	}
 	if maxLen > 0 && len(fb) > maxLen {
 		truncAt := maxLen
-		for truncAt > 0 && (fb[truncAt]&0xC0) == 0x80 {
+		for truncAt > 0 && !utf8.RuneStart(fb[truncAt]) {
 			truncAt--
 		}
 		if truncAt == 0 {
