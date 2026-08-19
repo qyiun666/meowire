@@ -1,0 +1,8 @@
+# macOS
+.DS_Store
+
+# IDE / agent tooling
+.qoder/
+
+# stray directory created during an earlier move
+~/
