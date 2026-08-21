@@ -27,7 +27,6 @@ type (
 
 // Data packets exchanged with the host ports.
 type (
-	Identity   = nerve.Identity
 	MethodSpec = nerve.MethodSpec
 	Prompt     = nerve.Prompt
 	ToolSpec   = nerve.ToolSpec

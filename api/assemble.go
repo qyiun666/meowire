@@ -25,9 +25,10 @@ type Organs struct {
 
 	// Fixed parts injected into every LoopContext
 	System   string
+	Methods  []MethodSpec
 	Tools    []ToolSpec
 	Context  []string
-	Identity Identity
+	Identity string
 }
 
 // Config holds agent configuration.
@@ -72,6 +73,7 @@ func New(o Organs, cfg Config) (*Agent, error) {
 		MaxToolOutput: cfg.MaxToolOutput,
 		MaxRetries:    cfg.MaxRetries,
 		System:        o.System,
+		Methods:       o.Methods,
 		Tools:         o.Tools,
 		Context:       o.Context,
 	}

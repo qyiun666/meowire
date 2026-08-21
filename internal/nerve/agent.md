@@ -16,11 +16,12 @@
 
 - `DecisionLoop{}.Cycle(ctx, *LoopContext, yield)`: pure orchestration — Think → Act → yield events
 - `LoopState`: StateIdle/StateThinking/StateActing/StatePaused(reserved)/StateDone/StateError
-- `LoopContext{CellID, Identity, Think, Act, Hooks, Sandbox, Budget, MaxRounds, MaxToolOutput, MaxRetries, State, Input, Plan, Context, System, Tools}`: all ports injected via fields
-- `Prompt{System, Identity, Tools, Context, Input, State, Plan}`: sole data package delivered to Thinker; Context = host-injected base + framework-appended tool feedback within cycle
+- `LoopContext{CellID, Identity string, Methods []MethodSpec, Think, Act, Hooks, Sandbox, Budget, MaxRounds, MaxToolOutput, MaxRetries, State, Input, Plan, Context, System, Tools}`: all ports injected via fields
+- `Prompt{System, Identity string, Methods []MethodSpec, Tools, Context, Input, State, Plan}`: sole data package delivered to Thinker; Context = host-injected base + framework-appended tool feedback within cycle
 - `Decision{Text, ToolCalls, Usage}`: Thinker output; non-empty ToolCalls triggers Act phase; Usage (nil = skip) is yielded as EventUsage
 - `Action{CellID, Call}` / `Effect{Result, Err}`: tool execution pair
-- `Identity{Name, Role, Traits, Methods}` / `MethodSpec{Name, Desc, Input, Output}`: gene projection
+- `Identity string`: identity description text, host composed (no structure enforced)
+- `MethodSpec{Name, Desc, Input, Output}`: built-in capability description (gene projection, describes only)
 - `ToolSpec{Name, Desc, Input, Output}`: host-defined tool specification
 - `Usage{Prompt, Completion, Total}`: token accounting; host accumulates via EventUsage events
 - `Event{Kind, Text, ToolCall, Effect, State, Err, Output, Usage}`: typed event from each loop iteration

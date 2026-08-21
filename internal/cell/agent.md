@@ -9,18 +9,18 @@
 
 ## Dependencies
 
-- nerve (DecisionLoop, Event, Identity, Hooks, Thinker, Effector, Sandbox, ContextBudget)
+- nerve (DecisionLoop, Event, Hooks, Thinker, Effector, Sandbox, ContextBudget, MethodSpec)
 - Go standard library only
 
 ## Interface Contract
 
 - `Cell`: minimal agent kernel
   - `ID string`: unique identifier
-  - `Identity nerve.Identity`: gene projection (injected into Prompt)
+  - `Identity string`: identity description text (host composed, injected into Prompt)
   - Required ports: `Think nerve.Thinker`, `Act nerve.Effector`
   - Optional ports: `Hooks *nerve.Hooks`, `Sandbox nerve.Sandbox`, `Budget *nerve.ContextBudget`
   - Config: `MaxRounds`, `MaxToolOutput`, `MaxRetries` (zero values use defaults)
-  - Host-injected fixed parts: `System string`, `Tools []nerve.ToolSpec`, `Context []string`
+  - Host-injected fixed parts: `System string`, `Methods []nerve.MethodSpec`, `Tools []nerve.ToolSpec`, `Context []string`
   - `Stimulate(ctx, text) iter.Seq[nerve.Event]`: runs DecisionLoop, yields events
   - `Close() error`: idempotent close (marks cell as closed)
   - `IsClosed() bool`: query close status

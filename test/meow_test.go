@@ -78,6 +78,7 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 		base.ID = o.ID
 	}
 	base.System = o.System
+	base.Methods = o.Methods
 	base.Tools = o.Tools
 	base.Context = o.Context
 	base.Identity = o.Identity
@@ -216,12 +217,13 @@ func TestDefaultID(t *testing.T) {
 	}
 }
 
-// TestFullOrgansWiring verifies Sandbox/Budget/Identity/Context reach the loop.
+// TestFullOrgansWiring verifies Sandbox/Budget/Identity/Methods/Context reach the loop.
 func TestFullOrgansWiring(t *testing.T) {
 	var (
 		sandboxCalled bool
 		trimmerCalled bool
-		gotIdentity   meowire.Identity
+		gotIdentity   string
+		gotMethods    []meowire.MethodSpec
 		firstCtx      []string
 	)
 	calls := 0
@@ -229,6 +231,7 @@ func TestFullOrgansWiring(t *testing.T) {
 		ID: "wired-agent",
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			gotIdentity = p.Identity
+			gotMethods = p.Methods
 			if calls == 0 {
 				firstCtx = p.Context
 			}
@@ -255,9 +258,10 @@ func TestFullOrgansWiring(t *testing.T) {
 			},
 		},
 		System:   "sys",
+		Methods:  []meowire.MethodSpec{{Name: "m1", Desc: "md"}},
 		Tools:    []meowire.ToolSpec{{Name: "t1", Desc: "d"}},
 		Context:  []string{"ctx1"},
-		Identity: meowire.Identity{Name: "wire", Role: "test"},
+		Identity: "wire",
 	}, meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -270,8 +274,11 @@ func TestFullOrgansWiring(t *testing.T) {
 	if !trimmerCalled {
 		t.Fatal("Budget.Trimmer should have been called")
 	}
-	if gotIdentity.Name != "wire" {
-		t.Fatalf("Identity = %+v, want Name=wire", gotIdentity)
+	if gotIdentity != "wire" {
+		t.Fatalf("Identity = %q, want %q", gotIdentity, "wire")
+	}
+	if len(gotMethods) != 1 || gotMethods[0].Name != "m1" {
+		t.Fatalf("Methods = %+v, want [m1]", gotMethods)
 	}
 	if len(firstCtx) != 1 || firstCtx[0] != "ctx1" {
 		t.Fatalf("first Think Context = %v, want [ctx1]", firstCtx)

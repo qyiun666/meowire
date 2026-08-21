@@ -9,7 +9,7 @@
 ## Dependencies
 
 - internal/cell (agent kernel)
-- internal/nerve (Event, ports, Identity, Hooks, Signal/Message)
+- internal/nerve (Event, ports, Hooks, MethodSpec, Signal/Message)
 - internal/synapse (inter-agent connections, re-exported errors)
 - internal/memory (Memory/Record/Query type aliases)
 - Go standard library only
@@ -26,7 +26,7 @@
 
 ## Interface Contract
 
-- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, System, Tools, Context, Identity}`: host port container; `New(o Organs, cfg Config) (*Agent, error)` — **all six ports required**, a missing port returns an error (no stubs, no default implementations)
+- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, System, Identity, Methods, Tools, Context}`: host port container; `New(o Organs, cfg Config) (*Agent, error)` — **all six ports required**, a missing port returns an error (no stubs, no default implementations)
 - `Config{MaxRounds, MaxToolOutput, MaxRetries}`: zero values fall back to defaults (8 rounds, no truncation, no retry)
 - `ID` empty defaults to "agent" (flat model: host gives each instance a unique ID for synapse routing/logs)
 - Facade methods are thin delegates: `Stimulate` → Cell.Stimulate (returns `iter.Seq[Event]`); Close → Cell.Close + host Closer; Close is idempotent
@@ -43,7 +43,7 @@
 - Streaming: host Thinker consumes LLM stream chunks and pushes them to its own channel (e.g. WebSocket); the event stream is an observation mirror of loop execution — EventText stays whole-segment, token deltas never enter it
 - ask_user: Effector.Act is synchronous; host blocks inside Act (e.g. PauseAskUser) and must monitor ctx.Done so cancellation interrupts the wait
 - Dynamic memory injection: Stimulate has no per-round context channel; per-round retrieval happens in Hooks.BeforeThink; host controls once-vs-every-round semantics with its own closure flag
-- Guards/emotion/plan: ContextBudget trims context before each Think (trimmer, not hard stop); MaxRetries retries Think only — tool-failure guards are host-side (Effector or AfterAct); emotion rides Identity.Traits into Thinker LLM params; Plan is a host-serialized string injected via BeforeThink and updated via AfterThink
+- Guards/emotion/plan: ContextBudget trims context before each Think (trimmer, not hard stop); MaxRetries retries Think only — tool-failure guards are host-side (Effector or AfterAct); identity/emotion is host-composed into the `Identity` string and rendered by the host Thinker; Plan is a host-serialized string injected via BeforeThink and updated via AfterThink
 - Sandbox: host membrane (tool security gate: allowlist/denylist, ask-confirm) maps to Sandbox.Allow, invoked before each Act; denial yields EventToolResult(Err) and the loop continues
 - Assembly only at composition root: components inside must not create dependencies
 - No stubs/sentinels: all six ports must be injected; there is no "minimal runnable" path

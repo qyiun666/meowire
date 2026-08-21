@@ -59,6 +59,22 @@ meowire (module root)
 | `Event` | events | Typed observation mirror of the loop |
 | `Synapse` / `Memory` | internal | Standalone reference contracts for hosts |
 
+## Installation
+
+```sh
+go get github.com/qyiun666/meowire@latest
+```
+
+Import the facade package — the sole public surface:
+
+```go
+import meowire "github.com/qyiun666/meowire/api"
+```
+
+For the full host-side integration contract — the six ports, field-by-field
+semantics, the event stream, and the pitfalls — see the
+[Host Integration Guide](docs/host-integration.en.md).
+
 ## Quick Start
 
 ```go
@@ -187,4 +203,5 @@ GOWORK=off go vet ./...
 | MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
+| Host Integration Guide | [docs/host-integration.en.md](docs/host-integration.en.md) |
 | Email | qyiun666@163.com |

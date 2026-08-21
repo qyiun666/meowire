@@ -17,7 +17,7 @@ import (
 // Cell is the minimal agent kernel: ID + ports + DecisionLoop.
 type Cell struct {
 	ID       string
-	Identity nerve.Identity
+	Identity string
 
 	// Required ports
 	Think nerve.Thinker
@@ -35,6 +35,7 @@ type Cell struct {
 
 	// Host-injected fixed parts
 	System  string
+	Methods []nerve.MethodSpec // Built-in capability description (describes only)
 	Tools   []nerve.ToolSpec
 	Context []string // Default context (host injected)
 
@@ -56,6 +57,7 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 		lc := &nerve.LoopContext{
 			CellID:        c.ID,
 			Identity:      c.Identity,
+			Methods:       slices.Clone(c.Methods),
 			Think:         c.Think,
 			Act:           c.Act,
 			Hooks:         c.Hooks,

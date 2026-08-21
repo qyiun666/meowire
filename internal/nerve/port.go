@@ -6,14 +6,6 @@ package nerve
 
 import "context"
 
-// Identity is the individual identity (gene projection, injected into Prompt for LLM self-awareness).
-type Identity struct {
-	Name    string
-	Role    string
-	Traits  map[string]string
-	Methods []MethodSpec
-}
-
 // MethodSpec is a method specification (gene Method capability projection, describes only).
 type MethodSpec struct {
 	Name   string
@@ -26,10 +18,11 @@ type MethodSpec struct {
 // The framework assembles it; the Thinker (LLM) makes decisions.
 type Prompt struct {
 	// Fixed part (set at construction, unchanged per cycle)
-	System   string     // System instructions (host injected)
-	Identity Identity   // Cell identity (gene projection)
-	Tools    []ToolSpec // Available tool list (host defined)
-	Context  []string   // Context (host injected base; framework appends tool feedback within cycle)
+	System   string       // System instructions (host injected)
+	Identity string       // Identity description text (host composed)
+	Methods  []MethodSpec // Built-in capability description (gene projection, describes only)
+	Tools    []ToolSpec   // Available tool list (host defined)
+	Context  []string     // Context (host injected base; framework appends tool feedback within cycle)
 
 	// Dynamic part (updated each round)
 	Input string // Current stimulus text

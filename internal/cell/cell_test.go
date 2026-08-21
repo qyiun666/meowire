@@ -17,7 +17,7 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 	t.Helper()
 	return &Cell{
 		ID:       "test-cell",
-		Identity: nerve.Identity{Name: "tester", Role: "test"},
+		Identity: "tester",
 		Think:    think,
 		Act:      act,
 	}
@@ -105,7 +105,7 @@ func TestCellCloseIdempotent(t *testing.T) {
 func TestCellStimulateNilThink(t *testing.T) {
 	c := &Cell{
 		ID:       "test-nil-think",
-		Identity: nerve.Identity{Name: "tester", Role: "test"},
+		Identity: "tester",
 		Think:    nil,
 		Act: testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
 			return &nerve.Effect{Result: "ok"}, nil
@@ -132,7 +132,7 @@ func TestCellStimulateNilThink(t *testing.T) {
 func TestCellStimulateNilAct(t *testing.T) {
 	c := &Cell{
 		ID:       "test-nil-act",
-		Identity: nerve.Identity{Name: "tester", Role: "test"},
+		Identity: "tester",
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
 			return &nerve.Decision{
 				Text:      "act",

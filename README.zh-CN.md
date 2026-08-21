@@ -56,6 +56,21 @@ meowire (模块根)
 | `Event` | 事件 | 循环的类型化观察镜像 |
 | `Synapse` / `Memory` | internal | 供宿主参考的独立契约 |
 
+## 安装
+
+```sh
+go get github.com/qyiun666/meowire@latest
+```
+
+导入门面包 —— 唯一对外表面：
+
+```go
+import meowire "github.com/qyiun666/meowire/api"
+```
+
+宿主侧完整集成契约 —— 六端口、逐字段语义、事件流与陷阱清单 —— 见
+[宿主集成指南](docs/host-integration.md)。
+
 ## 快速开始
 
 ```go
@@ -181,4 +196,5 @@ GOWORK=off go vet ./...
 | MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
+| 宿主集成指南 | [docs/host-integration.md](docs/host-integration.md) |
 | Email | qyiun666@163.com |

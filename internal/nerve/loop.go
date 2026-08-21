@@ -54,7 +54,10 @@ const DefaultMaxRounds = 8
 type LoopContext struct {
 	// Identity
 	CellID   string
-	Identity Identity
+	Identity string
+
+	// Built-in capability description (gene projection, describes only)
+	Methods []MethodSpec
 
 	// Required ports
 	Think Thinker
@@ -121,6 +124,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 		p := &Prompt{
 			System:   lc.System,
 			Identity: lc.Identity,
+			Methods:  lc.Methods,
 			Tools:    lc.Tools,
 			Context:  lc.Context,
 			Input:    lc.Input,
