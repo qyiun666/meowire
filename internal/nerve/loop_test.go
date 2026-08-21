@@ -191,7 +191,7 @@ func TestDecisionLoopHooks(t *testing.T) {
 				hookCalls = append(hookCalls, "BeforeAct")
 				return nil
 			},
-			AfterAct: func(ctx context.Context, a *Action, e *Effect) {
+			AfterAct: func(ctx context.Context, a *Action, e *Effect, err error) {
 				hookCalls = append(hookCalls, "AfterAct")
 			},
 			OnCycleEnd: func(ctx context.Context, output string) {
@@ -678,5 +678,305 @@ func TestEventUsage(t *testing.T) {
 	}
 	if events[3].Kind != EventState || events[3].State != StateDone {
 		t.Fatalf("events[3] = %+v, want EventState(StateDone)", events[3])
+	}
+}
+
+// TestDecisionLoopStimulateHooks verifies BeforeStimulate/AfterStimulate fire
+// exactly once on the normal path, in boundary order.
+func TestDecisionLoopStimulateHooks(t *testing.T) {
+	var hookCalls []string
+	var gotText, gotOutput string
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "hello",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "response"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				hookCalls = append(hookCalls, "BeforeStimulate")
+				gotText = p.Input
+				return nil
+			},
+			BeforeThink: func(ctx context.Context, p *Prompt) error {
+				hookCalls = append(hookCalls, "BeforeThink")
+				return nil
+			},
+			OnCycleEnd: func(ctx context.Context, output string) {
+				hookCalls = append(hookCalls, "OnCycleEnd")
+			},
+			AfterStimulate: func(ctx context.Context, output string) {
+				hookCalls = append(hookCalls, "AfterStimulate")
+				gotOutput = output
+			},
+		},
+	}
+	collectEvents(context.Background(), lc)
+
+	want := []string{"BeforeStimulate", "BeforeThink", "OnCycleEnd", "AfterStimulate"}
+	if len(hookCalls) != len(want) {
+		t.Fatalf("hook calls = %v, want %v", hookCalls, want)
+	}
+	for i, w := range want {
+		if hookCalls[i] != w {
+			t.Fatalf("hook[%d] = %q, want %q", i, hookCalls[i], w)
+		}
+	}
+	if gotText != "hello" {
+		t.Fatalf("BeforeStimulate text = %q, want %q", gotText, "hello")
+	}
+	if gotOutput != "response" {
+		t.Fatalf("AfterStimulate output = %q, want %q", gotOutput, "response")
+	}
+}
+
+// TestDecisionLoopStimulateHooksOnError verifies both boundary hooks fire
+// exactly once when the Thinker fails.
+func TestDecisionLoopStimulateHooksOnError(t *testing.T) {
+	var beforeCalls, afterCalls int
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "fail",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return nil, errors.New("thinker failed")
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				beforeCalls++
+				return nil
+			},
+			AfterStimulate: func(ctx context.Context, output string) {
+				afterCalls++
+			},
+		},
+	}
+	collectEvents(context.Background(), lc)
+
+	if beforeCalls != 1 {
+		t.Fatalf("BeforeStimulate calls = %d, want 1", beforeCalls)
+	}
+	if afterCalls != 1 {
+		t.Fatalf("AfterStimulate calls = %d, want 1", afterCalls)
+	}
+}
+
+// TestDecisionLoopStimulateHooksOnCanceledCtx verifies both boundary hooks
+// still fire exactly once when the context is already canceled at entry
+// (BeforeStimulate runs before the ctx check; AfterStimulate is deferred).
+func TestDecisionLoopStimulateHooksOnCanceledCtx(t *testing.T) {
+	var beforeCalls, afterCalls int
+	thinkCalls := 0
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "canceled",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			thinkCalls++
+			return &Decision{Text: "text"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				beforeCalls++
+				return nil
+			},
+			AfterStimulate: func(ctx context.Context, output string) {
+				afterCalls++
+			},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events := collectEvents(ctx, lc)
+
+	if beforeCalls != 1 {
+		t.Fatalf("BeforeStimulate calls = %d, want 1", beforeCalls)
+	}
+	if afterCalls != 1 {
+		t.Fatalf("AfterStimulate calls = %d, want 1", afterCalls)
+	}
+	if thinkCalls != 0 {
+		t.Fatalf("Think calls = %d, want 0 (cycle aborted before loop)", thinkCalls)
+	}
+	if len(events) < 2 || events[0].Kind != EventState || events[0].State != StateError {
+		t.Fatalf("events = %+v, want first event State(StateError)", events)
+	}
+}
+
+// TestDecisionLoopStimulateHooksOnAbort verifies AfterStimulate still runs
+// exactly once when the consumer stops early (yield=false).
+func TestDecisionLoopStimulateHooksOnAbort(t *testing.T) {
+	var afterCalls int
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "abort",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "text"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			AfterStimulate: func(ctx context.Context, output string) {
+				afterCalls++
+			},
+		},
+	}
+	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
+		return false // stop immediately
+	})
+	if afterCalls != 1 {
+		t.Fatalf("AfterStimulate calls = %d, want 1", afterCalls)
+	}
+}
+
+// TestDecisionLoopBeforeStimulateError verifies a BeforeStimulate error
+// terminates the Stimulate before any Think call.
+func TestDecisionLoopBeforeStimulateError(t *testing.T) {
+	thinkCalls := 0
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "blocked",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			thinkCalls++
+			return &Decision{Text: "unreachable"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				return errors.New("stimulate blocked")
+			},
+		},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	if thinkCalls != 0 {
+		t.Fatalf("Think calls = %d, want 0", thinkCalls)
+	}
+	// Expect: State(error), EventError
+	if len(events) != 2 {
+		t.Fatalf("events count = %d, want 2; events: %+v", len(events), events)
+	}
+	if events[0].Kind != EventState || events[0].State != StateError {
+		t.Fatalf("events[0] = %+v, want EventState(StateError)", events[0])
+	}
+	if events[1].Kind != EventError {
+		t.Fatalf("events[1] = %+v, want EventError", events[1])
+	}
+	if !strings.Contains(events[1].Err.Error(), "stimulate blocked") {
+		t.Fatalf("error = %v, want containing 'stimulate blocked'", events[1].Err)
+	}
+}
+
+// TestDecisionLoopBeforeStimulateMutatesPrompt verifies modifications made in
+// BeforeStimulate apply to every round of the Stimulate (content fields are
+// written back to LoopContext).
+func TestDecisionLoopBeforeStimulateMutatesPrompt(t *testing.T) {
+	var gotSystem, gotInput, gotPlan string
+	var gotTools []ToolSpec
+	var firstCtx, secondCtx []string
+	calls := 0
+	lc := &LoopContext{
+		CellID:    "c1",
+		Input:     "original-input",
+		MaxRounds: 3,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			gotSystem = p.System
+			gotInput = p.Input
+			gotPlan = p.Plan
+			gotTools = p.Tools
+			if calls == 1 {
+				firstCtx = append([]string{}, p.Context...)
+				return &Decision{
+					Text:      "act",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "fn"}},
+				}, nil
+			}
+			secondCtx = append([]string{}, p.Context...)
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				p.System = "injected-system"
+				p.Tools = []ToolSpec{{Name: "injected-tool"}}
+				p.Context = append(p.Context, "injected-history")
+				p.Input = "rewritten-input"
+				p.Plan = "injected-plan"
+				return nil
+			},
+		},
+	}
+	collectEvents(context.Background(), lc)
+
+	if gotSystem != "injected-system" {
+		t.Fatalf("System = %q, want %q", gotSystem, "injected-system")
+	}
+	if gotInput != "rewritten-input" {
+		t.Fatalf("Input = %q, want %q", gotInput, "rewritten-input")
+	}
+	if gotPlan != "injected-plan" {
+		t.Fatalf("Plan = %q, want %q", gotPlan, "injected-plan")
+	}
+	if len(gotTools) != 1 || gotTools[0].Name != "injected-tool" {
+		t.Fatalf("Tools = %+v, want [injected-tool]", gotTools)
+	}
+	if len(firstCtx) != 1 || firstCtx[0] != "injected-history" {
+		t.Fatalf("first round context = %v, want [injected-history]", firstCtx)
+	}
+	// Tool feedback is appended after round 1; the injected entry must persist.
+	found := false
+	for _, c := range secondCtx {
+		if c == "injected-history" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("second round context = %v, want it to contain 'injected-history'", secondCtx)
+	}
+}
+
+// TestDecisionLoopAfterActReceivesErr verifies AfterAct receives the tool
+// execution error.
+func TestDecisionLoopAfterActReceivesErr(t *testing.T) {
+	var gotErr error
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "fail",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{
+				Text:      "do-it",
+				ToolCalls: []ToolCall{{ID: "t1", Name: "boom"}},
+			}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return nil, errors.New("executor exploded")
+		}},
+		Hooks: &Hooks{
+			AfterAct: func(ctx context.Context, a *Action, e *Effect, err error) {
+				gotErr = err
+			},
+		},
+	}
+	collectEvents(context.Background(), lc)
+
+	if gotErr == nil {
+		t.Fatal("AfterAct err = nil, want non-nil executor error")
+	}
+	if !strings.Contains(gotErr.Error(), "executor exploded") {
+		t.Fatalf("AfterAct err = %v, want containing 'executor exploded'", gotErr)
 	}
 }

@@ -114,21 +114,25 @@ guarantees `Agent.Close` is idempotent (CAS); repeated calls have no side effect
 
 ```go
 type Hooks struct {
-    BeforeThink func(ctx context.Context, p *Prompt) error
-    AfterThink  func(ctx context.Context, d *Decision) error
-    BeforeAct   func(ctx context.Context, a *Action) error
-    AfterAct    func(ctx context.Context, a *Action, e *Effect)
-    OnError     func(ctx context.Context, err error)
-    OnCycleEnd  func(ctx context.Context, output string)
+    BeforeStimulate func(ctx context.Context, p *Prompt) error // start of a Stimulate; may edit all prototype content fields, written back for every round; error aborts the whole Stimulate
+    AfterStimulate  func(ctx context.Context, output string)     // end of a Stimulate (exactly once on all paths)
+    BeforeThink     func(ctx context.Context, p *Prompt) error
+    AfterThink      func(ctx context.Context, d *Decision) error
+    BeforeAct       func(ctx context.Context, a *Action) error
+    AfterAct        func(ctx context.Context, a *Action, e *Effect, err error) // err non-nil = effector failure
+    OnError         func(ctx context.Context, err error)
+    OnCycleEnd      func(ctx context.Context, output string)
 }
 ```
 
 | Field | Fires | Typical host use |
 |-------|-------|------------------|
+| `BeforeStimulate` | Start of each Stimulate, before any event | Turn-level memory Recall (one-shot injection: prototype content edits are written back to the loop for all rounds) |
+| `AfterStimulate` | End of each Stimulate (exactly once on all paths) | Turn-level memory Save, session settlement |
 | `BeforeThink` | Before each Think | Inject retrieved memory, update Plan |
 | `AfterThink` | After a successful Think | Serialize the Decision back into Plan/memory |
 | `BeforeAct` | Before each tool execution | Approval, rewrite tool arguments |
-| `AfterAct` | After tool execution | Tool logging, failure degradation |
+| `AfterAct` | After tool execution | Tool logging, failure degradation (`err` non-nil = effector failure) |
 | `OnError` | On unrecoverable error | Alerting |
 | `OnCycleEnd` | **Exactly once per cycle** (normal, error, and early-consumer-stop paths) | Settlement, persist final output |
 
@@ -402,7 +406,7 @@ hooksFor := func(id string) *meowire.Hooks {
 			hub.updateTask(id, TaskStatus{State: "thinking", LastText: d.Text})
 			return nil
 		},
-		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect) {
+		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
 			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
 		},
 		OnCycleEnd: func(ctx context.Context, output string) {

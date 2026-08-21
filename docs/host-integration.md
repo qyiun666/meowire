@@ -102,21 +102,25 @@ type Closer interface {
 
 ```go
 type Hooks struct {
-    BeforeThink func(ctx context.Context, p *Prompt) error
-    AfterThink  func(ctx context.Context, d *Decision) error
-    BeforeAct   func(ctx context.Context, a *Action) error
-    AfterAct    func(ctx context.Context, a *Action, e *Effect)
-    OnError     func(ctx context.Context, err error)
-    OnCycleEnd  func(ctx context.Context, output string)
+    BeforeStimulate func(ctx context.Context, p *Prompt) error // 一次 Stimulate 开始；可改原型全部内容字段，回写后全轮生效；error 终止整次 Stimulate
+    AfterStimulate  func(ctx context.Context, output string)     // 一次 Stimulate 结束（正常/错误/提前停止均恰好一次）
+    BeforeThink     func(ctx context.Context, p *Prompt) error
+    AfterThink      func(ctx context.Context, d *Decision) error
+    BeforeAct       func(ctx context.Context, a *Action) error
+    AfterAct        func(ctx context.Context, a *Action, e *Effect, err error) // err 非 nil = 执行器失败
+    OnError         func(ctx context.Context, err error)
+    OnCycleEnd      func(ctx context.Context, output string)
 }
 ```
 
 | 字段 | 触发时机 | 宿主典型用途 |
 |------|---------|-------------|
+| `BeforeStimulate` | 每次 Stimulate 开始、首事件前 | 回合级记忆 Recall（一次注入，全轮生效：改原型内容字段会回写循环） |
+| `AfterStimulate` | 每次 Stimulate 结束（三路径恰好一次） | 回合级记忆 Save、会话结算 |
 | `BeforeThink` | 每次 Think 前 | 动态注入检索记忆、更新 Plan |
 | `AfterThink` | Think 成功后 | 序列化 Decision 回存 Plan/记忆 |
 | `BeforeAct` | 每个工具执行前 | 审批、改写工具参数 |
-| `AfterAct` | 工具执行后 | 工具日志、失败降级 |
+| `AfterAct` | 工具执行后 | 工具日志、失败降级（`err` 非 nil 即执行器失败） |
 | `OnError` | 不可恢复错误时 | 告警上报 |
 | `OnCycleEnd` | **每轮恰好一次**（正常/错误/消费者提前停止三条路径都触发） | 结算、持久化最终输出 |
 
@@ -360,7 +364,7 @@ hooksFor := func(id string) *meowire.Hooks {
 			hub.updateTask(id, TaskStatus{State: "thinking", LastText: d.Text})
 			return nil
 		},
-		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect) {
+		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
 			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
 		},
 		OnCycleEnd: func(ctx context.Context, output string) {

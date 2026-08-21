@@ -50,7 +50,7 @@ meowire (模块根)
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | 纯编排：Think → Act → 产出事件 |
 | `Cell` | `internal/cell/cell.go` | 极简内核：ID + 端口 + 循环 |
 | `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
-| `Hooks` | 端口 | BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
+| `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用 |
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪上下文 |
 | `Event` | 事件 | 循环的类型化观察镜像 |

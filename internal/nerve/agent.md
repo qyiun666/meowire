@@ -26,7 +26,7 @@
 - `Usage{Prompt, Completion, Total}`: token accounting; host accumulates via EventUsage events
 - `Event{Kind, Text, ToolCall, Effect, State, Err, Output, Usage}`: typed event from each loop iteration
 - `EventKind`: EventText/EventToolCall/EventToolResult/EventState/EventDone/EventError/EventUsage
-- `Hooks{BeforeThink, AfterThink, BeforeAct, AfterAct, OnError, OnCycleEnd}`: interception points (all optional, nil = skip)
+- `Hooks{BeforeStimulate, AfterStimulate, BeforeThink, AfterThink, BeforeAct, AfterAct, OnError, OnCycleEnd}`: interception points (all optional, nil = skip); BeforeStimulate fires once before any event with a Prompt prototype — content fields (System/Identity/Methods/Tools/Context/Input/Plan) are written back to LoopContext and apply to every round, State is not written back, error aborts the whole Stimulate; AfterStimulate fires exactly once at cycle end (all paths); AfterAct receives the tool execution error (err non-nil = effector failure)
 - `Sandbox` interface: `Allow(ctx, Action) (bool, string, error)` — execution boundary
 - `ContextBudget{MaxTokens, Trimmer}`: context size limit, called before each Think
 - `Thinker` / `Effector` / `Closer`: host port interfaces (no stubs — host must provide all)
@@ -39,6 +39,8 @@
 - MaxRounds<=0 uses DefaultMaxRounds=8; round exhaustion with remaining ToolCalls yields ErrMaxRounds via emitError
 - Think retry: MaxRetries attempts, ctx cancellation returns immediately
 - Error paths are unified through emitError: State(StateError) → EventError → OnError (only on normal delivery); OnCycleEnd is guaranteed exactly once via Cycle defer (normal/error/abort)
+- Stimulate boundary hooks: BeforeStimulate/AfterStimulate fire exactly once per Stimulate — BeforeStimulate receives a Prompt prototype (Context is a shallow copy, so in-place edits or an early hook error never leak into lc) and its content fields are written back to LoopContext (one-shot injection applies to all rounds; State is loop-managed and not written back; error terminates via emitError); AfterStimulate runs in a nested defer after OnCycleEnd (normal/error/abort, survives an OnCycleEnd panic). BeforeStimulate runs before the ctx-cancellation check, so it fires exactly once even on a canceled context. Injected Context is subject to Budget.Trimmer like all loop context — hosts should size injections within MaxTokens.
+- AfterAct receives the raw tool err (nil on success); tool failure feedback still flows through toolFeedback into Context
 - Tool error feedback: Act err/Effect.Err/nil effect converted to `[name] error: ...` text, fed back as context for next round (does not terminate loop)
 - Sandbox check before each tool execution: denied → feedback `[denied: reason]`, continues loop
 - MaxToolOutput truncates tool feedback length (<=0 = no truncation); truncation keeps UTF-8 rune boundaries

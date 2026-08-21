@@ -53,7 +53,7 @@ meowire (module root)
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | Pure orchestration: Think → Act → yield |
 | `Cell` | `internal/cell/cell.go` | Minimal kernel: ID + ports + loop |
 | `Thinker` / `Effector` / `Closer` | ports | Host-provided capabilities |
-| `Hooks` | ports | BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
+| `Hooks` | ports | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | guard | Tool permission gate, invoked before each Act |
 | `ContextBudget` | guard | Trims context before each Think |
 | `Event` | events | Typed observation mirror of the loop |

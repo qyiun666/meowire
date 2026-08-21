@@ -72,3 +72,43 @@ func TestStimulateEventSequence(t *testing.T) {
 		t.Fatalf("events[3].Output = %q, want %q", events[3].Output, "final-output")
 	}
 }
+
+// TestStimulateBoundaryHooks verifies BeforeStimulate/AfterStimulate fire
+// exactly once per Stimulate with the input text and final output.
+func TestStimulateBoundaryHooks(t *testing.T) {
+	var beforeCalls, afterCalls int
+	var gotText, gotOutput string
+	a, err := meowire.New(testOrgans(meowire.Organs{
+		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			return &meowire.Decision{Text: "final-output"}, nil
+		}},
+		Hooks: &meowire.Hooks{
+			BeforeStimulate: func(ctx context.Context, p *meowire.Prompt) error {
+				beforeCalls++
+				gotText = p.Input
+				return nil
+			},
+			AfterStimulate: func(ctx context.Context, output string) {
+				afterCalls++
+				gotOutput = output
+			},
+		},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for range a.Stimulate(context.Background(), "input-text") {
+	}
+	if beforeCalls != 1 {
+		t.Fatalf("BeforeStimulate calls = %d, want 1", beforeCalls)
+	}
+	if afterCalls != 1 {
+		t.Fatalf("AfterStimulate calls = %d, want 1", afterCalls)
+	}
+	if gotText != "input-text" {
+		t.Fatalf("BeforeStimulate text = %q, want %q", gotText, "input-text")
+	}
+	if gotOutput != "final-output" {
+		t.Fatalf("AfterStimulate output = %q, want %q", gotOutput, "final-output")
+	}
+}

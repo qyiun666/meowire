@@ -95,11 +95,28 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 	out.Grow(256)
 	var finalOutput string
 
-	// OnCycleEnd is guaranteed exactly once per Cycle — on normal completion,
-	// error path, or early consumer stop (yield=false).
-	defer func() { hookOnCycleEnd(ctx, lc, finalOutput) }()
+	// OnCycleEnd and AfterStimulate are guaranteed exactly once per Cycle —
+	// on normal completion, error path, or early consumer stop (yield=false).
+	// AfterStimulate is protected from an OnCycleEnd panic via a nested defer.
+	defer func() {
+		defer func() { hookAfterStimulate(ctx, lc, finalOutput) }()
+		hookOnCycleEnd(ctx, lc, finalOutput)
+	}()
 
 	hadToolCalls := false
+
+	// BeforeStimulate hook: once per Stimulate, before any event is yielded.
+	// An error terminates the whole Stimulate without entering the loop.
+	// It runs before the ctx check so it fires exactly once even on a
+	// canceled context (AfterStimulate is already guaranteed by the defer).
+	if err := hookBeforeStimulate(ctx, lc); err != nil {
+		emitError(ctx, lc, yield, err)
+		return
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		emitError(ctx, lc, yield, fmt.Errorf("nerve: cycle: %w", cerr))
+		return
+	}
 
 	var round int
 	for round = 1; round <= maxRounds; round++ {
@@ -210,7 +227,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 			fb := toolFeedback(tc, eff, err, lc.MaxToolOutput)
 
 			// AfterAct hook
-			hookAfterAct(ctx, lc, &act, eff)
+			hookAfterAct(ctx, lc, &act, eff, err)
 
 			// Append feedback to context
 			lc.Context = append(lc.Context, fb)
@@ -330,11 +347,11 @@ func hookBeforeAct(ctx context.Context, lc *LoopContext, a *Action) error {
 }
 
 // hookAfterAct calls Hooks.AfterAct if set.
-func hookAfterAct(ctx context.Context, lc *LoopContext, a *Action, e *Effect) {
+func hookAfterAct(ctx context.Context, lc *LoopContext, a *Action, e *Effect, err error) {
 	if lc.Hooks == nil || lc.Hooks.AfterAct == nil {
 		return
 	}
-	lc.Hooks.AfterAct(ctx, a, e)
+	lc.Hooks.AfterAct(ctx, a, e, err)
 }
 
 // hookOnCycleEnd calls Hooks.OnCycleEnd if set.
@@ -343,6 +360,49 @@ func hookOnCycleEnd(ctx context.Context, lc *LoopContext, output string) {
 		return
 	}
 	lc.Hooks.OnCycleEnd(ctx, output)
+}
+
+// hookBeforeStimulate calls Hooks.BeforeStimulate if set.
+// The hook receives a Prompt prototype; its content fields are written back
+// to the LoopContext after the call, so the modifications apply to every
+// round of the Stimulate (State is loop-managed and not written back).
+func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
+	if lc.Hooks == nil || lc.Hooks.BeforeStimulate == nil {
+		return nil
+	}
+	proto := &Prompt{
+		System:   lc.System,
+		Identity: lc.Identity,
+		Methods:  lc.Methods,
+		Tools:    lc.Tools,
+		// Shallow copy: the prototype gets its own backing array so that
+		// in-place mutations (or an early hook error) never leak into lc.
+		// The write-back below then adopts the prototype's slice wholesale.
+		Context: append([]string(nil), lc.Context...),
+		Input:   lc.Input,
+		Plan:    lc.Plan,
+		State:   lc.State.String(),
+	}
+	if err := lc.Hooks.BeforeStimulate(ctx, proto); err != nil {
+		return fmt.Errorf("nerve.hookBeforeStimulate: %w", err)
+	}
+	// Write back content fields (State is overwritten by the loop each round).
+	lc.System = proto.System
+	lc.Identity = proto.Identity
+	lc.Methods = proto.Methods
+	lc.Tools = proto.Tools
+	lc.Context = proto.Context
+	lc.Input = proto.Input
+	lc.Plan = proto.Plan
+	return nil
+}
+
+// hookAfterStimulate calls Hooks.AfterStimulate if set.
+func hookAfterStimulate(ctx context.Context, lc *LoopContext, output string) {
+	if lc.Hooks == nil || lc.Hooks.AfterStimulate == nil {
+		return
+	}
+	lc.Hooks.AfterStimulate(ctx, output)
 }
 
 // emitError sets the error state, yields EventState(StateError) + EventError,
