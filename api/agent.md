@@ -26,13 +26,14 @@
 
 ## Interface Contract
 
-- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, System, Identity, Methods, Tools, Context}`: host port container — **all six ports required**, a missing port returns an error (no stubs, no default implementations)
-- `Blueprint{Organs, Config, Strict}`: host assembly blueprint instance; define once, `New` many times. `New(b Blueprint) (*Agent, error)` — error-level findings (missing ports) always block; `Strict: true` also blocks warn-level findings (half-wired hook pairs, incomplete memory/plan paths); info findings never block
+- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, System, Identity, Methods, Tools, Context}`: host port container — **all ports required, every hook callback required** (H1–H8: explicit no-op, not absence), a missing port or callback returns an error (no stubs, no default implementations)
+- `Blueprint{Organs, Config}`: host assembly blueprint instance; define once, `New` many times. `New(b Blueprint) (*Agent, error)` — error-level findings (missing ports, incomplete ports) always block; info findings never block. No Strict flag: every wiring point is required, so there are no warn-level findings to promote
+- `FullHooks(h Hooks) *Hooks`: assembly helper — returns a copy with every nil callback filled by an explicit no-op; hosts declare only the hooks they need
 - `Config{MaxRounds, MaxToolOutput, MaxRetries, ToolTimeout, ToolMaxRetries}`: zero values fall back to defaults (8 rounds, no truncation, no retry, no per-tool timeout/retry)
 - `ID` empty defaults to "agent" (flat model: host gives each instance a unique ID for synapse routing/logs)
 - Facade methods are thin delegates: `Stimulate` → Cell.Stimulate (returns `iter.Seq[Event]`); Close → Cell.Close + host Closer; Close is idempotent
 - `Pause()` / `Resume()`: Agent-level pause control — idempotent, concurrency-safe, no-op after Close; takes effect at the next gap point (before each Think / tool execution), yields EventState(StatePaused), keeps in-cycle state until resumed
-- `Replace(slot, port) (any, error)`: dynamic wiring — runtime port swap (SlotThink/SlotAct/SlotSandbox/SlotBudget/SlotHooks); takes effect at the next Stimulate (in-flight Stimulate keeps its ports); returns the previous port; concurrency-safe; no-op after Close; Closer/PauseGate never swappable
+- `Replace(slot, port) (any, error)`: dynamic wiring — runtime port swap (SlotThink/SlotAct/SlotSandbox/SlotBudget/SlotHooks); takes effect at the next Stimulate (in-flight Stimulate keeps its ports); returns the previous port; concurrency-safe; no-op after Close; **rejects nil/incomplete ports** (Budget needs Trimmer+MaxTokens, Hooks needs all eight callbacks); Closer/PauseGate never swappable
 - `AgentCard(o Organs) ([]byte, error)`: A2A-style capability card (JSON name/description/skills) projected from ID/Identity/Methods; publish at /.well-known/agent-card.json for agent discovery
 - After Close, Stimulate returns ErrCellClosed
 - Errors: ErrCellClosed defined here; synapse errors (ErrNoTarget/ErrNotLinked/ErrTargetBusy) re-exported via errors.go
@@ -43,18 +44,21 @@
 - `WiringDiagram(o Organs) []Slot`: extracts actual assembly state (filled/unwired) from Organs — no host registration needed; built-ins always filled
 - `BuildGraph(o Organs) WiringGraph`: assembled graph — canonical nodes + slot edges with filled state
 - `SlotsByTarget(o Organs, targetID) []Slot`: **find by function, not by port** — who touches a data object? e.g. Context → P6 (trim), H3 (replace), F1 (append)
-- `Validate(o Organs, cfg Config) []Issue`: blueprint × assembly comparison. Levels: error (required slot missing), warn (half-wired hook pairs H1↔H2/H3↔H4/H5↔H6; memory path = H3 without configured ContextBudget trimmer; plan path = H4 without H3), info (empty Identity/Tools/Context, MaxRounds<=0 default)
+- `Validate(o Organs, cfg Config) []Issue`: blueprint × assembly comparison. Levels: error (required slot missing or incomplete — ContextBudget without Trimmer/MaxTokens), info (empty Identity/Tools/Context, MaxRounds<=0 default). No warn level: a missing wiring point is a missing organ — an error
 - `RenderDiagram(o Organs) string`: ASCII wiring graph (nodes section, then one edge per line with [x]/[ ] mark and -> target node)
 - `RenderJSON(o Organs) ([]byte, error)`: machine-readable counterpart — marshals the assembled graph (nodes + slots with filled state) as indented JSON
-- Result types: `Slot{Wire WirePoint, Filled bool}` (blueprint entry + filled state), `Issue{ID, Level, Wire, Msg string}` (Validate finding; `Level` ∈ error/warn/info), `WiringGraph{Nodes []WireNode, Slots []Slot}` (assembled graph), `IssueLevel` constants `LevelError` / `LevelWarn` / `LevelInfo`
-- `New` rejects error-level findings always (missing ports, joined via errors.Join); with `Blueprint.Strict` warn findings also reject; hosts surface warn/info findings by calling Validate at assembly/test time
-- Single-sided hooks are legal (e.g. H3-only memory injection); the warn is advisory, not a hard error
+- `BuildComposite(ctx, o Organs, syn Synapse) (CompositeGraph, error)`: unified graph view — internal subgraph (nodes+slots) merged with the live synapse graph (external agents + sorted synaptic edges); syn==nil renders internal-only
+- `RenderComposite(ctx, o Organs, syn Synapse) (string, error)`: ASCII render of the composite (weak synapses w<0.3 flagged `! weak` for pruning review)
+- `RenderCompositeJSON(ctx, o Organs, syn Synapse) ([]byte, error)`: indented JSON counterpart (colony-wide observability snapshot)
+- Result types: `Slot{Wire WirePoint, Filled bool}` (blueprint entry + filled state), `Issue{ID, Level, Wire, Msg string}` (Validate finding; `Level` ∈ error/info), `WiringGraph{Nodes []WireNode, Slots []Slot}` (assembled graph), `IssueLevel` constants `LevelError` / `LevelInfo`
+- `New` rejects error-level findings always (missing/incomplete ports, joined via errors.Join); info findings never block; hosts surface them by calling Validate at assembly/test time
 
 ## Key Decisions
 
 - Flat model: one Agent = one kernel; host manages multiple instances for multi-agent
 - Sub-agent = host tool pattern (spawn_agent tool), not framework-level nesting
 - Multi-agent messaging = host tool pattern (send_message tool over synapse.Fire); resistance yields as EventToolResult feedback, loop continues
+- Synapse construction at the facade: `NewDirect(r Resolver, initial ...Edge)` re-exported (initial = persisted graph restore); reference learning rules live in internal/synapse (host-side, framework never auto-applies)
 - Synapse is a plastic graph since 1.1.1: `Link(ctx, from, to, weight)` / `Unlink` / `Reinforce(ctx, from, to, delta)` / `Fire` / `Edges(ctx, from)`; `Edge{From, To, Weight, Fired}` re-exported; persistence loop: `Edges(ctx, "")` export → host stores → `NewDirect(resolver, restored...)` restore (host-domain assembly, Agent.New unaware)
 - Signal carries `Status TaskStatus` (A2A-style: submitted/working/needs-input/completed/failed/cancelled) for end-to-end task lifecycle tracking
 - History managed by host (MemHop): host controls context accumulation via Organs.Context

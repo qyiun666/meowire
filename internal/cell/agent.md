@@ -22,7 +22,7 @@
   - Config: `MaxRounds`, `MaxToolOutput`, `MaxRetries`, `ToolTimeout`, `ToolMaxRetries` (zero values use defaults / disabled)
   - Host-injected fixed parts: `System string`, `Methods []nerve.MethodSpec`, `Tools []nerve.ToolSpec`, `Context []string`
   - `Stimulate(ctx, text) iter.Seq[nerve.Event]`: runs DecisionLoop, yields events; snapshots ports under the wire lock, so a concurrent Replace takes effect at the next Stimulate
-  - `Replace(slot string, port any) (any, error)`: dynamic wiring — swaps think/act/sandbox/budget/hooks at runtime; returns the previous port; takes effect at the next Stimulate; concurrency-safe (wireMu); no-op after Close; unknown slot / wrong port type errors; Closer/PauseGate not swappable
+  - `Replace(slot string, port any) (any, error)`: dynamic wiring — swaps think/act/sandbox/budget/hooks at runtime; returns the previous port; takes effect at the next Stimulate; concurrency-safe (wireMu); no-op after Close; unknown slot / wrong port type errors; **rejects nil/incomplete ports** (Budget needs Trimmer+MaxTokens via completeHooks for Hooks); Closer/PauseGate not swappable
   - `Close() error`: idempotent close (marks cell as closed)
   - `IsClosed() bool`: query close status
 
@@ -41,6 +41,6 @@
 - Cell does not manage pumps, inboxes, or signal routing (those are host responsibilities in flat model)
 - Host ports must respect ctx (long operations must monitor ctx.Done)
 - Stimulate creates a fresh LoopContext per invocation (no state carried between calls)
-- Replace is the plasticity counterpart of Blueprint assembly: it mutates the cell's port fields under wireMu; in-flight Stimulates keep the ports they snapshotted
+- Replace is the plasticity counterpart of Blueprint assembly: it mutates the cell's port fields under wireMu; in-flight Stimulates keep the ports they snapshotted; since 1.2.0 it rejects nil/incomplete ports (a missing organ cannot be swapped in)
 - Stimulate iterator abort = abandon the round; the tool at the abort point does not execute
 - Context and Tools slices are copied on each Stimulate to prevent mutation across calls

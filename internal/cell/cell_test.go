@@ -12,7 +12,10 @@ import (
 	"github.com/qyiun666/meowire/internal/testutil"
 )
 
-// newTestCell creates a Cell with mock ports for testing.
+// newTestCell creates a Cell with mock ports for testing. Hooks/Sandbox/
+// Budget are required ports — the cell test helper fills no-op defaults
+// (the api assembly is where requiredness is enforced; cell tests focus on
+// the kernel behavior).
 func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 	t.Helper()
 	return &Cell{
@@ -20,8 +23,32 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 		Identity: "tester",
 		Think:    think,
 		Act:      act,
+		Hooks: &nerve.Hooks{
+			BeforeStimulate: func(ctx context.Context, p *nerve.Prompt) error { return nil },
+			AfterStimulate:  func(ctx context.Context, output string) {},
+			BeforeThink:     func(ctx context.Context, p *nerve.Prompt) error { return nil },
+			AfterThink:      func(ctx context.Context, d *nerve.Decision) error { return nil },
+			BeforeAct:       func(ctx context.Context, a *nerve.Action) error { return nil },
+			AfterAct:        func(ctx context.Context, a *nerve.Action, e *nerve.Effect, err error) {},
+			OnError:         func(ctx context.Context, err error) {},
+			OnCycleEnd:      func(ctx context.Context, output string) {},
+		},
+		Sandbox: testSandbox{},
+		Budget: &nerve.ContextBudget{
+			MaxTokens: 100,
+			Trimmer:   func(c []string, _ int) []string { return c },
+		},
 	}
 }
+
+// testSandbox allows every action (cell-level test stub).
+type testSandbox struct{}
+
+func (testSandbox) Allow(ctx context.Context, a nerve.Action) (bool, string, error) {
+	return true, "", nil
+}
+
+func (testSandbox) Bounds() string { return "test" }
 
 // TestCellStimulate verifies basic event flow: State→Text→Done.
 func TestCellStimulate(t *testing.T) {

@@ -46,64 +46,99 @@ func (stubSandbox) Bounds() string                                            { 
 
 // fullOrgans returns an Organs with all six required ports wired and the
 // common hook pairs present, plus a working ContextBudget trimmer.
+// fullHooks returns a Hooks with all eight required callbacks set (no-ops).
+func fullHooks() *Hooks {
+	return &Hooks{
+		BeforeStimulate: func(ctx context.Context, p *Prompt) error { return nil },
+		AfterStimulate:  func(ctx context.Context, output string) {},
+		BeforeThink:     func(ctx context.Context, p *Prompt) error { return nil },
+		AfterThink:      func(ctx context.Context, d *Decision) error { return nil },
+		BeforeAct:       func(ctx context.Context, a *Action) error { return nil },
+		AfterAct:        func(ctx context.Context, a *Action, e *Effect, err error) {},
+		OnError:         func(ctx context.Context, err error) {},
+		OnCycleEnd:      func(ctx context.Context, output string) {},
+	}
+}
+
 func fullOrgans() Organs {
 	return Organs{
 		Think:   stubThinker{},
 		Act:     stubEffector{},
 		Closer:  stubCloser{},
-		Hooks:   &Hooks{},
+		Hooks:   fullHooks(),
 		Sandbox: stubSandbox{},
 		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }},
 	}
 }
 
-// TestWiringDiagramFull: a complete assembly fills every required port and
-// the framework built-ins; hooks remain unwired until set.
+// TestWiringDiagramFull: a complete assembly fills every slot — the six
+// ports, the eight required hooks and the framework built-ins.
 func TestWiringDiagramFull(t *testing.T) {
 	slots := WiringDiagram(fullOrgans())
 	byID := make(map[string]Slot, len(slots))
 	for _, s := range slots {
 		byID[s.Wire.ID] = s
 	}
-	for _, id := range []string{"P1", "P2", "P3", "P4", "P5", "P6", "F1", "G1"} {
+	for _, id := range []string{"P1", "P2", "P3", "P4", "P5", "P6", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "F1", "G1"} {
 		if !byID[id].Filled {
 			t.Errorf("slot %s should be filled", id)
 		}
 	}
-	if byID["H3"].Filled {
-		t.Error("H3 should be unwired by default")
-	}
 }
 
-// TestWiringDiagramHookLevel: hook slots report filled only when the Hooks
-// container and the specific callback are both present.
+// TestWiringDiagramHookLevel: hook slots report filled only when the
+// specific callback is present; a missing callback leaves its slot unwired
+// (which Validate reports as an error — no optional hooks).
 func TestWiringDiagramHookLevel(t *testing.T) {
 	o := fullOrgans()
-	o.Hooks = &Hooks{BeforeThink: func(ctx context.Context, p *Prompt) error { return nil }}
+	o.Hooks = fullHooks()
+	o.Hooks.BeforeThink = nil
 	byID := map[string]Slot{}
 	for _, s := range WiringDiagram(o) {
 		byID[s.Wire.ID] = s
 	}
-	if !byID["H3"].Filled {
-		t.Error("H3 should be filled when BeforeThink is set")
+	if byID["H3"].Filled {
+		t.Error("H3 should be unwired when BeforeThink is nil")
 	}
-	if byID["H4"].Filled {
-		t.Error("H4 should stay unwired when AfterThink is not set")
-	}
-}
-
-// TestValidateFullAssemblyClean: a complete assembly yields no error/warn
-// findings (info findings for empty Identity/Tools are expected and allowed).
-func TestValidateFullAssemblyClean(t *testing.T) {
-	for _, is := range Validate(fullOrgans(), Config{}) {
-		if is.Level == LevelError || is.Level == LevelWarn {
-			t.Errorf("unexpected %s finding: %s", is.Level, is.Msg)
+	for _, id := range []string{"H1", "H2", "H4", "H5", "H6", "H7", "H8"} {
+		if !byID[id].Filled {
+			t.Errorf("slot %s should stay filled when its own callback is present", id)
 		}
 	}
 }
 
-// TestValidateRequiredMissing: every missing required port surfaces an
-// error-level finding naming the port.
+// TestValidateFullAssemblyClean: a complete assembly yields no error
+// findings (info findings for empty Identity/Tools are expected and allowed).
+func TestValidateFullAssemblyClean(t *testing.T) {
+	for _, is := range Validate(fullOrgans(), Config{}) {
+		if is.Level == LevelError {
+			t.Errorf("unexpected error finding: %s", is.Msg)
+		}
+	}
+}
+
+// TestFullHooks: the helper fills every nil callback with an explicit no-op
+// while keeping the declared ones; the result passes assembly validation.
+func TestFullHooks(t *testing.T) {
+	declared := func(ctx context.Context, p *Prompt) error { return nil }
+	h := FullHooks(Hooks{BeforeThink: declared})
+	if h.BeforeThink == nil {
+		t.Fatal("declared BeforeThink lost")
+	}
+	if h.AfterThink == nil || h.OnCycleEnd == nil || h.BeforeStimulate == nil {
+		t.Fatal("missing callbacks should be filled with no-ops")
+	}
+	o := fullOrgans()
+	o.Hooks = h
+	for _, is := range Validate(o, Config{}) {
+		if is.Level == LevelError {
+			t.Errorf("FullHooks assembly should be clean, got: %s", is.Msg)
+		}
+	}
+}
+
+// TestValidateRequiredMissing: every missing required slot surfaces an
+// error-level finding naming the port — including every hook callback.
 func TestValidateRequiredMissing(t *testing.T) {
 	cases := []struct {
 		name string
@@ -115,6 +150,8 @@ func TestValidateRequiredMissing(t *testing.T) {
 		{"Hooks", func(o *Organs) { o.Hooks = nil }},
 		{"Sandbox", func(o *Organs) { o.Sandbox = nil }},
 		{"Budget", func(o *Organs) { o.Budget = nil }},
+		{"BeforeThink", func(o *Organs) { o.Hooks.BeforeThink = nil }},
+		{"OnCycleEnd", func(o *Organs) { o.Hooks.OnCycleEnd = nil }},
 	}
 	for _, c := range cases {
 		o := fullOrgans()
@@ -131,52 +168,36 @@ func TestValidateRequiredMissing(t *testing.T) {
 	}
 }
 
-// TestValidateHalfWiredPairs: a Before hook without its After counterpart
-// (and the reverse) surfaces a warn finding; wiring both clears it.
-func TestValidateHalfWiredPairs(t *testing.T) {
+// TestValidateIncompleteHook: any missing hook callback is an error — there
+// are no optional wiring points (explicit no-op, not absence).
+func TestValidateIncompleteHook(t *testing.T) {
 	o := fullOrgans()
-	o.Hooks = &Hooks{BeforeThink: func(ctx context.Context, p *Prompt) error { return nil }}
-	warns := countLevel(Validate(o, Config{}), LevelWarn)
-	if warns == 0 {
-		t.Fatal("half-wired H3/H4 pair should warn")
-	}
-
-	o.Hooks = &Hooks{
-		BeforeThink: func(ctx context.Context, p *Prompt) error { return nil },
-		AfterThink:  func(ctx context.Context, d *Decision) error { return nil },
-	}
+	o.Hooks.AfterThink = nil
+	found := false
 	for _, is := range Validate(o, Config{}) {
-		if is.Level == LevelWarn && is.Wire == "H3" {
-			t.Fatalf("wired pair still warns: %s", is.Msg)
+		if is.Level == LevelError && strings.Contains(is.Msg, "AfterThink") {
+			found = true
 		}
+	}
+	if !found {
+		t.Fatal("missing AfterThink should surface an error finding")
 	}
 }
 
-// TestValidateMemoryPath: BeforeThink without a configured ContextBudget
-// trimmer warns (retrieval may overflow the context window).
-func TestValidateMemoryPath(t *testing.T) {
+// TestValidateIncompleteBudget: a Budget without a Trimmer or MaxTokens is
+// an error — a budget that does not trim is not a budget.
+func TestValidateIncompleteBudget(t *testing.T) {
 	o := fullOrgans()
-	o.Hooks = &Hooks{BeforeThink: func(ctx context.Context, p *Prompt) error { return nil }}
 	o.Budget = &ContextBudget{} // no trimmer, no MaxTokens
+	found := false
 	for _, is := range Validate(o, Config{}) {
-		if is.Level == LevelWarn && strings.Contains(is.Msg, "trimmer") {
-			return
+		if is.Level == LevelError && strings.Contains(is.Msg, "Trimmer") {
+			found = true
 		}
 	}
-	t.Fatal("memory path with unconfigured trimmer should warn")
-}
-
-// TestValidatePlanPath: AfterThink without BeforeThink warns because Plan
-// updates cannot reach the prompt.
-func TestValidatePlanPath(t *testing.T) {
-	o := fullOrgans()
-	o.Hooks = &Hooks{AfterThink: func(ctx context.Context, d *Decision) error { return nil }}
-	for _, is := range Validate(o, Config{}) {
-		if is.Level == LevelWarn && is.Wire == "H4" {
-			return
-		}
+	if !found {
+		t.Fatal("incomplete ContextBudget should surface an error finding")
 	}
-	t.Fatal("AfterThink without BeforeThink should warn")
 }
 
 // TestValidateInfoDefaults: empty Identity/Tools/Context and default rounds

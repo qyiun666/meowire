@@ -57,11 +57,30 @@ type (
 type (
 	Synapse     = synapse.Synapse
 	Edge        = synapse.Edge
+	Resolver    = synapse.Resolver
 	Signal      = nerve.Signal
 	SignalKind  = nerve.SignalKind
 	TaskStatus  = nerve.TaskStatus
 	Message     = nerve.Message
 	MessageRole = nerve.MessageRole
+)
+
+// NewDirect creates the reference Direct synapse (connection-table with
+// Resolver-based delivery). r may be nil until SetResolver is called;
+// initial restores a previously exported graph (host persistence round-trip).
+func NewDirect(r Resolver, initial ...Edge) Synapse { return synapse.NewDirect(r, initial...) }
+
+// STDPParams tunes the reference STDP learning rule (host-side learning;
+// the framework never applies learning rules itself).
+type STDPParams = synapse.STDPParams
+
+// Reference learning rules (host-callable plasticity loops; the framework
+// stores state and never decides when to learn).
+var (
+	Hebbian     = synapse.Hebbian
+	STDP        = synapse.STDP
+	Prune       = synapse.Prune
+	HebbianFire = synapse.HebbianFire
 )
 
 // Wiring blueprint types (Connectome / WiringDiagram / Validate).

@@ -27,10 +27,10 @@
 - `Usage{Prompt, Completion, Total}`: token accounting; host accumulates via EventUsage events
 - `Event{Kind, Text, ToolCall, Effect, State, Err, Output, Usage, Verdict}`: typed event from each loop iteration
 - `EventKind`: EventText/EventToolCall/EventToolResult/EventState/EventDone/EventError/EventUsage/EventSandbox
-- `SandboxVerdict{CellID string, Call ToolCall, Allowed bool, Reason string, Err error}`: audit record carried by EventSandbox — one verdict per tool execution attempt of a configured sandbox (no sandbox = no verdict)
-- `Hooks{BeforeStimulate, AfterStimulate, BeforeThink, AfterThink, BeforeAct, AfterAct, OnError, OnCycleEnd}`: interception points (all optional, nil = skip); BeforeStimulate fires once before any event with a Prompt prototype — content fields (System/Identity/Methods/Tools/Context/Input/Plan) are written back to LoopContext and apply to every round, State is not written back, error aborts the whole Stimulate; AfterStimulate fires exactly once at cycle end (all paths); AfterAct receives the tool execution error (err non-nil = effector failure)
-- `Sandbox` interface: `Allow(ctx, Action) (bool, string, error)` + `Bounds() string` — execution boundary; Allow checked before each tool execution, Bounds snapshotted once per Stimulate before the BeforeStimulate hook and carried read-only on the Prompt prototype (hooks may read it but cannot override it — not written back)
-- `ContextBudget{MaxTokens, Trimmer}`: context size limit, called before each Think
+- `SandboxVerdict{CellID string, Call ToolCall, Allowed bool, Reason string, Err error}`: audit record carried by EventSandbox — one verdict per tool execution (the membrane is required, so every execution is audited)
+- `Hooks{BeforeStimulate, AfterStimulate, BeforeThink, AfterThink, BeforeAct, AfterAct, OnError, OnCycleEnd}`: interception points (**all eight required since 1.2.0 — explicit no-op, not absence; a nil callback fails assembly**); BeforeStimulate fires once before any event with a Prompt prototype — content fields (System/Identity/Methods/Tools/Context/Input/Plan) are written back to LoopContext and apply to every round, State is not written back, error aborts the whole Stimulate; AfterStimulate fires exactly once at cycle end (all paths); AfterAct receives the tool execution error (err non-nil = effector failure)
+- `Sandbox` interface: `Allow(ctx, Action) (bool, string, error)` + `Bounds() string` — **required membrane (since 1.2.0 the loop never tolerates nil)**: every tool execution passes Allow (denied → `[denied: reason]` feedback, loop continues), every decision first yields EventSandbox (allowed or denied) as the audit record; Bounds snapshotted once per Stimulate before the BeforeStimulate hook and carried read-only on the Prompt prototype (hooks may read it but cannot override it — not written back)
+- `ContextBudget{MaxTokens, Trimmer}`: **required regulator**: Trimmer called before each Think with MaxTokens; a nil Trimmer or MaxTokens <= 0 fails assembly (a budget that does not trim is not a budget)
 - `Thinker` / `Effector` / `Closer`: host port interfaces (no stubs — host must provide all)
 - `Signal{ID, From, To, Kind, Status, Payload, ErrPayload}`: inter-individual message carrier (host-level type, framework does not consume)
 - `SignalKind`: KindStimulus/KindResponse/KindNotice (host-side routing semantics)
@@ -46,7 +46,7 @@
 - Stimulate boundary hooks: BeforeStimulate/AfterStimulate fire exactly once per Stimulate — BeforeStimulate receives a Prompt prototype (Context is a shallow copy, so in-place edits or an early hook error never leak into lc) and its content fields are written back to LoopContext (one-shot injection applies to all rounds; State is loop-managed and not written back; error terminates via emitError); AfterStimulate runs in a nested defer after OnCycleEnd (normal/error/abort, survives an OnCycleEnd panic). BeforeStimulate runs before the ctx-cancellation check, so it fires exactly once even on a canceled context. Injected Context is subject to Budget.Trimmer like all loop context — hosts should size injections within MaxTokens.
 - AfterAct receives the raw tool err (nil on success); tool failure feedback still flows through toolFeedback into Context
 - Tool error feedback: Act err/Effect.Err/nil effect converted to `[name] error: ...` text, fed back as context for next round (does not terminate loop)
-- Sandbox check before each tool execution: denied → feedback `[denied: reason]`, continues loop; every decision of a configured sandbox first yields EventSandbox (allowed or denied) as the audit record — hosts persist it for the action-level audit trail
+- Sandbox check before each tool execution: denied → feedback `[denied: reason]`, continues loop; every decision of the membrane first yields EventSandbox (allowed or denied) as the audit record — hosts persist it for the action-level audit trail
 - MaxToolOutput truncates tool feedback length (<=0 = no truncation); truncation keeps UTF-8 rune boundaries
 - All errors wrapped with `fmt.Errorf("...: %w", err)`
 
@@ -54,7 +54,7 @@
 
 - Host ports must respect ctx: long operations must monitor ctx.Done (otherwise Close cannot interrupt)
 - No default Memory/LLM implementations inside the loop — memory is host-managed via LoopContext.Context
-- All optional hooks/guards are nil-skipped (defensive; host always provides them via root New)
+- Hooks/Sandbox/Budget are required organs: internal tests fill no-op defaults where they do not target these ports; the api assembly (New/Validate) is where requiredness is enforced
 - History/context accumulation happens within the loop only (Context field grows with tool feedback)
 - Emit/yield returns false to stop early — callers control termination; abort discards the round, tools after the stop point do not execute, OnCycleEnd still runs (defer)
 - StatePaused is produced by the pause gate at gap points (before each Think / tool execution); pause blocks until ResumeCh closes or ctx cancels (emitError); a consumer abort during the pause exits without blocking

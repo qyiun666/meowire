@@ -74,22 +74,22 @@ synapse := synapse.NewDirect(resolver, restored...) // 空图：NewDirect(resolv
 - `NewDirect(r Resolver, initial ...Edge)`：可变参数可选初始边——不传 = 空图（现有调用零改动），传 = 恢复图
 - 生命周期：`存盘(Edges 全图) → 进程重启 → 注入(NewDirect initial) → 继续演化(Reinforce/Unlink) → 再存盘`
 
-## 6. 宿主学习循环模式（1.1.2 提供参考实现）
+## 6. 宿主学习循环模式（1.1.2 已提供参考实现）
 
 ```go
-// 赫布规则：一起发放的连接加强
+// ① 赫布规则：一起发放的连接加强（直接使用参考实现 Hebbian / HebbianFire）
 if sig 投递成功 {
-	synapse.Reinforce(ctx, from, to, +0.1)
+	synapse.Hebbian(ctx, s, from, to, 0.1)
 }
 
-// 周期修剪：扫描低权重边
-edges, _ := synapse.Edges(ctx, "")
-for _, e := range edges {
-	if e.Weight < 0.3 && e.Fired < 10 {
-		synapse.Unlink(ctx, e.From, e.To)
-	}
-}
+// ② STDP 时序窗（pre/post 发放时间差决定增强/衰减）
+synapse.STDP(ctx, s, from, to, dt, synapse.STDPParams{APlus: 0.5, AMinus: 0.4, Tau: 20 * time.Millisecond})
+
+// ③ 周期修剪：扫描弱边（参考实现 Prune：权重低于阈值且低频 → 剪除）
+removed, _ := synapse.Prune(ctx, s, 0.3, 10)
 ```
+
+参考实现位于 `internal/synapse/learning.go`（`Hebbian` / `STDP` / `Prune` / `HebbianFire`），宿主可直接调用或参考改造；框架从不自动应用学习规则。
 
 ## 7. 迁移指南（宿主）
 
@@ -111,5 +111,5 @@ for _, e := range edges {
 ## 9. 版本边界
 
 - **1.1.0**（已交付）：静态图闭环 + 审计 + 动态接线 + AgentCard
-- **1.1.1**（本设计）：Synapse 可塑契约 + Direct 升级 + 测试 + 文档
-- **1.1.2**：赫布 / STDP 宿主参考实现（示例代码）；合成渲染（内部插槽子图 + 外部突触边一张图）
+- **1.1.1**（已交付）：Synapse 可塑契约 + Direct 升级 + 测试 + 文档
+- **1.1.2**（已交付）：赫布 / STDP 参考实现（learning.go：Hebbian/STDP/Prune/HebbianFire）+ 合成渲染（api/composite.go：BuildComposite/RenderComposite/RenderCompositeJSON——内部插槽子图 + 外部突触边一张图）+ 门面补全（NewDirect/Resolver 重导出）

@@ -6,7 +6,6 @@
 package meowire_test
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -31,52 +30,41 @@ func TestNewAggregatesMissingPorts(t *testing.T) {
 	}
 }
 
-// TestNewAllowsHalfWiredHooks: warn-level findings (half-wired hook pairs)
-// never block New by default — only error-level findings do.
-func TestNewAllowsHalfWiredHooks(t *testing.T) {
-	o := testOrgans(meowire.Organs{
-		Hooks: &meowire.Hooks{
-			BeforeThink: func(ctx context.Context, p *meowire.Prompt) error { return nil },
-		},
-	})
-	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err != nil {
-		t.Fatalf("New with half-wired hooks should succeed: %v", err)
+// TestNewRejectsIncompleteHooks: a missing hook callback aborts New — every
+// wiring point is required (explicit no-op, not absence).
+func TestNewRejectsIncompleteHooks(t *testing.T) {
+	o := testOrgans(meowire.Organs{})
+	o.Hooks = fullHooks()
+	o.Hooks.BeforeThink = nil
+	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
+		t.Fatal("New with a missing hook callback should error")
 	}
 }
 
-// TestNewStrictBlocksWarns: Blueprint.Strict promotes warn-level findings
-// (half-wired hook pair) to New-blocking errors; the same assembly passes
-// without Strict.
-func TestNewStrictBlocksWarns(t *testing.T) {
-	o := testOrgans(meowire.Organs{
-		Hooks: &meowire.Hooks{
-			BeforeThink: func(ctx context.Context, p *meowire.Prompt) error { return nil },
-		},
-	})
-	if _, err := meowire.New(meowire.Blueprint{Organs: o, Strict: true}); err == nil {
-		t.Fatal("Strict New with half-wired hooks should error")
-	}
-	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err != nil {
-		t.Fatalf("non-strict New should succeed: %v", err)
+// TestNewRejectsIncompleteBudget: a Budget without a Trimmer or MaxTokens
+// aborts New — a budget that does not trim is not a budget.
+func TestNewRejectsIncompleteBudget(t *testing.T) {
+	o := testOrgans(meowire.Organs{})
+	o.Budget = &meowire.ContextBudget{} // no trimmer, no MaxTokens
+	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
+		t.Fatal("New with an incomplete ContextBudget should error")
 	}
 }
 
-// TestValidateSurfacesHalfWiredPair: the same assembly that New accepts is
-// flagged by Validate as warn — hosts use Validate for strict assembly checks.
-func TestValidateSurfacesHalfWiredPair(t *testing.T) {
-	o := testOrgans(meowire.Organs{
-		Hooks: &meowire.Hooks{
-			BeforeThink: func(ctx context.Context, p *meowire.Prompt) error { return nil },
-		},
-	})
+// TestValidateSurfacesMissingHook: Validate flags every missing required
+// hook callback as an error.
+func TestValidateSurfacesMissingHook(t *testing.T) {
+	o := testOrgans(meowire.Organs{})
+	o.Hooks = fullHooks()
+	o.Hooks.AfterThink = nil
 	found := false
 	for _, is := range meowire.Validate(o, meowire.Config{}) {
-		if is.Level == meowire.LevelWarn && strings.Contains(is.Msg, "AfterThink") {
+		if is.Level == meowire.LevelError && strings.Contains(is.Msg, "AfterThink") {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("Validate should warn about the missing AfterThink counterpart")
+		t.Error("Validate should error about the missing AfterThink callback")
 	}
 }
 

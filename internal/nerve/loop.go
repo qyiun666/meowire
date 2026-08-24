@@ -76,12 +76,11 @@ type LoopContext struct {
 	// Required ports
 	Think Thinker
 	Act   Effector
-
-	// Optional ports (nil = skip)
 	Hooks   *Hooks
 	Sandbox Sandbox
 	Budget  *ContextBudget
-	Pause   *PauseGate
+	// Pause is framework-injected wiring (api layer), not a host port.
+	Pause *PauseGate
 
 	// Config
 	MaxRounds      int           // Hard round limit (<=0 uses DefaultMaxRounds)
@@ -125,9 +124,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 
 	// Snapshot the execution boundary once per Stimulate, before the
 	// BeforeStimulate hook so the prototype carries it (read-only).
-	if lc.Sandbox != nil {
-		lc.Bounds = lc.Sandbox.Bounds()
-	}
+	lc.Bounds = lc.Sandbox.Bounds()
 
 	// BeforeStimulate hook: once per Stimulate, before any event is yielded.
 	// An error terminates the whole Stimulate without entering the loop.
@@ -156,9 +153,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 		}
 
 		// Apply context budget trimming before each Think
-		if lc.Budget != nil && lc.Budget.Trimmer != nil && lc.Budget.MaxTokens > 0 {
-			lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
-		}
+		lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
 
 		// Thinking phase
 		lc.State = StateThinking
@@ -234,28 +229,25 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 				return
 			}
 
-			// Sandbox check: every decision of a configured sandbox produces an
-			// EventSandbox audit record (allowed or denied). With no sandbox
-			// wired there is no membrane and no verdict to audit.
-			if lc.Sandbox != nil {
-				if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
-					if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-						CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
-					}}) {
-						return
-					}
-					fb := fmt.Sprintf("[denied: %s]", reason)
-					lc.Context = append(lc.Context, fb)
-					if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
-						return
-					}
-					continue
-				}
+			// Sandbox check: every decision of the membrane produces an
+			// EventSandbox audit record (allowed or denied) before the tool runs.
+			if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
 				if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-					CellID: lc.CellID, Call: tc, Allowed: true,
+					CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
 				}}) {
 					return
 				}
+				fb := fmt.Sprintf("[denied: %s]", reason)
+				lc.Context = append(lc.Context, fb)
+				if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
+					return
+				}
+				continue
+			}
+			if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+				CellID: lc.CellID, Call: tc, Allowed: true,
+			}}) {
+				return
 			}
 
 			act := Action{CellID: lc.CellID, Call: tc}
@@ -419,64 +411,46 @@ func waitIfPaused(ctx context.Context, lc *LoopContext, yield func(Event) bool) 
 	}
 }
 
-// hookBeforeThink calls Hooks.BeforeThink if set.
+// hookBeforeThink calls Hooks.BeforeThink (required).
 func hookBeforeThink(ctx context.Context, lc *LoopContext, p *Prompt) error {
-	if lc.Hooks == nil || lc.Hooks.BeforeThink == nil {
-		return nil
-	}
 	if err := lc.Hooks.BeforeThink(ctx, p); err != nil {
 		return fmt.Errorf("nerve.hookBeforeThink: %w", err)
 	}
 	return nil
 }
 
-// hookAfterThink calls Hooks.AfterThink if set.
+// hookAfterThink calls Hooks.AfterThink (required).
 func hookAfterThink(ctx context.Context, lc *LoopContext, d *Decision) error {
-	if lc.Hooks == nil || lc.Hooks.AfterThink == nil {
-		return nil
-	}
 	if err := lc.Hooks.AfterThink(ctx, d); err != nil {
 		return fmt.Errorf("nerve.hookAfterThink: %w", err)
 	}
 	return nil
 }
 
-// hookBeforeAct calls Hooks.BeforeAct if set.
+// hookBeforeAct calls Hooks.BeforeAct (required).
 func hookBeforeAct(ctx context.Context, lc *LoopContext, a *Action) error {
-	if lc.Hooks == nil || lc.Hooks.BeforeAct == nil {
-		return nil
-	}
 	if err := lc.Hooks.BeforeAct(ctx, a); err != nil {
 		return fmt.Errorf("nerve.hookBeforeAct: %w", err)
 	}
 	return nil
 }
 
-// hookAfterAct calls Hooks.AfterAct if set.
+// hookAfterAct calls Hooks.AfterAct (required).
 func hookAfterAct(ctx context.Context, lc *LoopContext, a *Action, e *Effect, err error) {
-	if lc.Hooks == nil || lc.Hooks.AfterAct == nil {
-		return
-	}
 	lc.Hooks.AfterAct(ctx, a, e, err)
 }
 
-// hookOnCycleEnd calls Hooks.OnCycleEnd if set.
+// hookOnCycleEnd calls Hooks.OnCycleEnd (required).
 func hookOnCycleEnd(ctx context.Context, lc *LoopContext, output string) {
-	if lc.Hooks == nil || lc.Hooks.OnCycleEnd == nil {
-		return
-	}
 	lc.Hooks.OnCycleEnd(ctx, output)
 }
 
-// hookBeforeStimulate calls Hooks.BeforeStimulate if set.
+// hookBeforeStimulate calls Hooks.BeforeStimulate (required).
 // The hook receives a Prompt prototype; its content fields are written back
 // to the LoopContext after the call, so the modifications apply to every
 // round of the Stimulate (State and Bounds are framework-managed and not
 // written back — Bounds carries the Sandbox snapshot read-only).
 func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
-	if lc.Hooks == nil || lc.Hooks.BeforeStimulate == nil {
-		return nil
-	}
 	proto := &Prompt{
 		System:   lc.System,
 		Identity: lc.Identity,
@@ -505,11 +479,8 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 	return nil
 }
 
-// hookAfterStimulate calls Hooks.AfterStimulate if set.
+// hookAfterStimulate calls Hooks.AfterStimulate (required).
 func hookAfterStimulate(ctx context.Context, lc *LoopContext, output string) {
-	if lc.Hooks == nil || lc.Hooks.AfterStimulate == nil {
-		return
-	}
 	lc.Hooks.AfterStimulate(ctx, output)
 }
 
@@ -526,17 +497,16 @@ func emitError(ctx context.Context, lc *LoopContext, yield func(Event) bool, err
 	if !yield(Event{Kind: EventError, Err: err}) {
 		return
 	}
-	if lc.Hooks != nil && lc.Hooks.OnError != nil {
+	if lc.Hooks.OnError != nil {
 		lc.Hooks.OnError(ctx, err)
 	}
 }
 
-// checkSandbox checks Sandbox if non-nil; returns the policy reason, whether
-// the action is denied, and the evaluation error (nil = clean decision).
+// checkSandbox evaluates the membrane policy for one tool call; returns the
+// policy reason, whether the action is denied, and the evaluation error
+// (nil = clean decision). The membrane is required — every decision is
+// audited via EventSandbox.
 func checkSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (reason string, denied bool, sbErr error) {
-	if lc.Sandbox == nil {
-		return "", false, nil
-	}
 	act := Action{CellID: lc.CellID, Call: tc}
 	allowed, reason, err := lc.Sandbox.Allow(ctx, act)
 	if err != nil {

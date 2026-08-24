@@ -29,6 +29,11 @@
   - `NewDirect(r Resolver, initial ...Edge)`: initial restores a persisted graph (omitted = empty); negative weights clamp
   - `SetResolver`/`Connected`: assembly and read-only query
 - Error variables: `ErrNoTarget`, `ErrNotLinked`, `ErrTargetBusy`
+- Reference learning rules (1.1.2, host-callable; framework never auto-applies):
+  - `Hebbian(ctx, s, from, to, rate) error` — fire-together-wire-together step (Reinforce +rate)
+  - `STDP(ctx, s, from, to, dt, STDPParams{APlus, AMinus, Tau}) error` — spike-timing window: dt>0 LTP (Δw=APlus·exp(−dt/τ)), dt<0 LTD (−AMinus·exp(dt/τ)), dt=0 no change; Tau≤0 or negative magnitudes error
+  - `Prune(ctx, s, weightFloor, minFired) (int, error)` — removes edges with weight<floor AND Fired<minFired; returns removed count
+  - `HebbianFire(ctx, s, sig, rate) error` — end-to-end pattern: Fire then learn on success; delivery failure returns unchanged (no learning)
 
 ## Key Decisions
 

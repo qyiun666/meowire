@@ -26,11 +26,12 @@
 //   - Dynamic wiring: Agent.Replace(slot, port) swaps runtime ports between
 //     Stimulates (plasticity); AgentCard(Organs) renders the A2A-style
 //     capability card; Signal.Status carries A2A task lifecycle states
-//   - Synapse: internal/synapse/ (inter-agent connections: Link/Fire only)
+//   - Synapse: internal/synapse/ (plastic synapse graph: Link/Unlink/Reinforce/
+//     Fire/Edges + reference learning rules Hebbian/STDP/Prune)
 //   - Memory: internal/memory/ (standalone contract, host reference)
-//   - Composition: assemble.go (Blueprint{Organs, Config, Strict} + New(Blueprint)
-//     single assembly point; error-level findings always block, Strict promotes
-//     warn-level findings)
+//   - Composition: assemble.go (Blueprint{Organs, Config} + New(Blueprint)
+//     single assembly point; every wiring point is required — error-level
+//     findings always block, no warn level; FullHooks fills declared no-ops)
 //   - Facade: meow.go (Agent: Stimulate returns iter.Seq[Event]; Pause/Resume; Close)
 //
 // Sealed internals: all implementation packages live under internal/ and are
@@ -44,6 +45,7 @@
 //	  └── internal/synapse → internal/nerve
 //	internal/memory: standalone contract, not consumed by the framework
 //
-// All six ports (Think/Act/Closer/Hooks/Sandbox/Budget) are required —
-// New rejects a missing port; there are no stubs or default implementations.
+// All six ports (Think/Act/Closer/Hooks/Sandbox/Budget) and all eight hook
+// callbacks (H1–H8) are required — New rejects a missing port or callback;
+// there are no stubs, no default implementations, no optional wiring.
 package meowire

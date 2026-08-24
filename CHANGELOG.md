@@ -5,6 +5,64 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-24
+
+### Breaking changes
+
+- **All wiring points are now required (no optional organs)** — hooks
+  H1–H8 are mandatory callbacks; a missing callback fails assembly.
+  Hosts that want no behavior at a point pass an explicit no-op — an
+  explicit no-op is a declared decision, an absent callback is a missing
+  organ. `Sandbox` and `ContextBudget` are required ports (as before) and
+  the decision loop no longer tolerates nil: the membrane's `Bounds()`
+  snapshot and every `EventSandbox` verdict are now unconditional, and
+  `Budget.Trimmer` runs before every Think.
+- **`Blueprint.Strict` removed** — with every hook required there are no
+  warn-level findings left to promote; validation is strictly error/info
+  (error blocks New, info never does). Hosts must drop the `Strict` field
+  from `Blueprint` literals.
+- **`IssueLevel.LevelWarn` removed** — validation has only `LevelError`
+  and `LevelInfo`; hosts matching `LevelWarn` must update.
+- **`Replace` rejects nil/incomplete ports** — a swapped port must be a
+  non-nil, complete organ (ContextBudget needs Trimmer + MaxTokens, Hooks
+  needs all eight callbacks); a missing organ cannot be swapped in.
+- **`ContextBudget` completeness enforced** — a budget with a nil Trimmer
+  or MaxTokens <= 0 fails assembly (a budget that does not trim is not a
+  budget).
+
+### Added
+
+- **Learning rules re-exported at the facade** — `Hebbian`/`STDP`/
+  `Prune`/`HebbianFire`/`STDPParams` are now callable from the api package
+  (hosts can build plasticity loops without importing internals).
+- `BuildComposite` initializes empty slices (JSON renders `[]` instead of
+  `null` for agents/synapses).
+
+## [1.1.2] - 2026-08-24
+
+### Added
+
+- **Reference learning rules** (`internal/synapse/learning.go`) — hosts
+  build their plasticity loops on these or adapt them: `Hebbian(ctx, s,
+  from, to, rate)` (fire-together-wire-together step), `STDP(ctx, s, from,
+  to, dt, STDPParams{APlus, AMinus, Tau})` (spike-timing window: dt > 0
+  LTP, dt < 0 LTD, exponential decay), `Prune(ctx, s, weightFloor,
+  minFired)` (removes young-and-weak edges, returns the count),
+  `HebbianFire(ctx, s, sig, rate)` (end-to-end fire-then-learn pattern;
+  failed delivery does not learn). The framework still never decides when
+  to learn — these are reference implementations the host may call.
+- **Unified composite view** (`api/composite.go`) — `BuildComposite(ctx,
+  o, syn)` merges the static assembly subgraph (internal nodes + slot
+  edges) with the dynamic synapse graph (external agents + synaptic edges)
+  into one `CompositeGraph`; `RenderComposite` renders it as ASCII (weak
+  synapses flagged for pruning review) and `RenderCompositeJSON` as
+  indented JSON. `syn == nil` renders the internal subgraph only. View is
+  unified, data stays separate.
+- **Facade completions** — `NewDirect(r Resolver, initial ...Edge)` and
+  `Resolver` are now re-exported at the api facade: hosts can build the
+  reference synapse and restore persisted graphs without importing
+  internals.
+
 ## [1.1.1] - 2026-08-24
 
 ### Breaking changes

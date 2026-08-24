@@ -7,8 +7,8 @@
 // nodes, Connectome (nerve) is the edge list (slots). This file extracts the
 // host's actual assembly (WiringDiagram / BuildGraph), compares it against
 // the blueprint (Validate) and renders the graph as ASCII (RenderDiagram).
-// New rejects error-level findings only (warn too with Blueprint.Strict);
-// warn/info findings are surfaced here for hosts that want stricter checks.
+// New rejects error-level findings (missing/incomplete required ports);
+// info findings are surfaced here for hosts that want to inspect defaults.
 package meowire
 
 import (
@@ -29,8 +29,7 @@ type Slot struct {
 type IssueLevel string
 
 const (
-	LevelError IssueLevel = "error" // required slot missing (New rejects)
-	LevelWarn  IssueLevel = "warn"  // half-wired pair or incomplete path
+	LevelError IssueLevel = "error" // required slot missing or incomplete (New rejects)
 	LevelInfo  IssueLevel = "info"  // notable default, not a problem
 )
 
@@ -137,14 +136,15 @@ func slotFilled(o Organs, id string) bool {
 // Validate compares a host assembly against the wiring blueprint and returns
 // all findings:
 //
-//   - error: a required slot is not wired (New rejects these);
-//   - warn:  a hook pair is half-wired (Before without After, or the reverse),
-//     the memory path lacks its ContextBudget trimmer, or the plan path has
-//     an AfterThink without the BeforeThink injection point;
-//   - info:  notable defaults (empty Identity/Tools/Context, default rounds).
+//   - error: a required slot is not wired, or a wired port is incomplete
+//     (ContextBudget without a Trimmer / MaxTokens — a budget that does not
+//     trim is not a budget). New rejects these.
+//   - info: notable defaults (empty Identity/Tools/Context, default rounds).
 //
-// Hosts call Validate at assembly/test time to surface warn/info findings;
-// New itself only rejects error-level findings.
+// Hosts call Validate at assembly/test time to surface info findings; New
+// rejects error-level findings. There is no warn level: every wiring point
+// is required (hooks H1–H8, Sandbox, Budget), so a missing point is a
+// missing organ — an error, not a warning.
 func Validate(o Organs, cfg Config) []Issue {
 	var issues []Issue
 	diag := diagramByID(o)
@@ -164,45 +164,15 @@ func Validate(o Organs, cfg Config) []Issue {
 		}
 	}
 
-	// warn: half-wired hook pairs (single-sided use is legal for some pairs,
-	// but a missing counterpart is almost always an assembly mistake).
-	for _, p := range [][2]string{{"H1", "H2"}, {"H3", "H4"}, {"H5", "H6"}} {
-		a, b := diag[p[0]], diag[p[1]]
-		if a.Filled != b.Filled {
-			issues = append(issues, Issue{
-				ID:    "assembly",
-				Level: LevelWarn,
-				Wire:  a.Wire.ID,
-				Msg:   fmt.Sprintf("%s wired but %s not wired (hook pair expected together)", a.Wire.Name, b.Wire.Name),
-			})
-		}
-	}
-
-	// warn: memory path — BeforeThink (retrieval injection) without a
-	// configured ContextBudget trimmer may overflow the context window.
-	if h3, ok := diag["H3"]; ok && h3.Filled {
-		if o.Budget == nil || o.Budget.Trimmer == nil || o.Budget.MaxTokens <= 0 {
-			issues = append(issues, Issue{
-				ID:    "assembly",
-				Level: LevelWarn,
-				Wire:  "H3",
-				Msg:   "BeforeThink wired but ContextBudget trimmer not configured (retrieval may overflow context)",
-			})
-		}
-	}
-
-	// warn: plan path — AfterThink observes Decision (host updates Plan
-	// externally), but without BeforeThink there is no injection point, so
-	// Plan updates never reach the prompt.
-	if h4, ok := diag["H4"]; ok && h4.Filled {
-		if h3, ok := diag["H3"]; !ok || !h3.Filled {
-			issues = append(issues, Issue{
-				ID:    "assembly",
-				Level: LevelWarn,
-				Wire:  "H4",
-				Msg:   "AfterThink wired but BeforeThink not wired (Plan updates cannot reach the prompt)",
-			})
-		}
+	// error: Budget present but incomplete — a trimmer is the organ's function,
+	// MaxTokens its limit; either missing means the port cannot regulate.
+	if o.Budget != nil && (o.Budget.Trimmer == nil || o.Budget.MaxTokens <= 0) {
+		issues = append(issues, Issue{
+			ID:    "assembly",
+			Level: LevelError,
+			Wire:  "P6",
+			Msg:   "ContextBudget must have a Trimmer and MaxTokens > 0 (a budget that does not trim is not a budget)",
+		})
 	}
 
 	// info: notable defaults (zero-value Config semantics are documented).

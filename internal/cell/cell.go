@@ -21,15 +21,14 @@ type Cell struct {
 	ID       string
 	Identity string
 
-	// Required ports
+	// Required ports (all organs must be present; api assembly enforces)
 	Think nerve.Thinker
 	Act   nerve.Effector
-
-	// Optional ports
 	Hooks   *nerve.Hooks
 	Sandbox nerve.Sandbox
 	Budget  *nerve.ContextBudget
-	// PauseGate returns a fresh pause gate per Stimulate (nil = pause unsupported).
+	// PauseGate returns a fresh pause gate per Stimulate (framework wiring,
+	// injected by the api layer; nil = pause unsupported).
 	PauseGate func() *nerve.PauseGate
 
 	// Config
@@ -103,7 +102,8 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 // between stimuli (another LLM, a stricter permission policy) without
 // rebuilding the agent.
 //
-// Supported slots and their port types:
+// Supported slots and their port types (all required — a swapped port must
+// be non-nil, a missing organ cannot be swapped in):
 //
 //	"think"   → nerve.Thinker
 //	"act"     → nerve.Effector
@@ -123,40 +123,40 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 	switch slot {
 	case "think":
 		v, ok := port.(nerve.Thinker)
-		if !ok {
-			return nil, fmt.Errorf("cell.Replace: think: got %T, want nerve.Thinker", port)
+		if !ok || v == nil {
+			return nil, fmt.Errorf("cell.Replace: think: got %T, want non-nil nerve.Thinker", port)
 		}
 		old := c.Think
 		c.Think = v
 		return old, nil
 	case "act":
 		v, ok := port.(nerve.Effector)
-		if !ok {
-			return nil, fmt.Errorf("cell.Replace: act: got %T, want nerve.Effector", port)
+		if !ok || v == nil {
+			return nil, fmt.Errorf("cell.Replace: act: got %T, want non-nil nerve.Effector", port)
 		}
 		old := c.Act
 		c.Act = v
 		return old, nil
 	case "sandbox":
 		v, ok := port.(nerve.Sandbox)
-		if !ok {
-			return nil, fmt.Errorf("cell.Replace: sandbox: got %T, want nerve.Sandbox", port)
+		if !ok || v == nil {
+			return nil, fmt.Errorf("cell.Replace: sandbox: got %T, want non-nil nerve.Sandbox", port)
 		}
 		old := c.Sandbox
 		c.Sandbox = v
 		return old, nil
 	case "budget":
 		v, ok := port.(*nerve.ContextBudget)
-		if !ok {
-			return nil, fmt.Errorf("cell.Replace: budget: got %T, want *nerve.ContextBudget", port)
+		if !ok || v == nil || v.Trimmer == nil || v.MaxTokens <= 0 {
+			return nil, fmt.Errorf("cell.Replace: budget: got %T, want a complete non-nil ContextBudget", port)
 		}
 		old := c.Budget
 		c.Budget = v
 		return old, nil
 	case "hooks":
 		v, ok := port.(*nerve.Hooks)
-		if !ok {
-			return nil, fmt.Errorf("cell.Replace: hooks: got %T, want *nerve.Hooks", port)
+		if !ok || v == nil || !completeHooks(v) {
+			return nil, fmt.Errorf("cell.Replace: hooks: got %T, want non-nil Hooks with all eight callbacks", port)
 		}
 		old := c.Hooks
 		c.Hooks = v
@@ -164,6 +164,14 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 	default:
 		return nil, fmt.Errorf("cell.Replace: unknown slot %q", slot)
 	}
+}
+
+// completeHooks reports whether all eight hook callbacks are non-nil.
+func completeHooks(h *nerve.Hooks) bool {
+	return h.BeforeStimulate != nil && h.AfterStimulate != nil &&
+		h.BeforeThink != nil && h.AfterThink != nil &&
+		h.BeforeAct != nil && h.AfterAct != nil &&
+		h.OnError != nil && h.OnCycleEnd != nil
 }
 
 // Close marks the cell as closed (idempotent).

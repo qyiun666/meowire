@@ -38,9 +38,16 @@ you can rely on.
   capability card (JSON); publish it at `/.well-known/agent-card.json` for agent discovery
 - **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
   (submitted/working/needs-input/completed/failed/cancelled) for end-to-end inter-agent tracking
-- **Six host-injected ports** (all required, no stubs):
-  `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks` (interception),
-  `Sandbox` (permission gate), `ContextBudget` (context trimming)
+- **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Edges)
+  with reference learning rules `Hebbian`/`STDP`/`Prune` (host-side; framework stores state, never
+  decides when to learn); persistence round-trip via `Edges` export + `NewDirect` restore
+- **Unified composite view** — `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` merge the
+  static assembly subgraph with the live synapse graph into one picture (view unified, data separate)
+- **Six host-injected ports, all organs required** (no stubs, no optional
+  wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
+  (interception — all eight callbacks H1–H8 required: explicit no-op, not
+  absence), `Sandbox` (permission membrane), `ContextBudget` (context
+  regulator — needs a Trimmer and MaxTokens)
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (human approval, async tool), then `Stimulate` again. Human-in-the-loop without framework support
 - **Pause/Resume** — process-level suspension at gap points (before each Think / tool execution);
@@ -53,19 +60,27 @@ you can rely on.
 - **Resistance is feedback, not failure** — denied tools, tool errors, and busy targets flow back
   into the loop as `EventToolResult` feedback; the loop continues
 
-## Upgrading to v2.0
+## Upgrading to v1.2.0
 
-- **`New` takes a single `Blueprint{Organs, Config, Strict}`** — define once, `New` many times:
-  wrap your `Organs`/`Config` in a `Blueprint` at the call site. `Strict: true` also rejects
-  warn-level assembly findings (half-wired hook pairs, incomplete memory/plan paths).
-- **`Sandbox` now requires `Bounds() string`** — return the execution boundary description;
-  the framework snapshots it once per `Stimulate` and surfaces it read-only to hooks and the
-  Thinker via `Prompt.Bounds`:
+- **Every wiring point is now required** — hooks H1–H8 must all be set
+  (explicit no-op where no behavior is wanted); a missing callback fails
+  `New`. `Sandbox` and `ContextBudget` were already required; now the loop
+  never tolerates nil — `Bounds()` snapshot, `EventSandbox` audit verdicts
+  and `Budget.Trimmer` runs are unconditional.
+- **`Blueprint.Strict` removed** — with no warn level left there is nothing
+  to promote; drop the field from `Blueprint` literals.
+- **`ContextBudget` completeness enforced** — nil Trimmer or MaxTokens <= 0
+  fails assembly (a budget that does not trim is not a budget).
+- **`Replace` rejects nil/incomplete ports** — swapped organs must be
+  complete.
+- **`Sandbox` requires `Bounds() string`** — return the execution boundary
+  description; the framework snapshots it once per `Stimulate` and surfaces
+  it read-only to hooks and the Thinker via `Prompt.Bounds`:
   ```go
   func (s *MySandbox) Bounds() string { return "read-only /workspace" }
   ```
-- **Missing-port errors are `errors.Join`-aggregated** — single missing-port errors keep the
-  exact `meow: required port X not injected` format; match with `errors.Is` / `strings.Contains`, never exact string equality.
+- **Missing-port errors are `errors.Join`-aggregated** — match with
+  `errors.Is` / `strings.Contains`, never exact string equality.
 
 ## Architecture
 

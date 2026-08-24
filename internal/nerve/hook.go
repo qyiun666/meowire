@@ -1,12 +1,16 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// hook.go — wiring interception points (all optional, nil = skip).
+// hook.go — wiring interception points (all required, no optional callbacks).
 package nerve
 
 import "context"
 
-// Hooks are wiring interception points (all optional, nil = skip).
+// Hooks are the wiring interception points (all eight required — the
+// sensory/decision/action regulation loop). Hosts that want no behavior at
+// a point pass an explicit no-op; a nil callback fails assembly. An
+// explicit no-op is a declared decision; an absent callback is a missing
+// organ.
 // BeforeStimulate/AfterStimulate fire exactly once per Stimulate:
 // BeforeStimulate receives a Prompt prototype whose content fields
 // (System/Identity/Methods/Tools/Context/Input/Plan) are written back to the

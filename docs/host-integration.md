@@ -18,10 +18,10 @@ meowire 是一个**纯编排内核**：宿主实现六端口（LLM、工具、�
 
 | 步骤 | 做什么 | 关键点 |
 |------|--------|--------|
-| 1 | 实现 Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | 六端口全部必填 |
-| 2 | 组装 `Organs` 结构体 | 注入端口 + 固定上下文 |
+| 1 | 实现 Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | 六端口 + 八回调全部必填（显式 no-op） |
+| 2 | 组装 `Organs` 结构体 | 注入端口 + 固定上下文；Hooks 用 `FullHooks` 补全 |
 | 3 | 设置 `Config` | 零值即默认，无需显式填 |
-| 4 | 组装 `Blueprint{Organs, Config, Strict}` 并 `New(bp)` | 缺端口返回错误；`Strict: true` 时半配链路也报错 |
+| 4 | 组装 `Blueprint{Organs, Config}` 并 `New(bp)` | 缺端口/缺回调返回错误；不完整 Budget 也报错 |
 | 5 | `for ev := range agent.Stimulate(ctx, text)` | 消费事件流 |
 | 6 | `agent.Close()` | 幂等，关闭后 Stimulate 返回 `ErrCellClosed` |
 
@@ -114,7 +114,7 @@ agent.Resume()  // 恢复：清除暂停标志
 - 暂停阻塞中 ctx 取消 → 走正常错误路径（`EventState(StateError)` → `EventError`）
 - 与 Step-Resume 的区别：Step-Resume 放弃本轮、无状态重来；Pause/Resume **保留循环内状态原地挂起**
 
-### 2.5 Hooks —— 拦截回调（全部可选，nil 字段跳过；但 Organs.Hooks 指针本身必填）
+### 2.5 Hooks —— 拦截回调（全部八个必填；不需要行为时传显式 no-op，缺席即装配错误）
 
 ```go
 type Hooks struct {
@@ -179,7 +179,7 @@ o := meowire.Organs{
     Think:   myThinker,                         // 必填
     Act:     myEffector,                        // 必填
     Closer:  myCloser,                          // 必填
-    Hooks:   &meowire.Hooks{BeforeThink: ...},  // 必填（指针，内部字段可全空）
+    Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: ...}), // 必填：全部八回调（工具函数填充缺失回调）
     Sandbox: mySandbox,                         // 必填
     Budget:  &meowire.ContextBudget{...},       // 必填
 
@@ -199,7 +199,7 @@ o := meowire.Organs{
 | `Think` | Thinker | LLM 封装 | **是** |
 | `Act` | Effector | 工具执行 | **是** |
 | `Closer` | Closer | 资源清理 | **是** |
-| `Hooks` | *Hooks | 拦截回调 | **是** |
+| `Hooks` | *Hooks | 拦截回调（全部八回调必填） | **是** |
 | `Sandbox` | Sandbox | 权限门 | **是** |
 | `Budget` | *ContextBudget | 上下文裁剪 | **是** |
 | `System` | string | 系统指令，进 Prompt.System | 否 |
@@ -208,7 +208,7 @@ o := meowire.Organs{
 | `Tools` | []ToolSpec | 工具清单，进 Prompt.Tools；`ToolSpec{Name, Desc, Input, Output}`，`Input` 为 JSON Schema（Thinker 据此生成 ToolCall.Args） | 否 |
 | `Context` | []string | 常驻上下文基底（历史记忆在此注入，MemHop）；进 Prompt.Context 初始值 | 否 |
 
-**注意：`New` 的必填校验只查指针/接口非 nil，`Hooks` 传 `&meowire.Hooks{}` 即可满足必填。**
+**注意：`New` 的必填校验逐回调检查——`Hooks` 的 8 个字段（H1–H8）任一为 nil 即装配失败（显式 no-op，而非缺席）。宿主可用 `FullHooks` 辅助（见下）快速补全。**
 
 ---
 
@@ -238,22 +238,21 @@ type Config struct {
 
 ```go
 type Blueprint struct {
-    Organs Organs   // 六端口 + 固定上下文
+    Organs Organs   // 六端口 + 固定上下文（全部必填）
     Config Config   // 零值即默认
-    Strict bool     // true: warn 级发现也阻断 New
 }
 
-bp := meowire.Blueprint{Organs: organs, Config: cfg, Strict: true}
+bp := meowire.Blueprint{Organs: organs, Config: cfg}
 agent, err := meowire.New(bp)
 ```
 
 - **Blueprint 是一次定义、多次装配**：同一 `bp` 可 `New` 出多个独立 Agent 实例（flat model 多 agent 场景）
-- `New` 基于**装配图**校验（蓝图 = 数据对象节点 + 槽位边）：
-  - `error` 级（必填端口缺失）：**恒阻断**，返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget），多缺联合报错
-  - `warn` 级（半配 hook 对 H1↔H2/H3↔H4/H5↔H6、记忆通路 H3 无裁剪、计划通路 H4 无 H3）：`Strict: true` 时阻断，否则放行
+- `New` 基于**装配图**校验（蓝图 = 数据对象节点 + 槽位边），只有两档：
+  - `error` 级（必填端口缺失 / 回调缺失 / Budget 不完整）：**恒阻断**，返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8），多缺联合报错
   - `info` 级（空 Identity/Tools/Context、默认轮数）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
+  - 不再有 `warn` 级：每个接线点都是必填，缺失即缺失器官，没有“半配放行”
 - 装配后宿主调用 `Stimulate` / `Pause` / `Resume` / `Close`，并可经 `Replace` 运行时换端口、经 `AgentCard` 导出能力卡（见下）
-- 六端口均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**
+- 六端口 + 八回调均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**；宿主可用 `meowire.FullHooks(...)` 把不需要的钩子声明为显式 no-op
 
 ### 5.1 动态接线：`Replace`（运行时换器官）
 
@@ -263,7 +262,7 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 
 - 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
 - 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回旧端口（宿主自行决定是否关闭旧实现）
-- 并发安全；`Close` 后为 no-op；槽位或端口类型错误返回 error
+- 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 
 ### 5.2 能力卡：`AgentCard`（A2A 风格）
 
@@ -272,6 +271,21 @@ card, _ := meowire.AgentCard(organs) // JSON：name/description/skills
 ```
 
 由装配（`ID`/`Identity`/`Methods`）投影得到机器可读能力声明，宿主发布到 `/.well-known/agent-card.json` 即被其他 agent 发现。详见 [docs/protocols.md](protocols.md) §2。
+
+### 5.3 合成视图：`BuildComposite`（静态装配 × 动态突触，一张图）
+
+```go
+colony := meowire.NewDirect(resolver) // 宿主域 Synapse（可塑突触图）
+// ...运行中 Link/Fire/Reinforce...
+
+text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII：内部节点/插槽边 + 外部 agent/突触边
+snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON：机器可读快照
+```
+
+- 内部子图：静态装配（12 数据节点 + 18 插槽边），外部子图：实时突触边（权重 + 传递计数）
+- 弱突触（权重 < 0.3）标记 `! weak`，供宿主周期性 `Prune` 修剪审查
+- 视图统一、数据分离：内部装配与外部连接各自存储，渲染时才合成
+- 宿主把 `RenderCompositeJSON` 快照持久化，即得整个 agent 群体的统一可观测性视图
 
 ---
 
@@ -545,7 +559,7 @@ func main() {
 			Think:   &llmThinker{},
 			Act:     &effector{registry: toolRegistry},
 			Closer:  &closer{},
-			Hooks:   &meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput},
+			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
 			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
 			System:  "你是 meow agent，用中文回答",
@@ -557,7 +571,6 @@ func main() {
 			Methods:  []meowire.MethodSpec{{Name: "spawn_agent", Desc: "派生一个子 agent"}},
 		},
 		Config: meowire.Config{MaxRounds: 8, MaxToolOutput: 2000, MaxRetries: 2},
-		Strict: true, // 装配图检查：半配 hook/记忆通路也报错
 	}
 	agent, err := meowire.New(bp)
 	if err != nil {

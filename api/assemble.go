@@ -6,6 +6,7 @@ package meowire
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -35,6 +36,38 @@ type Organs struct {
 	Identity string
 }
 
+// FullHooks returns a copy of h with every nil callback filled by an
+// explicit no-op — hosts declare only the hooks they need; the rest become
+// declared no-ops (assembly requires all eight callbacks; an explicit no-op
+// is a decision, an absent callback is a missing organ).
+func FullHooks(h Hooks) *Hooks {
+	if h.BeforeStimulate == nil {
+		h.BeforeStimulate = func(context.Context, *Prompt) error { return nil }
+	}
+	if h.AfterStimulate == nil {
+		h.AfterStimulate = func(context.Context, string) {}
+	}
+	if h.BeforeThink == nil {
+		h.BeforeThink = func(context.Context, *Prompt) error { return nil }
+	}
+	if h.AfterThink == nil {
+		h.AfterThink = func(context.Context, *Decision) error { return nil }
+	}
+	if h.BeforeAct == nil {
+		h.BeforeAct = func(context.Context, *Action) error { return nil }
+	}
+	if h.AfterAct == nil {
+		h.AfterAct = func(context.Context, *Action, *Effect, error) {}
+	}
+	if h.OnError == nil {
+		h.OnError = func(context.Context, error) {}
+	}
+	if h.OnCycleEnd == nil {
+		h.OnCycleEnd = func(context.Context, string) {}
+	}
+	return &h
+}
+
 // Config holds agent configuration.
 // Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables retry;
@@ -47,29 +80,26 @@ type Config struct {
 	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
 }
 
-// Blueprint is a host assembly blueprint instance: ports + config + optional
-// strictness. Define once, New many times — every instance shares the same
-// wiring and is validated the same way.
-// Strict=true promotes warn-level Validate findings (half-wired hook pairs,
-// incomplete memory/plan paths) to New-blocking errors; error-level findings
-// (missing required ports) always block.
+// Blueprint is a host assembly blueprint instance: ports + config. Define
+// once, New many times — every instance shares the same wiring and is
+// validated the same way. Every wiring point is required (no optional
+// organs): missing ports and incomplete ports (a ContextBudget without a
+// Trimmer) abort New.
 type Blueprint struct {
 	Organs Organs
 	Config Config
-	Strict bool
 }
 
 // New creates a new Agent from a blueprint.
 // Assembly is validated against the wiring blueprint: error-level findings
-// (missing required ports) always abort New; with Strict=true, warn-level
-// findings (half-wired hook pairs, incomplete memory/plan paths) also abort.
-// Info findings never block — hosts surface them via Validate /
-// WiringDiagram / RenderDiagram at assembly or test time.
-// There are no default implementations.
+// (missing required ports, incomplete ports) always abort New. Info findings
+// never block — hosts surface them via Validate / WiringDiagram /
+// RenderDiagram at assembly or test time.
+// There are no default implementations and no optional wiring points.
 func New(b Blueprint) (*Agent, error) {
 	var errs []error
 	for _, is := range Validate(b.Organs, b.Config) {
-		if is.Level == LevelError || (b.Strict && is.Level == LevelWarn) {
+		if is.Level == LevelError {
 			errs = append(errs, fmt.Errorf("meow: %s", is.Msg))
 		}
 	}

@@ -34,9 +34,15 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   发布到 `/.well-known/agent-card.json` 即可被其他 agent 发现
 - **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
   （submitted/working/needs-input/completed/failed/cancelled），端到端追踪跨 agent 任务
-- **六个宿主注入端口**（全部必填，无 stub）：
-  `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截）、
-  `Sandbox`（权限门）、`ContextBudget`（上下文裁剪）
+- **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Edges）+
+  参考学习规则 `Hebbian`/`STDP`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；
+  持久化往返：`Edges` 导出 + `NewDirect` 恢复
+- **统一合成视图** —— `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 把
+  静态装配子图与实时突触图合并为一张图（视图统一、数据分离）
+- **六个宿主注入端口，全部器官必填**（无 stub、无可选接线）：
+  `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
+  全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
+  `ContextBudget`（上下文调节器 —— 必须有 Trimmer 与 MaxTokens）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （人工审批、异步任务），再 `Stimulate` 继续。无需框架支持即可实现人机协作
 - **Pause/Resume** —— 间隙点（每轮 Think 前 / 每个工具执行前）的进程内暂停；
@@ -49,18 +55,23 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **阻力是反馈，不是失败** —— 被拒绝的工具、工具错误、目标繁忙都以 `EventToolResult`
   反馈回流循环，循环继续
 
-## 升级到 v2.0
+## 升级到 v1.2.0
 
-- **`New` 接收单个 `Blueprint{Organs, Config, Strict}`** —— 一次定义、多次 `New`：
-  在调用点把 `Organs`/`Config` 包进 `Blueprint`。`Strict: true` 时 warn 级装配问题
-  （半配 hook 对、记忆/计划通路不完整）也会被拒绝。
-- **`Sandbox` 现在必须实现 `Bounds() string`** —— 返回执行边界描述；
+- **每个接线点现在都是必填** —— hooks H1–H8 必须全部设置（不需要行为的地方传显式
+  no-op）；缺失回调 `New` 直接失败。`Sandbox` 与 `ContextBudget` 本就必填；现在
+  循环层彻底不再容忍 nil —— `Bounds()` 快照、`EventSandbox` 审计判定与
+  `Budget.Trimmer` 调用都是无条件的。
+- **`Blueprint.Strict` 已移除** —— 不再有 warn 级可提升，删除 `Blueprint` 字面量中的该字段。
+- **`ContextBudget` 完整性强制** —— Trimmer 为 nil 或 MaxTokens <= 0 装配失败
+  （不裁剪的预算不是预算）。
+- **`Replace` 拒绝 nil/不完整端口** —— 换入的器官必须完整。
+- **`Sandbox` 必须实现 `Bounds() string`** —— 返回执行边界描述；
   框架每次 `Stimulate` 快照一次，通过 `Prompt.Bounds` 以只读方式提供给 hook 与 Thinker：
   ```go
   func (s *MySandbox) Bounds() string { return "read-only /workspace" }
   ```
-- **缺失端口错误改为 `errors.Join` 聚合** —— 单端口缺失保持精确的 `meow: required port X not injected` 格式；
-  请用 `errors.Is` / `strings.Contains` 匹配，切勿精确比较错误字符串。
+- **缺失端口错误为 `errors.Join` 聚合** —— 请用 `errors.Is` / `strings.Contains` 匹配，
+  切勿精确比较错误字符串。
 
 ## 架构
 

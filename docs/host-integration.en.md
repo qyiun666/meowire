@@ -28,7 +28,7 @@ Implement six ports → Assemble Organs → Set Config → Assemble Blueprint �
 | 1 | Implement Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | All six ports required |
 | 2 | Assemble the `Organs` struct | Inject ports + fixed context |
 | 3 | Set `Config` | Zero values are defaults; nothing must be set explicitly |
-| 4 | Assemble `Blueprint{Organs, Config, Strict}` and `New(bp)` | Missing port returns an error; `Strict: true` also rejects half-wired paths |
+| 4 | Assemble `Blueprint{Organs, Config}` and `New(bp)` | Missing port/callback returns an error; incomplete Budget too |
 | 5 | `for ev := range agent.Stimulate(ctx, text)` | Consume the event stream |
 | 6 | `agent.Close()` | Idempotent; Stimulate after Close returns `ErrCellClosed` |
 
@@ -131,7 +131,7 @@ agent.Resume()  // resume: clears the pause flag
 - Difference from Step-Resume: Step-Resume abandons the round and restarts
   statelessly; Pause/Resume **keeps the in-cycle state and suspends in place**
 
-### 2.5 Hooks — interception callbacks (all optional; nil fields are skipped; the Organs.Hooks pointer itself is required)
+### 2.5 Hooks — interception callbacks (all eight required; explicit no-op where no behavior is wanted — absence fails assembly)
 
 ```go
 type Hooks struct {
@@ -200,7 +200,7 @@ o := meowire.Organs{
     Think:   myThinker,                         // required
     Act:     myEffector,                        // required
     Closer:  myCloser,                          // required
-    Hooks:   &meowire.Hooks{BeforeThink: ...},  // required (pointer; inner fields may all be empty)
+    Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: ...}), // required: all eight callbacks (helper fills missing ones)
     Sandbox: mySandbox,                         // required
     Budget:  &meowire.ContextBudget{...},       // required
 
@@ -220,7 +220,7 @@ o := meowire.Organs{
 | `Think` | Thinker | LLM wrapper | **yes** |
 | `Act` | Effector | Tool execution | **yes** |
 | `Closer` | Closer | Resource cleanup | **yes** |
-| `Hooks` | *Hooks | Interception callbacks | **yes** |
+| `Hooks` | *Hooks | Interception callbacks (all eight callbacks required) | **yes** |
 | `Sandbox` | Sandbox | Permission gate | **yes** |
 | `Budget` | *ContextBudget | Context trimming | **yes** |
 | `System` | string | System instructions; feeds Prompt.System | no |
@@ -229,7 +229,7 @@ o := meowire.Organs{
 | `Tools` | []ToolSpec | Tool list; feeds Prompt.Tools; `ToolSpec{Name, Desc, Input, Output}`, `Input` is a JSON Schema (the Thinker generates ToolCall.Args from it) | no |
 | `Context` | []string | Resident context base (history/memory injected here, MemHop); initial Prompt.Context | no |
 
-**Note: `New` validation only checks non-nil pointers/interfaces; passing `&meowire.Hooks{}` satisfies the Hooks requirement.**
+**Note: `New` validates per callback — any nil field in `Hooks` (H1–H8) fails assembly (explicit no-op, not absence). Hosts can use `meowire.FullHooks(...)` to fill missing callbacks with declared no-ops.**
 
 ---
 
@@ -259,24 +259,23 @@ type Config struct {
 
 ```go
 type Blueprint struct {
-    Organs Organs   // six ports + fixed context
+    Organs Organs   // six ports + fixed context (all required)
     Config Config   // zero values are defaults
-    Strict bool     // true: warn-level findings also abort New
 }
 
-bp := meowire.Blueprint{Organs: organs, Config: cfg, Strict: true}
+bp := meowire.Blueprint{Organs: organs, Config: cfg}
 agent, err := meowire.New(bp)
 ```
 
 - **Blueprint is define-once, assemble-many**: the same `bp` can `New` multiple independent Agent instances (flat-model multi-agent)
-- `New` validates against the **assembly graph** (blueprint = data-object nodes + slot edges):
-  - `error` (missing required port): **always blocks**, returns `meow: required port X not injected`
-    (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget), multiple missing ports joined
-  - `warn` (half-wired hook pairs H1↔H2/H3↔H4/H5↔H6; memory path = H3 without trimmer; plan path = H4 without H3): blocks only with `Strict: true`
+- `New` validates against the **assembly graph** (blueprint = data-object nodes + slot edges), two levels only:
+  - `error` (missing required port / missing hook callback / incomplete Budget): **always blocks**, returns `meow: required port X not injected`
+    (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
   - `info` (empty Identity/Tools/Context, default rounds): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
+  - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
 - After assembly the host calls `Stimulate` / `Pause` / `Resume` / `Close`, and may
   swap ports at runtime via `Replace` and export the capability card via `AgentCard` (below)
-- All six ports must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**
+- All six ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
 
 ### 5.1 Dynamic wiring: `Replace` (runtime organ swap)
 
@@ -300,6 +299,23 @@ card, _ := meowire.AgentCard(organs) // JSON: name/description/skills
 Projected from the assembly (`ID`/`Identity`/`Methods`) as a machine-readable capability
 declaration; publish it at `/.well-known/agent-card.json` so other agents can discover
 this agent. See [docs/protocols.md](protocols.md) §2.
+
+### 5.3 Composite view: `BuildComposite` (static assembly × live synapses, one picture)
+
+```go
+colony := meowire.NewDirect(resolver) // host-domain Synapse (plastic synapse graph)
+// ...runtime Link/Fire/Reinforce...
+
+text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII: internal nodes/slots + external agents/synapses
+snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON: machine-readable snapshot
+```
+
+- Internal subgraph: static assembly (12 data nodes + 18 slot edges); external subgraph:
+  live synaptic edges (weight + delivery count)
+- Weak synapses (weight < 0.3) are flagged `! weak` for periodic `Prune` review
+- View unified, data separate: internal assembly and external connections store
+  independently, merged only at render time
+- Persist `RenderCompositeJSON` snapshots for a unified observability view of the whole colony
 
 ---
 
@@ -610,7 +626,7 @@ func main() {
 			Think:   &llmThinker{},
 			Act:     &effector{registry: toolRegistry},
 			Closer:  &closer{},
-			Hooks:   &meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput},
+			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
 			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
 			System:  "You are a meow agent, answer in English",
@@ -622,7 +638,6 @@ func main() {
 			Methods:  []meowire.MethodSpec{{Name: "spawn_agent", Desc: "spawn a sub agent"}},
 		},
 		Config: meowire.Config{MaxRounds: 8, MaxToolOutput: 2000, MaxRetries: 2},
-		Strict: true, // assembly graph check: half-wired hooks/memory path also fail
 	}
 	agent, err := meowire.New(bp)
 	if err != nil {

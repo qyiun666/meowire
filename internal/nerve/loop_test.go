@@ -32,8 +32,78 @@ func (m mockEffector) Act(ctx context.Context, a Action) (*Effect, error) {
 	return m.fn(ctx, a)
 }
 
+// testHooks returns no-op hooks with all eight required callbacks set.
+func testHooks() *Hooks {
+	return &Hooks{
+		BeforeStimulate: func(ctx context.Context, p *Prompt) error { return nil },
+		AfterStimulate:  func(ctx context.Context, output string) {},
+		BeforeThink:     func(ctx context.Context, p *Prompt) error { return nil },
+		AfterThink:      func(ctx context.Context, d *Decision) error { return nil },
+		BeforeAct:       func(ctx context.Context, a *Action) error { return nil },
+		AfterAct:        func(ctx context.Context, a *Action, e *Effect, err error) {},
+		OnError:         func(ctx context.Context, err error) {},
+		OnCycleEnd:      func(ctx context.Context, output string) {},
+	}
+}
+
+// testSandbox allows every action.
+type testSandbox struct{}
+
+func (testSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+	return true, "", nil
+}
+
+func (testSandbox) Bounds() string { return "test" }
+
+// testBudget returns the context unchanged.
+func testBudget() *ContextBudget {
+	return &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }}
+}
+
+// fillRequired fills the required ports (Hooks/Sandbox/Budget) with no-op
+// defaults when a test does not target them. The loop requires all three
+// (assembly enforces); tests that do not care get declared no-ops.
+func fillRequired(lc *LoopContext) {
+	if lc.Sandbox == nil {
+		lc.Sandbox = testSandbox{}
+	}
+	if lc.Budget == nil {
+		lc.Budget = testBudget()
+	}
+	if lc.Hooks == nil {
+		lc.Hooks = testHooks()
+	} else {
+		def := testHooks()
+		if lc.Hooks.BeforeStimulate == nil {
+			lc.Hooks.BeforeStimulate = def.BeforeStimulate
+		}
+		if lc.Hooks.AfterStimulate == nil {
+			lc.Hooks.AfterStimulate = def.AfterStimulate
+		}
+		if lc.Hooks.BeforeThink == nil {
+			lc.Hooks.BeforeThink = def.BeforeThink
+		}
+		if lc.Hooks.AfterThink == nil {
+			lc.Hooks.AfterThink = def.AfterThink
+		}
+		if lc.Hooks.BeforeAct == nil {
+			lc.Hooks.BeforeAct = def.BeforeAct
+		}
+		if lc.Hooks.AfterAct == nil {
+			lc.Hooks.AfterAct = def.AfterAct
+		}
+		if lc.Hooks.OnError == nil {
+			lc.Hooks.OnError = def.OnError
+		}
+		if lc.Hooks.OnCycleEnd == nil {
+			lc.Hooks.OnCycleEnd = def.OnCycleEnd
+		}
+	}
+}
+
 // collectEvents runs Cycle and returns all yielded events.
 func collectEvents(ctx context.Context, lc *LoopContext) []Event {
+	fillRequired(lc)
 	var events []Event
 	(DecisionLoop{}).Cycle(ctx, lc, func(e Event) bool {
 		events = append(events, e)
@@ -104,7 +174,7 @@ func TestDecisionLoopWithToolCalls(t *testing.T) {
 		kinds[i] = e.Kind
 	}
 	wantKinds := []EventKind{
-		EventState, EventText, EventState, EventToolCall, EventToolResult,
+		EventState, EventText, EventState, EventToolCall, EventSandbox, EventToolResult,
 		EventState, EventText, EventState, EventDone,
 	}
 	if len(kinds) != len(wantKinds) {
@@ -315,9 +385,10 @@ func (auditSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
 
 func (auditSandbox) Bounds() string { return "audit-all" }
 
-// TestDecisionLoopSandboxAuditAllow: a configured sandbox yields an
+// TestDecisionLoopSandboxAuditAllow: the membrane yields an
 // EventSandbox(allowed) verdict before the tool runs — the action-level
-// audit record the Authority model requires.
+// audit record the Authority model requires (the membrane is required, so
+// every tool execution is audited).
 func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
 	calls := 0
 	lc := &LoopContext{
@@ -412,6 +483,7 @@ func TestDecisionLoopYieldFalseStops(t *testing.T) {
 		}},
 	}
 	var events []Event
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		events = append(events, e)
 		return false // stop immediately
@@ -443,6 +515,7 @@ func TestDecisionLoopOnCycleEndOnAbort(t *testing.T) {
 		},
 	}
 	var got []EventKind
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		got = append(got, e.Kind)
 		// Stop right after EventState(StateDone) — before EventDone is consumed.
@@ -475,6 +548,7 @@ func TestDecisionLoopAbortBeforeActSkipsToolExecution(t *testing.T) {
 			return &Effect{Result: "ok"}, nil
 		}},
 	}
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		return e.Kind != EventToolCall // stop as soon as the tool call is announced
 	})
@@ -927,6 +1001,7 @@ func TestDecisionLoopStimulateHooksOnAbort(t *testing.T) {
 			},
 		},
 	}
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		return false // stop immediately
 	})
@@ -1110,6 +1185,7 @@ func TestDecisionLoopPauseResume(t *testing.T) {
 		paused.Store(false) // resumed: clear the flag, like Agent.Resume does
 		close(resumeCh)
 	}()
+	fillRequired(lc)
 	var events []Event
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		events = append(events, e)
@@ -1120,7 +1196,7 @@ func TestDecisionLoopPauseResume(t *testing.T) {
 	})
 
 	// Expect: State(thinking), Text, State(acting), ToolCall,
-	//         State(paused), ToolResult, State(thinking), Text(done),
+	//         State(paused), Sandbox(allowed), ToolResult, State(thinking), Text(done),
 	//         State(done), Done
 	kinds := make([]EventKind, len(events))
 	for i, e := range events {
@@ -1128,7 +1204,7 @@ func TestDecisionLoopPauseResume(t *testing.T) {
 	}
 	wantKinds := []EventKind{
 		EventState, EventText, EventState, EventToolCall,
-		EventState, EventToolResult, EventState, EventText,
+		EventState, EventSandbox, EventToolResult, EventState, EventText,
 		EventState, EventDone,
 	}
 	if len(kinds) != len(wantKinds) {
@@ -1209,6 +1285,7 @@ func TestDecisionLoopPauseConsumerAbort(t *testing.T) {
 	}
 
 	var gotPaused bool
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		if e.Kind == EventState && e.State == StatePaused {
 			gotPaused = true

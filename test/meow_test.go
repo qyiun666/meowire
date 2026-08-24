@@ -41,7 +41,22 @@ func (c *closerStub) Close() error {
 	return nil
 }
 
-// fullOrgans returns an Organs with all six required ports wired.
+// fullHooks returns a Hooks with all eight required callbacks set (no-ops).
+func fullHooks() *meowire.Hooks {
+	return &meowire.Hooks{
+		BeforeStimulate: func(ctx context.Context, p *meowire.Prompt) error { return nil },
+		AfterStimulate:  func(ctx context.Context, output string) {},
+		BeforeThink:     func(ctx context.Context, p *meowire.Prompt) error { return nil },
+		AfterThink:      func(ctx context.Context, d *meowire.Decision) error { return nil },
+		BeforeAct:       func(ctx context.Context, a *meowire.Action) error { return nil },
+		AfterAct:        func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {},
+		OnError:         func(ctx context.Context, err error) {},
+		OnCycleEnd:      func(ctx context.Context, output string) {},
+	}
+}
+
+// fullOrgans returns an Organs with all required ports wired (six ports +
+// eight hook callbacks + a working ContextBudget trimmer).
 func fullOrgans() meowire.Organs {
 	return meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
@@ -51,13 +66,15 @@ func fullOrgans() meowire.Organs {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 		Closer:  &closerStub{},
-		Hooks:   &meowire.Hooks{},
+		Hooks:   fullHooks(),
 		Sandbox: allowSandbox{},
 		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }},
 	}
 }
 
 // testOrgans returns fullOrgans with non-zero overrides applied.
+// Hooks overrides merge into the full set (testOrgans(&Hooks{...}) keeps the
+// other seven callbacks) — a partial override stays a complete assembly.
 func testOrgans(o meowire.Organs) meowire.Organs {
 	base := fullOrgans()
 	if o.Think != nil {
@@ -70,7 +87,32 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 		base.Closer = o.Closer
 	}
 	if o.Hooks != nil {
-		base.Hooks = o.Hooks
+		merged := fullHooks()
+		if o.Hooks.BeforeStimulate != nil {
+			merged.BeforeStimulate = o.Hooks.BeforeStimulate
+		}
+		if o.Hooks.AfterStimulate != nil {
+			merged.AfterStimulate = o.Hooks.AfterStimulate
+		}
+		if o.Hooks.BeforeThink != nil {
+			merged.BeforeThink = o.Hooks.BeforeThink
+		}
+		if o.Hooks.AfterThink != nil {
+			merged.AfterThink = o.Hooks.AfterThink
+		}
+		if o.Hooks.BeforeAct != nil {
+			merged.BeforeAct = o.Hooks.BeforeAct
+		}
+		if o.Hooks.AfterAct != nil {
+			merged.AfterAct = o.Hooks.AfterAct
+		}
+		if o.Hooks.OnError != nil {
+			merged.OnError = o.Hooks.OnError
+		}
+		if o.Hooks.OnCycleEnd != nil {
+			merged.OnCycleEnd = o.Hooks.OnCycleEnd
+		}
+		base.Hooks = merged
 	}
 	if o.Sandbox != nil {
 		base.Sandbox = o.Sandbox
@@ -256,7 +298,7 @@ func TestFullOrgansWiring(t *testing.T) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 		Closer: &closerStub{},
-		Hooks:  &meowire.Hooks{},
+		Hooks:  fullHooks(),
 		Sandbox: sandboxFn{fn: func(ctx context.Context, a meowire.Action) (bool, string, error) {
 			sandboxCalled = true
 			return true, "", nil

@@ -67,11 +67,13 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 	}
 }
 
-// TestConnectomeRequiredPorts verifies exactly the six Organs ports (and the
-// framework-built-in F1) are required; every hook is optional.
+// TestConnectomeRequiredPorts verifies every wiring point is required: the
+// six Organs ports, the eight hooks (all required since 1.2.0 — explicit
+// no-op, not absence) and the framework-built-in F1.
 func TestConnectomeRequiredPorts(t *testing.T) {
 	required := map[string]bool{
 		"P1": true, "P2": true, "P3": true, "P4": true, "P5": true, "P6": true,
+		"H1": true, "H2": true, "H3": true, "H4": true, "H5": true, "H6": true, "H7": true, "H8": true,
 		"F1": true, // built-in, always active
 	}
 	for _, wp := range Connectome() {
