@@ -27,12 +27,12 @@ type Signal struct {
 type TaskStatus string
 
 const (
-	TaskSubmitted  TaskStatus = "submitted"  // Task created and queued
-	TaskWorking    TaskStatus = "working"    // Task in progress
+	TaskSubmitted  TaskStatus = "submitted"   // Task created and queued
+	TaskWorking    TaskStatus = "working"     // Task in progress
 	TaskNeedsInput TaskStatus = "needs-input" // Awaiting input from the caller
-	TaskCompleted  TaskStatus = "completed"  // Task finished successfully
-	TaskFailed     TaskStatus = "failed"     // Task finished with an error
-	TaskCancelled  TaskStatus = "cancelled"  // Task aborted before completion
+	TaskCompleted  TaskStatus = "completed"   // Task finished successfully
+	TaskFailed     TaskStatus = "failed"      // Task finished with an error
+	TaskCancelled  TaskStatus = "cancelled"   // Task aborted before completion
 )
 
 // SignalKind categorizes signal types.

@@ -5,6 +5,37 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-24
+
+### Fixed
+
+- **`Validate` findings are now deterministic** — previously iterated a
+  map built only for traversal; issue order could vary between runs and
+  break diff-based review. Now iterates the stable diagram slice.
+- **`thinkWithRetry` clamps negative retry configs** — a negative
+  `Config.ThinkMaxRetries` previously produced a malformed error
+  (`%!w(<nil>)`); now aligned with `actWithRetry` (clamped to 0).
+
+### Internal
+
+- Dead code removed: `hadToolCalls` loop variable, `diagramByID`
+  (map built only to iterate), three pure-forwarding hook helpers, and an
+  unreachable `nil`-effect branch in tool feedback.
+- New stdlib APIs where they simplify: `slices.Sorted` + `maps.Keys`
+  (graph agent listing), `cmp.Or`/`cmp.Compare` (edge sort), built-in
+  `max` (learning decay, no float round-trip).
+- Test stubs consolidated: 10 duplicated local stubs across four test
+  files replaced by `internal/testutil` (Thinker/Effector/Sandbox/Closer);
+  white-box stubs kept where importing testutil would cycle.
+
+### Docs
+
+- `docs/reference-host.md` — new step-by-step reference host: how to
+  build a runnable AI host on meowire from scratch (OpenAI-compatible LLM,
+  tool dispatch, permission gate, context trimming, memory, multi-agent,
+  persistence). Indexed from README (en/zh-CN) and both integration
+  guides.
+
 ## [1.2.0] - 2026-08-24
 
 ### Breaking changes

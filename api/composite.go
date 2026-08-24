@@ -9,9 +9,11 @@
 package meowire
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -46,10 +48,7 @@ func BuildComposite(ctx context.Context, o Organs, syn Synapse) (CompositeGraph,
 		return CompositeGraph{}, fmt.Errorf("meowire.BuildComposite: %w", err)
 	}
 	slices.SortFunc(edges, func(a, b Edge) int {
-		if a.From != b.From {
-			return strings.Compare(a.From, b.From)
-		}
-		return strings.Compare(a.To, b.To)
+		return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.To, b.To))
 	})
 	g.Synapses = edges
 
@@ -58,10 +57,7 @@ func BuildComposite(ctx context.Context, o Organs, syn Synapse) (CompositeGraph,
 		seen[e.From] = struct{}{}
 		seen[e.To] = struct{}{}
 	}
-	for id := range seen {
-		g.Agents = append(g.Agents, id)
-	}
-	slices.Sort(g.Agents)
+	g.Agents = slices.Sorted(maps.Keys(seen))
 	return g, nil
 }
 

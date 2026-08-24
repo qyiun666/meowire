@@ -74,8 +74,8 @@ type LoopContext struct {
 	Methods []MethodSpec
 
 	// Required ports
-	Think Thinker
-	Act   Effector
+	Think   Thinker
+	Act     Effector
 	Hooks   *Hooks
 	Sandbox Sandbox
 	Budget  *ContextBudget
@@ -116,11 +116,9 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 	// on normal completion, error path, or early consumer stop (yield=false).
 	// AfterStimulate is protected from an OnCycleEnd panic via a nested defer.
 	defer func() {
-		defer func() { hookAfterStimulate(ctx, lc, finalOutput) }()
-		hookOnCycleEnd(ctx, lc, finalOutput)
+		defer func() { lc.Hooks.AfterStimulate(ctx, finalOutput) }()
+		lc.Hooks.OnCycleEnd(ctx, finalOutput)
 	}()
-
-	hadToolCalls := false
 
 	// Snapshot the execution boundary once per Stimulate, before the
 	// BeforeStimulate hook so the prototype carries it (read-only).
@@ -208,10 +206,8 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 
 		// No tool calls → end of cycle
 		if len(dec.ToolCalls) == 0 {
-			hadToolCalls = false
 			break
 		}
-		hadToolCalls = true
 
 		// Acting phase
 		lc.State = StateActing
@@ -268,7 +264,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 			fb := toolFeedback(tc, eff, err, lc.MaxToolOutput)
 
 			// AfterAct hook
-			hookAfterAct(ctx, lc, &act, eff, err)
+			lc.Hooks.AfterAct(ctx, &act, eff, err)
 
 			// Append feedback to context
 			lc.Context = append(lc.Context, fb)
@@ -279,8 +275,10 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 		}
 	}
 
-	// If the last round had tool calls and we exhausted rounds, it's an error
-	if round > maxRounds && hadToolCalls {
+	// Exhausted all rounds with a tool call pending in the last round — the
+	// loop ended only because the hard cap was hit (a round without tool
+	// calls breaks out below the cap).
+	if round > maxRounds {
 		emitError(ctx, lc, yield, ErrMaxRounds)
 		return
 	}
@@ -311,8 +309,6 @@ func toolFeedback(tc ToolCall, eff *Effect, err error, maxLen int) string {
 	switch {
 	case err != nil:
 		fb = "[" + tc.Name + "] error: " + err.Error()
-	case eff == nil:
-		fb = "[" + tc.Name + "] error: nil effect"
 	case eff.Err != "":
 		fb = "[" + tc.Name + "] error: " + eff.Err
 	default:
@@ -336,8 +332,12 @@ func toolFeedback(tc ToolCall, eff *Effect, err error, maxLen int) string {
 
 // thinkWithRetry retries Think up to MaxRetries times; on ctx cancellation returns immediately.
 func thinkWithRetry(ctx context.Context, lc *LoopContext, p *Prompt) (*Decision, error) {
+	maxAttempts := lc.MaxRetries
+	if maxAttempts < 0 {
+		maxAttempts = 0 // negative config means "no retry", still execute once
+	}
 	var err error
-	for attempt := 0; attempt <= lc.MaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, fmt.Errorf("nerve.thinkWithRetry: %w", cerr)
 		}
@@ -435,16 +435,6 @@ func hookBeforeAct(ctx context.Context, lc *LoopContext, a *Action) error {
 	return nil
 }
 
-// hookAfterAct calls Hooks.AfterAct (required).
-func hookAfterAct(ctx context.Context, lc *LoopContext, a *Action, e *Effect, err error) {
-	lc.Hooks.AfterAct(ctx, a, e, err)
-}
-
-// hookOnCycleEnd calls Hooks.OnCycleEnd (required).
-func hookOnCycleEnd(ctx context.Context, lc *LoopContext, output string) {
-	lc.Hooks.OnCycleEnd(ctx, output)
-}
-
 // hookBeforeStimulate calls Hooks.BeforeStimulate (required).
 // The hook receives a Prompt prototype; its content fields are written back
 // to the LoopContext after the call, so the modifications apply to every
@@ -477,11 +467,6 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 	lc.Input = proto.Input
 	lc.Plan = proto.Plan
 	return nil
-}
-
-// hookAfterStimulate calls Hooks.AfterStimulate (required).
-func hookAfterStimulate(ctx context.Context, lc *LoopContext, output string) {
-	lc.Hooks.AfterStimulate(ctx, output)
 }
 
 // emitError sets the error state, yields EventState(StateError) + EventError,

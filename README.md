@@ -259,5 +259,6 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | Host Integration Guide | [docs/host-integration.en.md](docs/host-integration.en.md) |
+| Reference Host (zh-CN) | [docs/reference-host.md](docs/reference-host.md) — step-by-step runnable AI host |
 | Protocol Mapping Guide | [docs/protocols.md](docs/protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

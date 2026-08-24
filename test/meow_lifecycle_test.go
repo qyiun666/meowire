@@ -10,11 +10,12 @@ import (
 	"testing"
 
 	meowire "github.com/qyiun666/meowire/api"
+	"github.com/qyiun666/meowire/internal/testutil"
 )
 
 // TestCloseBehavior verifies Close calls the host closer and subsequent Stimulate fails.
 func TestCloseBehavior(t *testing.T) {
-	cs := &closerStub{}
+	cs := &testutil.Closer{}
 	a, err := testNew(testOrgans(meowire.Organs{Closer: cs}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -35,7 +36,7 @@ func TestCloseBehavior(t *testing.T) {
 	if err := a.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if !cs.called {
+	if !cs.Called {
 		t.Fatal("host closer should have been called")
 	}
 

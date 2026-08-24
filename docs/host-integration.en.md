@@ -700,6 +700,7 @@ func main() {
 | README | [README.md](../README.md) | English quick start + concept overview |
 | README (zh-CN) | [README.zh-CN.md](../README.zh-CN.md) | Chinese quick start + concept overview |
 | Host Integration Guide (zh-CN) | [host-integration.md](host-integration.md) | Chinese integration contract |
+| Reference Host (zh-CN) | [reference-host.md](reference-host.md) | Step-by-step runnable AI host (LLM, tools, permissions, memory, multi-agent, persistence) |
 | api module context | [api/agent.md](../api/agent.md) | Long-term api package context, key decisions, pitfalls |
 | Decision loop source | [internal/nerve/loop.go](../internal/nerve/loop.go) | Loop orchestration (Think→Act→yield) |
 | Integration tests | [test/](../test/) | End-to-end behavior (lifecycle, port injection, event sequences) |

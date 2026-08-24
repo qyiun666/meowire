@@ -147,10 +147,10 @@ func slotFilled(o Organs, id string) bool {
 // missing organ — an error, not a warning.
 func Validate(o Organs, cfg Config) []Issue {
 	var issues []Issue
-	diag := diagramByID(o)
+	slots := WiringDiagram(o)
 
 	// error: required slots missing (P5b is implied by P5 and not re-checked).
-	for _, s := range diag {
+	for _, s := range slots {
 		if s.Wire.ID == "P5b" {
 			continue
 		}
@@ -190,16 +190,6 @@ func Validate(o Organs, cfg Config) []Issue {
 	}
 
 	return issues
-}
-
-// diagramByID indexes WiringDiagram by wire id for lookups.
-func diagramByID(o Organs) map[string]Slot {
-	slots := WiringDiagram(o)
-	byID := make(map[string]Slot, len(slots))
-	for _, s := range slots {
-		byID[s.Wire.ID] = s
-	}
-	return byID
 }
 
 // RenderDiagram renders the assembly as an ASCII wiring graph: the data

@@ -51,7 +51,7 @@ func STDP(ctx context.Context, s Synapse, from, to string, dt time.Duration, p S
 	if p.APlus < 0 || p.AMinus < 0 {
 		return fmt.Errorf("synapse.STDP: magnitudes must be non-negative")
 	}
-	abs := time.Duration(math.Abs(float64(dt)))
+	abs := max(dt, -dt) // built-in max on int64 nanoseconds (no float round-trip)
 	decay := math.Exp(-float64(abs) / float64(p.Tau))
 	var delta float64
 	if dt > 0 {

@@ -615,6 +615,7 @@ func main() {
 
 | 文档 | 位置 | 内容 |
 |------|------|------|
+| 宿主参考实现 | [reference-host.md](reference-host.md) | 按步骤从零实现一个 AI 宿主（LLM 对接/工具/权限/记忆/多 agent/持久化） |
 | README | [README.md](../README.md) | 英文快速入门 + 概念总览 |
 | api 模块上下文 | [api/agent.md](../api/agent.md) | api 包长期上下文、关键决策、陷阱 |
 | 决策循环实现 | [internal/nerve/loop.go](../internal/nerve/loop.go) | 循环编排源码（Think→Act→yield） |

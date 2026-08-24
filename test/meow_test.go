@@ -9,37 +9,10 @@ import (
 	"testing"
 
 	meowire "github.com/qyiun666/meowire/api"
+	"github.com/qyiun666/meowire/internal/testutil"
 )
 
 // --- shared test helpers (used by all files in this package) ---
-
-// allowSandbox permits all tool calls.
-type allowSandbox struct{}
-
-func (allowSandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
-	return true, "", nil
-}
-
-func (allowSandbox) Bounds() string { return "" }
-
-// sandboxFn is a Sandbox stub driven by a function field.
-type sandboxFn struct {
-	fn func(ctx context.Context, a meowire.Action) (bool, string, error)
-}
-
-func (s sandboxFn) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
-	return s.fn(ctx, a)
-}
-
-func (sandboxFn) Bounds() string { return "" }
-
-// closerStub records Close invocations.
-type closerStub struct{ called bool }
-
-func (c *closerStub) Close() error {
-	c.called = true
-	return nil
-}
 
 // fullHooks returns a Hooks with all eight required callbacks set (no-ops).
 func fullHooks() *meowire.Hooks {
@@ -59,15 +32,15 @@ func fullHooks() *meowire.Hooks {
 // eight hook callbacks + a working ContextBudget trimmer).
 func fullOrgans() meowire.Organs {
 	return meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "ok"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
-		Closer:  &closerStub{},
+		Closer:  &testutil.Closer{},
 		Hooks:   fullHooks(),
-		Sandbox: allowSandbox{},
+		Sandbox: testutil.Sandbox{},
 		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }},
 	}
 }
@@ -138,30 +111,12 @@ func testNew(o meowire.Organs, cfg meowire.Config) (*meowire.Agent, error) {
 	return meowire.New(meowire.Blueprint{Organs: o, Config: cfg})
 }
 
-// --- inline mock ports ---
-
-type fnThinker struct {
-	fn func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error)
-}
-
-func (t *fnThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	return t.fn(ctx, p)
-}
-
-type fnEffector struct {
-	fn func(ctx context.Context, a meowire.Action) (*meowire.Effect, error)
-}
-
-func (e *fnEffector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
-	return e.fn(ctx, a)
-}
-
 // --- tests ---
 
 // TestNewAndStimulate verifies creating an Agent and consuming events.
 func TestNewAndStimulate(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "meow-answer"}, nil
 		}},
 	}), meowire.Config{})
@@ -230,10 +185,10 @@ func TestOrgansID(t *testing.T) {
 	var gotCellID string
 	a, err := testNew(testOrgans(meowire.Organs{
 		ID: "wired",
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			gotCellID = a.CellID
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
@@ -252,10 +207,10 @@ func TestOrgansID(t *testing.T) {
 func TestDefaultID(t *testing.T) {
 	var gotCellID string
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			gotCellID = a.CellID
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
@@ -282,7 +237,7 @@ func TestFullOrgansWiring(t *testing.T) {
 	calls := 0
 	a, err := testNew(meowire.Organs{
 		ID: "wired-agent",
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			gotIdentity = p.Identity
 			gotMethods = p.Methods
 			if calls == 0 {
@@ -294,12 +249,12 @@ func TestFullOrgansWiring(t *testing.T) {
 			}
 			return &meowire.Decision{Text: "ok"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
-		Closer: &closerStub{},
+		Closer: &testutil.Closer{},
 		Hooks:  fullHooks(),
-		Sandbox: sandboxFn{fn: func(ctx context.Context, a meowire.Action) (bool, string, error) {
+		Sandbox: testutil.Sandbox{Fn: func(ctx context.Context, a meowire.Action) (bool, string, error) {
 			sandboxCalled = true
 			return true, "", nil
 		}},

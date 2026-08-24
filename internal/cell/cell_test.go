@@ -33,22 +33,13 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 			OnError:         func(ctx context.Context, err error) {},
 			OnCycleEnd:      func(ctx context.Context, output string) {},
 		},
-		Sandbox: testSandbox{},
+		Sandbox: testutil.Sandbox{Bound: "test"},
 		Budget: &nerve.ContextBudget{
 			MaxTokens: 100,
 			Trimmer:   func(c []string, _ int) []string { return c },
 		},
 	}
 }
-
-// testSandbox allows every action (cell-level test stub).
-type testSandbox struct{}
-
-func (testSandbox) Allow(ctx context.Context, a nerve.Action) (bool, string, error) {
-	return true, "", nil
-}
-
-func (testSandbox) Bounds() string { return "test" }
 
 // TestCellStimulate verifies basic event flow: State→Text→Done.
 func TestCellStimulate(t *testing.T) {

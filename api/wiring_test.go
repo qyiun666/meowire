@@ -9,40 +9,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/qyiun666/meowire/internal/testutil"
 )
-
-// --- minimal port stubs (local: api-package tests cannot reuse test/ stubs) ---
-
-type stubThinker struct {
-	fn func(ctx context.Context, p *Prompt) (*Decision, error)
-}
-
-func (s stubThinker) Think(ctx context.Context, p *Prompt) (*Decision, error) {
-	if s.fn == nil {
-		return &Decision{Text: "ok"}, nil
-	}
-	return s.fn(ctx, p)
-}
-
-type stubEffector struct {
-	fn func(ctx context.Context, a Action) (*Effect, error)
-}
-
-func (s stubEffector) Act(ctx context.Context, a Action) (*Effect, error) {
-	if s.fn == nil {
-		return &Effect{Result: "ok"}, nil
-	}
-	return s.fn(ctx, a)
-}
-
-type stubCloser struct{}
-
-func (stubCloser) Close() error { return nil }
-
-type stubSandbox struct{}
-
-func (stubSandbox) Allow(ctx context.Context, a Action) (bool, string, error) { return true, "", nil }
-func (stubSandbox) Bounds() string                                            { return "" }
 
 // fullOrgans returns an Organs with all six required ports wired and the
 // common hook pairs present, plus a working ContextBudget trimmer.
@@ -62,11 +31,11 @@ func fullHooks() *Hooks {
 
 func fullOrgans() Organs {
 	return Organs{
-		Think:   stubThinker{},
-		Act:     stubEffector{},
-		Closer:  stubCloser{},
+		Think:   testutil.Thinker{Fn: func(ctx context.Context, p *Prompt) (*Decision, error) { return &Decision{Text: "ok"}, nil }},
+		Act:     testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
+		Closer:  &testutil.Closer{},
 		Hooks:   fullHooks(),
-		Sandbox: stubSandbox{},
+		Sandbox: testutil.Sandbox{},
 		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }},
 	}
 }
@@ -344,14 +313,14 @@ func TestAgentReplace(t *testing.T) {
 		t.Fatalf("baseline text = %v, want [ok]", got)
 	}
 
-	old, err := a.Replace(SlotThink, stubThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+	old, err := a.Replace(SlotThink, testutil.Thinker{Fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 		return &Decision{Text: "swapped-brain"}, nil
 	}})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	if _, ok := old.(stubThinker); !ok {
-		t.Fatalf("old port = %T, want stubThinker", old)
+	if _, ok := old.(testutil.Thinker); !ok {
+		t.Fatalf("old port = %T, want testutil.Thinker", old)
 	}
 
 	got = nil

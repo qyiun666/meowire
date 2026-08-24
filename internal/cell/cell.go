@@ -22,8 +22,8 @@ type Cell struct {
 	Identity string
 
 	// Required ports (all organs must be present; api assembly enforces)
-	Think nerve.Thinker
-	Act   nerve.Effector
+	Think   nerve.Thinker
+	Act     nerve.Effector
 	Hooks   *nerve.Hooks
 	Sandbox nerve.Sandbox
 	Budget  *nerve.ContextBudget

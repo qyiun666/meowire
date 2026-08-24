@@ -13,30 +13,22 @@ import (
 	"time"
 
 	meowire "github.com/qyiun666/meowire/api"
+	"github.com/qyiun666/meowire/internal/testutil"
 )
-
-// boundsSandbox permits everything and declares a fixed boundary.
-type boundsSandbox struct{}
-
-func (boundsSandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
-	return true, "", nil
-}
-
-func (boundsSandbox) Bounds() string { return "read-only /workspace" }
 
 // TestAgentPauseResumeMidLoop verifies Pause() takes effect at the next gap
 // point (before a tool execution) and Resume() lets the loop continue.
 func TestAgentPauseResumeMidLoop(t *testing.T) {
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			calls++
 			if calls == 1 {
 				return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
 			}
 			return &meowire.Decision{Text: "done"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 	}), meowire.Config{})
@@ -78,7 +70,7 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 // Stimulate at its first gap point until Resume is called.
 func TestAgentPauseBlocksStimulateEntry(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "ok"}, nil
 		}},
 	}), meowire.Config{})
@@ -164,14 +156,14 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 func TestAgentCloseUnblocksPausedStimulate(t *testing.T) {
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			calls++
 			if calls == 1 {
 				return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
 			}
 			return &meowire.Decision{Text: "done"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 	}), meowire.Config{})
@@ -223,8 +215,8 @@ func TestAgentCloseUnblocksPausedStimulate(t *testing.T) {
 func TestSandboxBoundsReachesThinker(t *testing.T) {
 	var gotBounds string
 	a, err := testNew(testOrgans(meowire.Organs{
-		Sandbox: boundsSandbox{},
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Sandbox: testutil.Sandbox{Bound: "read-only /workspace"},
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			gotBounds = p.Bounds
 			return &meowire.Decision{Text: "ok"}, nil
 		}},
@@ -248,7 +240,7 @@ func TestConfigToolTimeout(t *testing.T) {
 	calls := 0
 	var capturedCtx []string
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			calls++
 			if calls == 2 {
 				capturedCtx = p.Context
@@ -258,7 +250,7 @@ func TestConfigToolTimeout(t *testing.T) {
 			}
 			return &meowire.Decision{Text: "recovered"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			actCalls++
 			<-ctx.Done() // block until the per-tool timeout fires
 			return nil, ctx.Err()
@@ -299,14 +291,14 @@ func TestConfigToolMaxRetries(t *testing.T) {
 	actCalls := 0
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{
-		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			calls++
 			if calls == 1 {
 				return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "flaky"}}}, nil
 			}
 			return &meowire.Decision{Text: "done"}, nil
 		}},
-		Act: &fnEffector{fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			actCalls++
 			if actCalls < 3 {
 				return nil, errors.New("transient")

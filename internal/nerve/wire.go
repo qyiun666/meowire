@@ -63,8 +63,8 @@ func ConnectomeNodes() []WireNode {
 // 3 = host runtime update (hook function).
 // TargetID: graph node this slot reads or mutates (see ConnectomeNodes);
 // Target is the human-readable rendering of that edge.
-// Required: New rejects a missing required slot; optional slots are checked
-// by Validate with warn/info findings only.
+// Required: New rejects a missing required slot; optional slots are not
+// re-checked (P5b is implied by P5, G1 is api-injected).
 type WirePoint struct {
 	ID        string
 	Name      string
