@@ -109,7 +109,7 @@ import meowire "github.com/qyiun666/meowire/api"
 ```
 
 宿主侧完整集成契约 —— 六端口、逐字段语义、事件流与陷阱清单 —— 见
-[宿主集成指南](docs/host-integration.md)。
+[宿主集成指南](host-integration.md)。
 
 ## 快速开始
 
@@ -245,7 +245,7 @@ GOWORK=off go vet ./...
 | MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
-| 宿主集成指南 | [docs/host-integration.md](docs/host-integration.md) |
-| 宿主参考实现 | [docs/reference-host.md](docs/reference-host.md) — 按步骤从零实现一个 AI 宿主 |
-| 协议映射指南 | [docs/protocols.md](docs/protocols.md) — MCP / A2A / AGENTS.md / Authority |
+| 宿主集成指南 | [host-integration.md](host-integration.md) |
+| 宿主参考实现 | [reference-host.md](reference-host.md) — 按步骤从零实现一个 AI 宿主 |
+| 协议映射指南 | [protocols.md](protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

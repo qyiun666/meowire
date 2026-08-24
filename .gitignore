@@ -7,3 +7,6 @@
 
 # stray directory created during an earlier move
 ~/
+
+# internal design docs (never published to GitHub)
+docs/

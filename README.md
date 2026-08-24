@@ -119,7 +119,7 @@ import meowire "github.com/qyiun666/meowire/api"
 
 For the full host-side integration contract — the six ports, field-by-field
 semantics, the event stream, and the pitfalls — see the
-[Host Integration Guide](docs/host-integration.en.md).
+[Host Integration Guide](host-integration.en.md).
 
 ## Quick Start
 
@@ -258,7 +258,7 @@ GOWORK=off go vet ./...
 | MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
-| Host Integration Guide | [docs/host-integration.en.md](docs/host-integration.en.md) |
-| Reference Host (zh-CN) | [docs/reference-host.md](docs/reference-host.md) — step-by-step runnable AI host |
-| Protocol Mapping Guide | [docs/protocols.md](docs/protocols.md) — MCP / A2A / AGENTS.md / Authority |
+| Host Integration Guide | [host-integration.en.md](host-integration.en.md) |
+| Reference Host (zh-CN) | [reference-host.md](reference-host.md) — step-by-step runnable AI host |
+| Protocol Mapping Guide | [protocols.md](protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

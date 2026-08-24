@@ -270,7 +270,7 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 card, _ := meowire.AgentCard(organs) // JSON：name/description/skills
 ```
 
-由装配（`ID`/`Identity`/`Methods`）投影得到机器可读能力声明，宿主发布到 `/.well-known/agent-card.json` 即被其他 agent 发现。详见 [docs/protocols.md](protocols.md) §2。
+由装配（`ID`/`Identity`/`Methods`）投影得到机器可读能力声明，宿主发布到 `/.well-known/agent-card.json` 即被其他 agent 发现。详见 [protocols.md](protocols.md) §2。
 
 ### 5.3 合成视图：`BuildComposite`（静态装配 × 动态突触，一张图）
 
@@ -335,7 +335,7 @@ EventState(error) → EventError(Err)
 | `EventError` | `Err` | 不可恢复错误（含 `ErrMaxRounds`、`ErrCellClosed`） |
 | `EventUsage` | `Usage *Usage` | 最近一次 Think 的 token 用量 |
 
-`SandboxVerdict{CellID, Call, Allowed, Reason, Err}`：每个被配置的 Sandbox 决策（允许或拒绝）在工具执行前产出一条；宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [docs/protocols.md](protocols.md) §4 Authority。
+`SandboxVerdict{CellID, Call, Allowed, Reason, Err}`：每个被配置的 Sandbox 决策（允许或拒绝）在工具执行前产出一条；宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
 
 ### 6.3 宿主必须掌握的两个语义
 
@@ -616,7 +616,7 @@ func main() {
 | 文档 | 位置 | 内容 |
 |------|------|------|
 | 宿主参考实现 | [reference-host.md](reference-host.md) | 按步骤从零实现一个 AI 宿主（LLM 对接/工具/权限/记忆/多 agent/持久化） |
-| README | [README.md](../README.md) | 英文快速入门 + 概念总览 |
-| api 模块上下文 | [api/agent.md](../api/agent.md) | api 包长期上下文、关键决策、陷阱 |
-| 决策循环实现 | [internal/nerve/loop.go](../internal/nerve/loop.go) | 循环编排源码（Think→Act→yield） |
-| 集成测试 | [test/](../test/) | 端到端行为验证（生命周期、端口注入、事件序列） |
+| README | [README.md](README.md) | 英文快速入门 + 概念总览 |
+| api 模块上下文 | [api/agent.md](api/agent.md) | api 包长期上下文、关键 决策、陷阱 |
+| 决策循环实现 | [internal/nerve/loop.go](internal/nerve/loop.go) | 循环 编排源码（Think→Act→yield） |
+| 集成测试 | [test/](test/) | 端到端行为验证（生命周期、端口注入、事件序 列） |

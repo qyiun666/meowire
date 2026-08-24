@@ -708,5 +708,4 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 |------|------|------|
 | 契约权威 | [host-integration.md](host-integration.md) | 所有接口签名、字段语义、事件序列、陷阱清单 |
 | 协议映射 | [protocols.md](protocols.md) | MCP / A2A / AGENTS.md / Authority / 长时任务状态外化 |
-| 突触可塑性 | [synapse-plasticity.md](synapse-plasticity.md) | synapse 设计、学习规则、迁移指南 |
 | 动态接线 | [wiring.md](host-integration.md#51-动态接线-replace运行时换器官) | `Replace` 运行时换端口 |

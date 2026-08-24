@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
-- `docs/reference-host.md` — new step-by-step reference host: how to
+- `reference-host.md` — new step-by-step reference host: how to
   build a runnable AI host on meowire from scratch (OpenAI-compatible LLM,
   tool dispatch, permission gate, context trimming, memory, multi-agent,
   persistence). Indexed from README (en/zh-CN) and both integration
@@ -122,8 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/synapse-plasticity.md` — 1.1.1 design: bionic mapping
   (synaptogenesis / elimination / LTP-LTD / pruning / persistence),
   interface contract, migration guide, test plan.
-- `internal/synapse/agent.md`, `api/agent.md`, `docs/host-integration.md` /
-  `docs/host-integration.en.md` — Synapse contract synced (plastic graph,
+- `internal/synapse/agent.md`, `api/agent.md`, `host-integration.md` /
+  `host-integration.en.md` — Synapse contract synced (plastic graph,
   Edge, persistence loop).
 
 ## [1.1.0] - 2026-08-24
@@ -179,12 +179,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
-- `docs/protocols.md` — new protocol mapping guide: how hosts map meowire
+- `protocols.md` — new protocol mapping guide: how hosts map meowire
   ports/events/contracts onto 2026 industry standards (MCP, A2A, AGENTS.md,
   Authority, long-running task state externalization), how meowire differs
   from DeepSeek Harness (Cordis); dynamic wiring, Agent Card and task states
   now have first-class API counterparts.
-- `docs/host-integration.md` / `docs/host-integration.en.md` — §1 flow table,
+- `host-integration.md` / `host-integration.en.md` — §1 flow table,
   §5 New assembly validation (Blueprint/Strict/graph check), sample code
   updated to `New(bp)`.
 - README (en/zh-CN), `api/agent.md`, `internal/nerve/agent.md`,
@@ -236,7 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
-- `docs/host-integration.md` / `docs/host-integration.en.md` — Hooks struct,
+- `host-integration.md` / `host-integration.en.md` — Hooks struct,
   trigger table, and multi-agent sample updated to the new signatures;
   `BeforeStimulate` / `AfterStimulate` usage patterns documented; §2.4
   Pause/Resume (gap semantics, StatePaused event), Sandbox.Bounds (§2.6),
@@ -265,7 +265,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built-in capability description (gene projection, describes only). It is
   injected via `Organs.Methods` and mirrors `ToolSpec` (`{Name, Desc, Input,
   Output}`), ready for future built-in tool schema projection.
-- `docs/host-integration.md` / `docs/host-integration.en.md` — host-side
+- `host-integration.md` / `host-integration.en.md` — host-side
   integration guide: the six ports, field-by-field Prompt/Organs semantics,
   event stream, and the pitfall checklist.
 - README (en/zh-CN): Installation section and links to the Host Integration Guide.

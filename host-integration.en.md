@@ -298,7 +298,7 @@ card, _ := meowire.AgentCard(organs) // JSON: name/description/skills
 
 Projected from the assembly (`ID`/`Identity`/`Methods`) as a machine-readable capability
 declaration; publish it at `/.well-known/agent-card.json` so other agents can discover
-this agent. See [docs/protocols.md](protocols.md) §2.
+this agent. See [protocols.md](protocols.md) §2.
 
 ### 5.3 Composite view: `BuildComposite` (static assembly × live synapses, one picture)
 
@@ -370,7 +370,7 @@ EventState(error) → EventError(Err)
 `SandboxVerdict{CellID, Call, Allowed, Reason, Err}`: one record per decision of a
 configured sandbox, emitted before the tool runs; persisting the event stream yields
 the action-level audit log (who, on whose behalf, when, what, why permitted). See
-[docs/protocols.md](protocols.md) §4 Authority.
+[protocols.md](protocols.md) §4 Authority.
 
 ### 6.3 Two semantics the host must know
 
@@ -697,10 +697,10 @@ func main() {
 
 | Document | Location | Content |
 |----------|----------|---------|
-| README | [README.md](../README.md) | English quick start + concept overview |
-| README (zh-CN) | [README.zh-CN.md](../README.zh-CN.md) | Chinese quick start + concept overview |
+| README | [README.md](README.md) | English quick start + concept overview |
+| README (zh-CN) | [README.zh-CN.md](README.zh-CN.md) | Chinese quick start + concept overview |
 | Host Integration Guide (zh-CN) | [host-integration.md](host-integration.md) | Chinese integration contract |
 | Reference Host (zh-CN) | [reference-host.md](reference-host.md) | Step-by-step runnable AI host (LLM, tools, permissions, memory, multi-agent, persistence) |
-| api module context | [api/agent.md](../api/agent.md) | Long-term api package context, key decisions, pitfalls |
-| Decision loop source | [internal/nerve/loop.go](../internal/nerve/loop.go) | Loop orchestration (Think→Act→yield) |
-| Integration tests | [test/](../test/) | End-to-end behavior (lifecycle, port injection, event sequences) |
+| api module context | [api/agent.md](api/agent.md) | Long-term api package context, key decisions, pitfalls |
+| Decision loop source | [internal/nerve/loop.go](internal/nerve/loop.go) | Loop orchestration (Think→Act→yield) |
+| Integration tests | [test/](test/) | End-to-end behavior (lifecycle, port injection, event sequences) |
