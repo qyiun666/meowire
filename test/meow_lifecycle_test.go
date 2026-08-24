@@ -15,7 +15,7 @@ import (
 // TestCloseBehavior verifies Close calls the host closer and subsequent Stimulate fails.
 func TestCloseBehavior(t *testing.T) {
 	cs := &closerStub{}
-	a, err := meowire.New(testOrgans(meowire.Organs{Closer: cs}), meowire.Config{})
+	a, err := testNew(testOrgans(meowire.Organs{Closer: cs}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestCloseBehavior(t *testing.T) {
 
 // TestStimulateAfterClose verifies Stimulate on a closed agent yields EventError with ErrCellClosed.
 func TestStimulateAfterClose(t *testing.T) {
-	a, err := meowire.New(testOrgans(meowire.Organs{}), meowire.Config{})
+	a, err := testNew(testOrgans(meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

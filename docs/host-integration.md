@@ -13,7 +13,7 @@ meowire 是一个**纯编排内核**：宿主实现六端口（LLM、工具、�
 ## 1. 集成流程总览（6 步）
 
 ```
-实现六端口 → 组装 Organs → 配置 Config → New() 创建 → Stimulate() 消费事件流 → Close()
+实现六端口 → 组装 Organs → 配置 Config → 装配 Blueprint → New() 创建 → Stimulate() 消费事件流 → Close()
 ```
 
 | 步骤 | 做什么 | 关键点 |
@@ -21,7 +21,7 @@ meowire 是一个**纯编排内核**：宿主实现六端口（LLM、工具、�
 | 1 | 实现 Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | 六端口全部必填 |
 | 2 | 组装 `Organs` 结构体 | 注入端口 + 固定上下文 |
 | 3 | 设置 `Config` | 零值即默认，无需显式填 |
-| 4 | `New(o Organs, cfg Config) (*Agent, error)` | 缺端口返回错误 |
+| 4 | 组装 `Blueprint{Organs, Config, Strict}` 并 `New(bp)` | 缺端口返回错误；`Strict: true` 时半配链路也报错 |
 | 5 | `for ev := range agent.Stimulate(ctx, text)` | 消费事件流 |
 | 6 | `agent.Close()` | 幂等，关闭后 Stimulate 返回 `ErrCellClosed` |
 
@@ -46,6 +46,7 @@ type Thinker interface {
 | `Methods` | 内置能力描述（基因投影，仅描述不执行；`MethodSpec{Name, Desc, Input, Output}`） | 宿主，构造时固定 |
 | `Tools` | 可用工具清单（function schema） | 宿主，构造时固定 |
 | `Context` | 上下文切片：宿主常驻基底 + 框架循环内追加的工具反馈 | 宿主基底 + 框架追加 |
+| `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
 | `State` | 当前循环状态字符串（`"thinking"`/`"acting"`/…） | 框架自动更新 |
 | `Plan` | 任务计划/进度文本 | 宿主经 `Hooks.BeforeThink` 写 `p.Plan`（指针可改，下一轮 Think 生效）；配合宿主 `update_plan` 工具形成闭环（§7.3 ③） |
@@ -98,7 +99,22 @@ type Closer interface {
 
 释放 LLM 客户端、HTTP 连接等宿主资源。框架保证 Agent.Close 幂等（CAS），重复调用无副作用。
 
-### 2.4 Hooks —— 拦截回调（全部可选，nil 字段跳过；但 Organs.Hooks 指针本身必填）
+### 2.4 Pause / Resume —— 进程内暂停恢复（Agent 级控制，非端口）
+
+```go
+agent.Pause()   // 请求暂停：下一个间隙点生效
+agent.Resume()  // 恢复：清除暂停标志
+```
+
+- **间隙生效**：暂停请求不打断正在执行的 Think/Act；循环在「每轮 Think 前」与「每个工具执行前」两个间隙点检查
+- 暂停时事件流产出 `EventState(StatePaused)`；恢复后继续，不额外发事件
+- 暂停状态是 **Agent 级、跨 Stimulate 保留**：暂停中再次 `Stimulate`，入口先暂停等待恢复
+- `Pause` / `Resume` **幂等、并发安全**；`Close` 后调用为 no-op
+- **`Close` 会解除暂停阻塞**：暂停中的迭代器被唤醒后可正常收尾（或被 ctx 取消终止），不会永久挂起
+- 暂停阻塞中 ctx 取消 → 走正常错误路径（`EventState(StateError)` → `EventError`）
+- 与 Step-Resume 的区别：Step-Resume 放弃本轮、无状态重来；Pause/Resume **保留循环内状态原地挂起**
+
+### 2.5 Hooks —— 拦截回调（全部可选，nil 字段跳过；但 Organs.Hooks 指针本身必填）
 
 ```go
 type Hooks struct {
@@ -126,19 +142,21 @@ type Hooks struct {
 
 **⚠️ `BeforeThink` 必须整体替换 `p.Context`（`p.Context = append(p.Context[:0], newCtx...)` 或直接赋新切片）——它与循环上下文共享底层数组，直接 append 会污染循环内上下文。**
 
-### 2.5 Sandbox —— 权限门（安全红线落点）
+### 2.6 Sandbox —— 权限门（安全红线落点）
 
 ```go
 type Sandbox interface {
     Allow(ctx context.Context, a Action) (allowed bool, reason string, err error)
+    Bounds() string // 执行边界描述（宿主定义），每次 Stimulate 快照一次
 }
 ```
 
 - 每次工具执行前调用；`allowed=false` 时框架生成 `[denied: reason]` 反馈进 Context，**循环继续**（不终止）
 - `Allow` 返回 err 时按 `[sandbox error: ...]` 拒绝
+- `Bounds()` 返回执行边界描述，每次 Stimulate 快照一次、经 `Prompt.Bounds` 透传给 LLM（让大脑感知限制，如"只能访问 /workspace 下文件"）
 - 宿主实现安全策略：工具白名单/黑名单、人工确认、敏感操作拦截
 
-### 2.6 ContextBudget —— 上下文裁剪器
+### 2.7 ContextBudget —— 上下文裁剪器
 
 ```go
 type ContextBudget struct {
@@ -198,9 +216,11 @@ o := meowire.Organs{
 
 ```go
 type Config struct {
-    MaxRounds     int
-    MaxToolOutput int
-    MaxRetries    int
+    MaxRounds      int
+    MaxToolOutput  int
+    MaxRetries     int
+    ToolTimeout    time.Duration
+    ToolMaxRetries int
 }
 ```
 
@@ -209,16 +229,49 @@ type Config struct {
 | `MaxRounds` | 硬性轮数上限；**最后一轮仍有工具调用时以 `ErrMaxRounds` 结束**（该轮工具结果不会被下一轮 Think 消化），配合 Step-Resume 防死循环 | 8 |
 | `MaxToolOutput` | 工具反馈截断长度（按 UTF-8 安全截断，超长附 `[truncated, N bytes total]`） | 不截断 |
 | `MaxRetries` | Think 重试次数（仅重试 Think；工具失败防护在宿主侧 Effector/AfterAct） | 不重试 |
+| `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，按反馈回灌 Context） | 无超时 |
+| `ToolMaxRetries` | 工具执行失败重试次数（**仅执行器 error**；`Effect.Err` 不重试，防重复副作用） | 不重试 |
 
 ---
 
 ## 5. 第 4 步：`New` 装配校验
 
-`New(o Organs, cfg Config) (*Agent, error)`：
+```go
+type Blueprint struct {
+    Organs Organs   // 六端口 + 固定上下文
+    Config Config   // 零值即默认
+    Strict bool     // true: warn 级发现也阻断 New
+}
 
-- 遍历校验六端口，缺失返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget）
-- 装配后宿主**只能**调用 `Stimulate` / `Close`，不能触碰内部 cell
+bp := meowire.Blueprint{Organs: organs, Config: cfg, Strict: true}
+agent, err := meowire.New(bp)
+```
+
+- **Blueprint 是一次定义、多次装配**：同一 `bp` 可 `New` 出多个独立 Agent 实例（flat model 多 agent 场景）
+- `New` 基于**装配图**校验（蓝图 = 数据对象节点 + 槽位边）：
+  - `error` 级（必填端口缺失）：**恒阻断**，返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget），多缺联合报错
+  - `warn` 级（半配 hook 对 H1↔H2/H3↔H4/H5↔H6、记忆通路 H3 无裁剪、计划通路 H4 无 H3）：`Strict: true` 时阻断，否则放行
+  - `info` 级（空 Identity/Tools/Context、默认轮数）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
+- 装配后宿主调用 `Stimulate` / `Pause` / `Resume` / `Close`，并可经 `Replace` 运行时换端口、经 `AgentCard` 导出能力卡（见下）
 - 六端口均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**
+
+### 5.1 动态接线：`Replace`（运行时换器官）
+
+```go
+oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulate 生效
+```
+
+- 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
+- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回旧端口（宿主自行决定是否关闭旧实现）
+- 并发安全；`Close` 后为 no-op；槽位或端口类型错误返回 error
+
+### 5.2 能力卡：`AgentCard`（A2A 风格）
+
+```go
+card, _ := meowire.AgentCard(organs) // JSON：name/description/skills
+```
+
+由装配（`ID`/`Identity`/`Methods`）投影得到机器可读能力声明，宿主发布到 `/.well-known/agent-card.json` 即被其他 agent 发现。详见 [docs/protocols.md](protocols.md) §2。
 
 ---
 
@@ -234,11 +287,17 @@ type Config struct {
 EventState(thinking) → EventText → [EventUsage(可选)] → EventState(done) → EventDone(累计输出)
 ```
 
-**带工具调用（每轮插入，可多轮循环）：**
+**带工具调用（每轮插入，可多轮循环；配置了 Sandbox 时每次工具执行前插入审计事件）：**
 
 ```
 EventState(thinking) → EventText → [EventUsage] → EventState(acting)
-  → (EventToolCall → EventToolResult) × N → 回到 EventState(thinking) → …
+  → (EventToolCall → [EventSandbox] → EventToolResult) × N → 回到 EventState(thinking) → …
+```
+
+**暂停路径（间隙点插入，Resume 后继续原序列）：**
+
+```
+… → EventState(paused) →（阻塞等待 Resume / ctx 取消）→ 继续原序列
 ```
 
 **错误路径：**
@@ -256,10 +315,13 @@ EventState(error) → EventError(Err)
 | `EventText` | `Text` | LLM 整段文本输出 |
 | `EventToolCall` | `ToolCall *ToolCall` | LLM 决定调用的工具 |
 | `EventToolResult` | `Effect *Effect` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[denied: reason]"`） |
+| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox 决策审计记录（允许/拒绝、工具、策略原因、评估错误）；未配置 Sandbox 时不产出 |
 | `EventState` | `State LoopState` | 循环状态（idle/thinking/acting/paused/done/error） |
 | `EventDone` | `Output` | 整轮累计文本输出 |
 | `EventError` | `Err` | 不可恢复错误（含 `ErrMaxRounds`、`ErrCellClosed`） |
 | `EventUsage` | `Usage *Usage` | 最近一次 Think 的 token 用量 |
+
+`SandboxVerdict{CellID, Call, Allowed, Reason, Err}`：每个被配置的 Sandbox 决策（允许或拒绝）在工具执行前产出一条；宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [docs/protocols.md](protocols.md) §4 Authority。
 
 ### 6.3 宿主必须掌握的两个语义
 
@@ -290,18 +352,29 @@ type Memory interface {
 
 宿主实现后端，经 `Organs.Context` + `Hooks.BeforeThink` 注入循环（MemHop 模式）。
 
-**Synapse（多 agent 消息参考实现）**：
+**Synapse（多 agent 消息参考实现，1.1.1 起为可塑突触图）**：
 
 ```go
+type Edge struct {
+    From   string
+    To     string
+    Weight float64 // 突触强度（宿主学习规则读写）
+    Fired  int64   // 累计成功传递次数（宿主统计）
+}
+
 type Synapse interface {
-    Link(ctx, from, to string) error
-    Fire(ctx, sig Signal) error   // Signal{ID, From, To, Kind, Payload []byte, ErrPayload bool}
+    Link(ctx, from, to string, weight float64) error // 突触发生（幂等覆盖，clamp ≥ 0）
+    Unlink(ctx, from, to string) error               // 突触消除（不存在 → ErrNotLinked）
+    Reinforce(ctx, from, to string, delta float64) error // LTP/LTD（结果 clamp ≥ 0）
+    Fire(ctx, sig Signal) error                      // 信号传递（成功投递累计 Fired）
+    Edges(ctx, from string) ([]Edge, error)          // 出边/全图快照（持久化原语）
 }
 ```
 
 - `SignalKind`：`KindStimulus`（宿主发任务）/`KindResponse`（agent 回复）/`KindNotice`（旁路通知，不进决策循环）
 - 真正路由（channel/HTTP/Redis/gRPC）宿主自选；宿主工具 `send_message` 经 `synapse.Fire` 发送，阻力（目标忙/未知 agent）以 `EventToolResult` 反馈回循环，不硬停
-- synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`）在 api 层 re-export
+- synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`）在 api 层 re-export；`Edge` 同步 re-export
+- **持久化往返**：运行期 `Edges(ctx, "")` 导出全图 → 宿主序列化存盘；下次启动反序列化 → `NewDirect(resolver, restored...)` 注入初始边。学习规则（赫布/STDP）宿主实现，框架只存状态不决策
 
 **扁平多 agent 模型**：一个 Agent = 一个内核；宿主管理多个实例。子 agent 在宿主 Effector 工具内 `New → Stimulate`，对主循环透明。
 
@@ -405,16 +478,21 @@ BeforeThink: func(ctx context.Context, p *meowire.Prompt) error {
 
 ```go
 case "spawn_agent":
-	sub, _ := meowire.New(meowire.Organs{
-		ID:      args.ID,
-		Think:   &streamingThinker{inner: t.inner, id: args.ID, hub: hub}, // 同一 hub
-		Act:     sameEffector,
-		Hooks:   hooksFor(args.ID), // 同一 hub 的闭包
-		Closer:  closerStub,
-		Sandbox: sandboxStub,
-		Budget:  &meowire.ContextBudget{},
-		Tools:   subTools,
-	}, subCfg)
+	// 同一 hub 注入子 agent；Blueprint 一次定义多处 New（flat model）
+	bp := meowire.Blueprint{
+		Organs: meowire.Organs{
+			ID:      args.ID,
+			Think:   &streamingThinker{inner: t.inner, id: args.ID, hub: hub}, // 同一 hub
+			Act:     sameEffector,
+			Hooks:   hooksFor(args.ID), // 同一 hub 的闭包
+			Closer:  closerStub,
+			Sandbox: sandboxStub,
+			Budget:  &meowire.ContextBudget{},
+			Tools:   subTools,
+		},
+		Config: subCfg,
+	}
+	sub, _ := meowire.New(bp)
 	// … 消费 sub 的事件流，或异步运行
 ```
 
@@ -439,7 +517,7 @@ func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Dec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Input/State/Plan → messages
+	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/State/Plan → messages
 	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
 	return &meowire.Decision{
 		Text:      resp.Text,
@@ -459,24 +537,29 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 	return fn(ctx, a.Call.Args)
 }
 
-// ③ 组装 + 运行
+// ③ 组装 + 运行（Blueprint 一次定义，多实例复用）
 func main() {
-	agent, err := meowire.New(meowire.Organs{
-		ID:      "agent-001",
-		Think:   &llmThinker{},
-		Act:     &effector{registry: toolRegistry},
-		Closer:  &closer{},
-		Hooks:   &meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput},
-		Sandbox: &sandbox{},
-		Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
-		System:  "你是 meow agent，用中文回答",
-		Tools: []meowire.ToolSpec{
-			{Name: "calc", Desc: "计算器", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "数值"},
+	bp := meowire.Blueprint{
+		Organs: meowire.Organs{
+			ID:      "agent-001",
+			Think:   &llmThinker{},
+			Act:     &effector{registry: toolRegistry},
+			Closer:  &closer{},
+			Hooks:   &meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput},
+			Sandbox: &sandbox{},
+			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
+			System:  "你是 meow agent，用中文回答",
+			Tools: []meowire.ToolSpec{
+				{Name: "calc", Desc: "计算器", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "数值"},
+			},
+			Context:  loadHistory(ctx), // 宿主管理的历史（MemHop）
+			Identity: "你叫 meow，角色 assistant，语气温暖",
+			Methods:  []meowire.MethodSpec{{Name: "spawn_agent", Desc: "派生一个子 agent"}},
 		},
-		Context:  loadHistory(ctx), // 宿主管理的历史（MemHop）
-		Identity: "你叫 meow，角色 assistant，语气温暖",
-		Methods:  []meowire.MethodSpec{{Name: "spawn_agent", Desc: "派生一个子 agent"}},
-	}, meowire.Config{MaxRounds: 8, MaxToolOutput: 2000, MaxRetries: 2})
+		Config: meowire.Config{MaxRounds: 8, MaxToolOutput: 2000, MaxRetries: 2},
+		Strict: true, // 装配图检查：半配 hook/记忆通路也报错
+	}
+	agent, err := meowire.New(bp)
 	if err != nil {
 		panic(err) // 装配失败：缺端口
 	}
@@ -503,7 +586,7 @@ func main() {
 
 ## 9. 陷阱清单（集成前必读）
 
-1. **`Hooks.BeforeThink` 必须整体替换 `p.Context`**——append 会因共享底层数组污染循环内上下文（§2.4）
+1. **`Hooks.BeforeThink` 必须整体替换 `p.Context`**——append 会因共享底层数组污染循环内上下文（§2.5）
 2. **端口并发安全**：同一 Agent 并发 Stimulate 时 Thinker/Effector 被并发调用
 3. **宿主端口必须响应 ctx 取消**，尤其 `ask_user` 阻塞场景（否则取消无法中断）
 4. **`Organs.Context` 是切片**：每轮 Think 前记得经 `BeforeThink` 更新为最新历史（MemHop）
@@ -511,8 +594,9 @@ func main() {
 6. **事件流是观察镜像**：宿主不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
 7. **流式 UX 在 Thinker 内做**：`EventText` 永远整段，token 增量不进事件流
 8. **错误处理**：宿主端口返回的错误会被框架包装（`nerve.hookBeforeThink: ...` 等）后经 `EventError` 透出；判断错误类型用 `errors.Is`（如 `meowire.ErrMaxRounds`）
-9. **hub 生命周期归宿主**（§7.3）：流式 channel 满会阻塞 agent 循环（Thinker 转发是同步的），宿主必须管理背压（buffer 大小）与回收（agent 结束后 close/删除 channel）；框架不参与
-10. **子 agent 必须注入与主 agent 同一个 hub 实例**（§7.3）：换实例即失联，统一状态视图靠共享实例实现
+9. **暂停不打断执行中的工具**：Pause 在间隙点生效；如需中断正在执行的工具，用 ctx 取消（§2.4）
+10. **hub 生命周期归宿主**（§7.3）：流式 channel 满会阻塞 agent 循环（Thinker 转发是同步的），宿主必须管理背压（buffer 大小）与回收（agent 结束后 close/删除 channel）；框架不参与
+11. **子 agent 必须注入与主 agent 同一个 hub 实例**（§7.3）：换实例即失联，统一状态视图靠共享实例实现
 
 ## 10. 相关文档
 

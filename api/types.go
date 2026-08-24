@@ -23,6 +23,7 @@ type (
 	Hooks         = nerve.Hooks
 	Sandbox       = nerve.Sandbox
 	ContextBudget = nerve.ContextBudget
+	PauseGate     = nerve.PauseGate
 )
 
 // Data packets exchanged with the host ports.
@@ -39,9 +40,10 @@ type (
 
 // Events yielded by the Stimulate iterator.
 type (
-	Event     = nerve.Event
-	EventKind = nerve.EventKind
-	LoopState = nerve.LoopState
+	Event          = nerve.Event
+	EventKind      = nerve.EventKind
+	LoopState      = nerve.LoopState
+	SandboxVerdict = nerve.SandboxVerdict
 )
 
 // Memory contract for host-implemented memory backends.
@@ -54,10 +56,20 @@ type (
 // Inter-agent messaging (host reference).
 type (
 	Synapse     = synapse.Synapse
+	Edge        = synapse.Edge
 	Signal      = nerve.Signal
 	SignalKind  = nerve.SignalKind
+	TaskStatus  = nerve.TaskStatus
 	Message     = nerve.Message
 	MessageRole = nerve.MessageRole
+)
+
+// Wiring blueprint types (Connectome / WiringDiagram / Validate).
+type (
+	WirePoint     = nerve.WirePoint
+	WireNode      = nerve.WireNode
+	WireCategory  = nerve.WireCategory
+	WireSemantics = nerve.WireSemantics
 )
 
 // LoopState constants.
@@ -79,6 +91,7 @@ const (
 	EventDone       EventKind = nerve.EventDone
 	EventError      EventKind = nerve.EventError
 	EventUsage      EventKind = nerve.EventUsage
+	EventSandbox    EventKind = nerve.EventSandbox
 )
 
 // SignalKind constants.
@@ -88,11 +101,39 @@ const (
 	KindNotice   SignalKind = nerve.KindNotice
 )
 
+// TaskStatus constants (A2A-style task lifecycle states).
+const (
+	TaskSubmitted  TaskStatus = nerve.TaskSubmitted
+	TaskWorking    TaskStatus = nerve.TaskWorking
+	TaskNeedsInput TaskStatus = nerve.TaskNeedsInput
+	TaskCompleted  TaskStatus = nerve.TaskCompleted
+	TaskFailed     TaskStatus = nerve.TaskFailed
+	TaskCancelled  TaskStatus = nerve.TaskCancelled
+)
+
 // MessageRole constants.
 const (
 	RoleUser      MessageRole = nerve.RoleUser
 	RoleAssistant MessageRole = nerve.RoleAssistant
 	RoleTool      MessageRole = nerve.RoleTool
+)
+
+// WireCategory constants.
+const (
+	CategorySense  WireCategory = nerve.CategorySense
+	CategoryDecide WireCategory = nerve.CategoryDecide
+	CategoryAct    WireCategory = nerve.CategoryAct
+)
+
+// WireSemantics constants.
+const (
+	SemReplace   WireSemantics = nerve.SemReplace
+	SemAppend    WireSemantics = nerve.SemAppend
+	SemTrim      WireSemantics = nerve.SemTrim
+	SemGate      WireSemantics = nerve.SemGate
+	SemRead      WireSemantics = nerve.SemRead
+	SemAct       WireSemantics = nerve.SemAct
+	SemContainer WireSemantics = nerve.SemContainer
 )
 
 // DefaultMaxRounds is the default round limit when Config.MaxRounds <= 0.

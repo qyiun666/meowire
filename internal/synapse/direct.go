@@ -23,18 +23,27 @@ var (
 // keeps synapse decoupled from cell).
 type Resolver func(id string) (chan<- nerve.Signal, bool)
 
-// Direct is a direct-connection synapse: a from→to link table plus a
-// Resolver closure for delivery.
+// Direct is a direct-connection synapse: a from→to edge table with weights
+// and delivery counts plus a Resolver closure for delivery.
 type Direct struct {
 	mu      sync.RWMutex
-	links   map[string]map[string]struct{}
+	links   map[string]map[string]Edge
 	resolve Resolver
 }
 
 // NewDirect creates a Direct synapse. r may be nil until SetResolver is
-// called at assembly time.
-func NewDirect(r Resolver) *Direct {
-	return &Direct{links: make(map[string]map[string]struct{}), resolve: r}
+// called at assembly time. initial restores a previously exported graph
+// (Edges snapshot from an earlier run); omitted = empty graph.
+func NewDirect(r Resolver, initial ...Edge) *Direct {
+	d := &Direct{links: make(map[string]map[string]Edge), resolve: r}
+	for _, e := range initial {
+		e.Weight = max(e.Weight, 0) // floor 0, same clamp as Link/Reinforce
+		if d.links[e.From] == nil {
+			d.links[e.From] = make(map[string]Edge)
+		}
+		d.links[e.From][e.To] = e
+	}
+	return d
 }
 
 // SetResolver injects the Resolver (composition-root assembly).
@@ -44,8 +53,10 @@ func (d *Direct) SetResolver(r Resolver) {
 	d.resolve = r
 }
 
-// Link establishes a from→to connection (idempotent; rejects a cancelled ctx).
-func (d *Direct) Link(ctx context.Context, from, to string) error {
+// Link establishes or updates a from→to connection with the given initial
+// strength (synaptogenesis; idempotent — re-Link overwrites the weight;
+// negative weight clamps to 0; rejects a cancelled ctx).
+func (d *Direct) Link(ctx context.Context, from, to string, weight float64) error {
 	select {
 	case <-ctx.Done():
 		return fmt.Errorf("synapse.Direct.Link: %w", ctx.Err())
@@ -54,9 +65,57 @@ func (d *Direct) Link(ctx context.Context, from, to string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.links[from] == nil {
-		d.links[from] = make(map[string]struct{})
+		d.links[from] = make(map[string]Edge)
 	}
-	d.links[from][to] = struct{}{}
+	d.links[from][to] = Edge{From: from, To: to, Weight: max(weight, 0)}
+	return nil
+}
+
+// Unlink severs a from→to connection (synapse elimination). A missing
+// connection returns ErrNotLinked.
+func (d *Direct) Unlink(ctx context.Context, from, to string) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("synapse.Direct.Unlink: %w", ctx.Err())
+	default:
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	toSet, ok := d.links[from]
+	if !ok {
+		return fmt.Errorf("synapse.Direct.Unlink: %w: %s -> %s", ErrNotLinked, from, to)
+	}
+	if _, ok := toSet[to]; !ok {
+		return fmt.Errorf("synapse.Direct.Unlink: %w: %s -> %s", ErrNotLinked, from, to)
+	}
+	delete(toSet, to)
+	if len(toSet) == 0 {
+		delete(d.links, from) // drop empty rows
+	}
+	return nil
+}
+
+// Reinforce adjusts a connection's strength by delta (LTP if positive, LTD
+// if negative); the result never drops below 0. A missing connection returns
+// ErrNotLinked.
+func (d *Direct) Reinforce(ctx context.Context, from, to string, delta float64) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("synapse.Direct.Reinforce: %w", ctx.Err())
+	default:
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	toSet, ok := d.links[from]
+	if !ok {
+		return fmt.Errorf("synapse.Direct.Reinforce: %w: %s -> %s", ErrNotLinked, from, to)
+	}
+	e, ok := toSet[to]
+	if !ok {
+		return fmt.Errorf("synapse.Direct.Reinforce: %w: %s -> %s", ErrNotLinked, from, to)
+	}
+	e.Weight = max(e.Weight+delta, 0)
+	toSet[to] = e
 	return nil
 }
 
@@ -87,12 +146,61 @@ func (d *Direct) Fire(ctx context.Context, sig nerve.Signal) error {
 	}
 	select {
 	case inbox <- sig:
+		d.bumpFired(sig.From, sig.To)
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("synapse.Direct.Fire: %w", ctx.Err())
 	default:
 		return fmt.Errorf("synapse.Direct.Fire: %w: %s", ErrTargetBusy, sig.To)
 	}
+}
+
+// bumpFired increments the delivery counter of an existing edge; a
+// concurrently unlinked edge is skipped (the connection is already gone).
+func (d *Direct) bumpFired(from, to string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if toSet, ok := d.links[from]; ok {
+		if e, ok := toSet[to]; ok {
+			e.Fired++
+			toSet[to] = e
+		}
+	}
+}
+
+// Edges returns a deep-copied snapshot of from's outgoing edges; from == ""
+// returns the whole graph (persistence export primitive). An unknown from
+// yields an empty snapshot, not an error.
+func (d *Direct) Edges(ctx context.Context, from string) ([]Edge, error) {
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("synapse.Direct.Edges: %w", ctx.Err())
+	default:
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if from == "" {
+		total := 0
+		for _, toSet := range d.links {
+			total += len(toSet)
+		}
+		out := make([]Edge, 0, total)
+		for _, toSet := range d.links {
+			for _, e := range toSet {
+				out = append(out, e)
+			}
+		}
+		return out, nil
+	}
+	toSet, ok := d.links[from]
+	if !ok {
+		return []Edge{}, nil
+	}
+	out := make([]Edge, 0, len(toSet))
+	for _, e := range toSet {
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // connected reports whether a from→to connection exists.

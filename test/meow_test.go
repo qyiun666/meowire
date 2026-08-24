@@ -20,6 +20,8 @@ func (allowSandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, 
 	return true, "", nil
 }
 
+func (allowSandbox) Bounds() string { return "" }
+
 // sandboxFn is a Sandbox stub driven by a function field.
 type sandboxFn struct {
 	fn func(ctx context.Context, a meowire.Action) (bool, string, error)
@@ -28,6 +30,8 @@ type sandboxFn struct {
 func (s sandboxFn) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
 	return s.fn(ctx, a)
 }
+
+func (sandboxFn) Bounds() string { return "" }
 
 // closerStub records Close invocations.
 type closerStub struct{ called bool }
@@ -85,6 +89,13 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 	return base
 }
 
+// testNew is a thin wrapper around meowire.New with a non-strict blueprint —
+// most integration tests exercise loop behavior, not assembly strictness.
+// Assembly-strictness tests call meowire.New directly with Blueprint.
+func testNew(o meowire.Organs, cfg meowire.Config) (*meowire.Agent, error) {
+	return meowire.New(meowire.Blueprint{Organs: o, Config: cfg})
+}
+
 // --- inline mock ports ---
 
 type fnThinker struct {
@@ -107,7 +118,7 @@ func (e *fnEffector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect
 
 // TestNewAndStimulate verifies creating an Agent and consuming events.
 func TestNewAndStimulate(t *testing.T) {
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "meow-answer"}, nil
 		}},
@@ -138,7 +149,7 @@ func TestNewAndStimulate(t *testing.T) {
 
 // TestCloseIdempotent verifies Close can be called multiple times without error.
 func TestCloseIdempotent(t *testing.T) {
-	a, err := meowire.New(testOrgans(meowire.Organs{}), meowire.Config{})
+	a, err := testNew(testOrgans(meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -166,7 +177,7 @@ func TestNewRejectsMissingPorts(t *testing.T) {
 	for _, p := range ports {
 		o := fullOrgans()
 		p.set(&o)
-		if _, err := meowire.New(o, meowire.Config{}); err == nil {
+		if _, err := testNew(o, meowire.Config{}); err == nil {
 			t.Fatalf("New with missing %s should return error", p.name)
 		}
 	}
@@ -175,7 +186,7 @@ func TestNewRejectsMissingPorts(t *testing.T) {
 // TestOrgansID verifies the custom ID reaches the Effector via Action.CellID.
 func TestOrgansID(t *testing.T) {
 	var gotCellID string
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		ID: "wired",
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
@@ -198,7 +209,7 @@ func TestOrgansID(t *testing.T) {
 // TestDefaultID verifies an empty ID defaults to "agent".
 func TestDefaultID(t *testing.T) {
 	var gotCellID string
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
 		}},
@@ -227,7 +238,7 @@ func TestFullOrgansWiring(t *testing.T) {
 		firstCtx      []string
 	)
 	calls := 0
-	a, err := meowire.New(meowire.Organs{
+	a, err := testNew(meowire.Organs{
 		ID: "wired-agent",
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			gotIdentity = p.Identity

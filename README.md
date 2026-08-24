@@ -15,8 +15,8 @@ you can rely on.
   backend — it injects six host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~1.2k lines of source. The entire loop is one file
-  (`internal/nerve/loop.go`, ~370 lines with tests).
+- **Small and readable.** ~1.9k lines of source. The entire loop is one file
+  (`internal/nerve/loop.go`, ~530 lines with tests).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
 
@@ -24,17 +24,48 @@ you can rely on.
 
 - **Think→Act decision loop** with per-round retry and a hard round limit
 - **Typed event stream** — `Stimulate` returns `iter.Seq[Event]`; the host observes
-  `EventText`, `EventToolCall`, `EventToolResult`, `EventState`, `EventDone`, `EventError`, `EventUsage`
+  `EventText`, `EventToolCall`, `EventToolResult`, `EventState`, `EventDone`, `EventError`, `EventUsage`,
+  `EventSandbox` (action-level audit record)
+- **Action-level audit trail** — every sandbox decision (allowed or denied) yields an
+  `EventSandbox` verdict (tool, reason, error); persist the event stream for a complete
+  "who/what/why was permitted" audit, per the Authority security model
+- **Wiring graph inspection** — `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` treat the
+  assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
+- **Dynamic wiring (synaptic plasticity)** — `Agent.Replace(slot, port)` swaps
+  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks` at runtime; takes effect at the next `Stimulate`,
+  an in-flight `Stimulate` keeps the ports it started with
+- **Agent Card (A2A-ready)** — `AgentCard(Organs)` renders the assembly as a machine-readable
+  capability card (JSON); publish it at `/.well-known/agent-card.json` for agent discovery
+- **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
+  (submitted/working/needs-input/completed/failed/cancelled) for end-to-end inter-agent tracking
 - **Six host-injected ports** (all required, no stubs):
   `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks` (interception),
   `Sandbox` (permission gate), `ContextBudget` (context trimming)
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (human approval, async tool), then `Stimulate` again. Human-in-the-loop without framework support
+- **Pause/Resume** — process-level suspension at gap points (before each Think / tool execution);
+  the loop yields `EventState(StatePaused)` and keeps its in-cycle state until resumed
+- **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
+  `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
 - **Flat multi-agent model** — sub-agents and inter-agent messaging are host tools
   (`spawn_agent` / `send_message`), never framework-level nesting
 - **Resistance is feedback, not failure** — denied tools, tool errors, and busy targets flow back
   into the loop as `EventToolResult` feedback; the loop continues
+
+## Upgrading to v2.0
+
+- **`New` takes a single `Blueprint{Organs, Config, Strict}`** — define once, `New` many times:
+  wrap your `Organs`/`Config` in a `Blueprint` at the call site. `Strict: true` also rejects
+  warn-level assembly findings (half-wired hook pairs, incomplete memory/plan paths).
+- **`Sandbox` now requires `Bounds() string`** — return the execution boundary description;
+  the framework snapshots it once per `Stimulate` and surfaces it read-only to hooks and the
+  Thinker via `Prompt.Bounds`:
+  ```go
+  func (s *MySandbox) Bounds() string { return "read-only /workspace" }
+  ```
+- **Missing-port errors are `errors.Join`-aggregated** — single missing-port errors keep the
+  exact `meow: required port X not injected` format; match with `errors.Is` / `strings.Contains`, never exact string equality.
 
 ## Architecture
 
@@ -54,7 +85,7 @@ meowire (module root)
 | `Cell` | `internal/cell/cell.go` | Minimal kernel: ID + ports + loop |
 | `Thinker` / `Effector` / `Closer` | ports | Host-provided capabilities |
 | `Hooks` | ports | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
-| `Sandbox` | guard | Tool permission gate, invoked before each Act |
+| `Sandbox` | guard | Tool permission gate, invoked before each Act; `Bounds()` surfaces the execution boundary to the Thinker via `Prompt.Bounds` |
 | `ContextBudget` | guard | Trims context before each Think |
 | `Event` | events | Typed observation mirror of the loop |
 | `Synapse` / `Memory` | internal | Standalone reference contracts for hosts |
@@ -113,18 +144,25 @@ func (sandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error
 	return true, "", nil
 }
 
+func (sandbox) Bounds() string { return "read-only /workspace" }
+
 func main() {
-	agent, err := meowire.New(meowire.Organs{
-		Think:   thinker{},
-		Act:     effector{},
-		Closer:  closer{},
-		Hooks:   &meowire.Hooks{},
-		Sandbox: sandbox{},
-		Budget:  &meowire.ContextBudget{
-			MaxTokens: 8192,
-			Trimmer:   func(c []string, max int) []string { return c },
+	// Blueprint: define once, New many times (flat-model multi-agent)
+	bp := meowire.Blueprint{
+		Organs: meowire.Organs{
+			Think:   thinker{},
+			Act:     effector{},
+			Closer:  closer{},
+			Hooks:   &meowire.Hooks{},
+			Sandbox: sandbox{},
+			Budget: &meowire.ContextBudget{
+				MaxTokens: 8192,
+				Trimmer:   func(c []string, max int) []string { return c },
+			},
 		},
-	}, meowire.Config{})
+		Config: meowire.Config{},
+	}
+	agent, err := meowire.New(bp)
 	if err != nil {
 		panic(err)
 	}
@@ -183,6 +221,8 @@ Meowire is a **flat model**: one `Agent` = one kernel. The host owns all instanc
 - Sub-agents: a `spawn_agent` host tool that returns results as `EventToolResult` feedback
 - Inter-agent messaging: a `send_message` host tool (reference routing semantics in
   `internal/synapse`); resistance (busy target, unknown agent) becomes feedback, never a hard stop
+- Capability discovery: `AgentCard` renders the A2A-style card; `Signal.Status` (A2A six-state
+  task lifecycle) tracks each inter-agent task end to end
 
 ## Development
 
@@ -204,4 +244,5 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | Host Integration Guide | [docs/host-integration.en.md](docs/host-integration.en.md) |
+| Protocol Mapping Guide | [docs/protocols.md](docs/protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

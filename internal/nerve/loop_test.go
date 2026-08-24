@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // mockThinker is a test-only Thinker stub (local: nerve white-box tests cannot
@@ -297,6 +299,102 @@ type denySandbox struct{}
 
 func (denySandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
 	return false, "not allowed", nil
+}
+
+func (denySandbox) Bounds() string { return "deny-all" }
+
+// auditSandbox denies "rm" with a policy reason and allows everything else.
+type auditSandbox struct{}
+
+func (auditSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+	if a.Call.Name == "rm" {
+		return false, "destructive", nil
+	}
+	return true, "", nil
+}
+
+func (auditSandbox) Bounds() string { return "audit-all" }
+
+// TestDecisionLoopSandboxAuditAllow: a configured sandbox yields an
+// EventSandbox(allowed) verdict before the tool runs — the action-level
+// audit record the Authority model requires.
+func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
+	calls := 0
+	lc := &LoopContext{
+		CellID:    "c1",
+		Input:     "compute",
+		MaxRounds: 3,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "go", ToolCalls: []ToolCall{{ID: "t1", Name: "calc"}}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "2"}, nil
+		}},
+		Sandbox: auditSandbox{},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	var verdicts []*SandboxVerdict
+	for _, e := range events {
+		if e.Kind == EventSandbox {
+			verdicts = append(verdicts, e.Verdict)
+		}
+	}
+	if len(verdicts) != 1 {
+		t.Fatalf("sandbox verdicts = %d, want 1", len(verdicts))
+	}
+	v := verdicts[0]
+	if !v.Allowed || v.Reason != "" || v.Err != nil {
+		t.Fatalf("verdict = %+v, want allowed with no reason/error", v)
+	}
+	if v.CellID != "c1" || v.Call.Name != "calc" {
+		t.Fatalf("verdict = %+v, want CellID c1 and Call calc", v)
+	}
+}
+
+// TestDecisionLoopSandboxAuditDeny: a denial yields EventSandbox(denied)
+// with the policy reason, followed by the existing feedback path.
+func TestDecisionLoopSandboxAuditDeny(t *testing.T) {
+	calls := 0
+	lc := &LoopContext{
+		CellID:    "c1",
+		Input:     "dangerous",
+		MaxRounds: 3,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "do-it", ToolCalls: []ToolCall{{ID: "t1", Name: "rm"}}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "deleted"}, nil
+		}},
+		Sandbox: auditSandbox{},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	// Sequence: ... ToolCall, Sandbox(denied), ToolResult, ...
+	for i := 0; i < len(events)-1; i++ {
+		if events[i].Kind == EventToolCall {
+			if events[i+1].Kind != EventSandbox {
+				t.Fatalf("event after ToolCall = %+v, want EventSandbox(denied)", events[i+1])
+			}
+			v := events[i+1].Verdict
+			if v == nil {
+				t.Fatal("EventSandbox without a verdict")
+			}
+			if v.Allowed || v.Reason != "destructive" || v.Call.Name != "rm" {
+				t.Fatalf("verdict = %+v, want denied with reason 'destructive' for rm", v)
+			}
+			return
+		}
+	}
+	t.Fatal("no EventToolCall found in events")
 }
 
 // TestDecisionLoopYieldFalseStops: yield returns false → loop stops immediately.
@@ -978,5 +1076,451 @@ func TestDecisionLoopAfterActReceivesErr(t *testing.T) {
 	}
 	if !strings.Contains(gotErr.Error(), "executor exploded") {
 		t.Fatalf("AfterAct err = %v, want containing 'executor exploded'", gotErr)
+	}
+}
+
+// TestDecisionLoopPauseResume verifies a pause requested at a gap point
+// yields EventState(StatePaused) and the loop resumes once ResumeCh closes.
+func TestDecisionLoopPauseResume(t *testing.T) {
+	var paused atomic.Bool
+	resumeCh := make(chan struct{})
+	calls := 0
+	lc := &LoopContext{
+		CellID:    "c1",
+		Input:     "pause-test",
+		MaxRounds: 3,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "t", ToolCalls: []ToolCall{{ID: "t1", Name: "tool"}}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Pause: &PauseGate{
+			IsPaused: func() bool { return paused.Load() },
+			ResumeCh: func() <-chan struct{} { return resumeCh },
+		},
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		paused.Store(false) // resumed: clear the flag, like Agent.Resume does
+		close(resumeCh)
+	}()
+	var events []Event
+	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
+		events = append(events, e)
+		if e.Kind == EventToolCall {
+			paused.Store(true) // request pause right after the tool call is announced
+		}
+		return true
+	})
+
+	// Expect: State(thinking), Text, State(acting), ToolCall,
+	//         State(paused), ToolResult, State(thinking), Text(done),
+	//         State(done), Done
+	kinds := make([]EventKind, len(events))
+	for i, e := range events {
+		kinds[i] = e.Kind
+	}
+	wantKinds := []EventKind{
+		EventState, EventText, EventState, EventToolCall,
+		EventState, EventToolResult, EventState, EventText,
+		EventState, EventDone,
+	}
+	if len(kinds) != len(wantKinds) {
+		t.Fatalf("event kinds = %v, want %v", kinds, wantKinds)
+	}
+	for i, k := range kinds {
+		if k != wantKinds[i] {
+			t.Fatalf("event[%d] kind = %d, want %d", i, k, wantKinds[i])
+		}
+	}
+	if events[4].Kind != EventState || events[4].State != StatePaused {
+		t.Fatalf("events[4] = %+v, want EventState(StatePaused)", events[4])
+	}
+}
+
+// TestDecisionLoopPauseCtxCancel verifies a pause blocks until ctx cancels,
+// then follows the normal error path.
+func TestDecisionLoopPauseCtxCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var paused atomic.Bool
+	paused.Store(true) // paused from the very first gap point
+	resumeCh := make(chan struct{})
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "pause-cancel",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "unreachable"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Pause: &PauseGate{
+			IsPaused: func() bool { return paused.Load() },
+			ResumeCh: func() <-chan struct{} { return resumeCh },
+		},
+	}
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	events := collectEvents(ctx, lc)
+
+	// Expect: State(paused), State(error), EventError
+	if len(events) != 3 {
+		t.Fatalf("events count = %d, want 3; events: %+v", len(events), events)
+	}
+	if events[0].Kind != EventState || events[0].State != StatePaused {
+		t.Fatalf("events[0] = %+v, want EventState(StatePaused)", events[0])
+	}
+	if events[1].Kind != EventState || events[1].State != StateError {
+		t.Fatalf("events[1] = %+v, want EventState(StateError)", events[1])
+	}
+	if events[2].Kind != EventError {
+		t.Fatalf("events[2] = %+v, want EventError", events[2])
+	}
+}
+
+// TestDecisionLoopPauseConsumerAbort verifies stopping consumption during a
+// pause exits the loop without blocking (no deadlock, no resume needed).
+func TestDecisionLoopPauseConsumerAbort(t *testing.T) {
+	var paused atomic.Bool
+	paused.Store(true)
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "pause-abort",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "unreachable"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Pause: &PauseGate{
+			IsPaused: func() bool { return paused.Load() },
+			ResumeCh: func() <-chan struct{} { return make(chan struct{}) },
+		},
+	}
+
+	var gotPaused bool
+	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
+		if e.Kind == EventState && e.State == StatePaused {
+			gotPaused = true
+			return false // consumer aborts during the pause
+		}
+		return true
+	})
+	if !gotPaused {
+		t.Fatal("expected EventState(StatePaused) before consumer abort")
+	}
+}
+
+// TestActWithRetrySucceeds verifies a transient effector error is retried
+// up to ToolMaxRetries and the loop completes without an error event.
+func TestActWithRetrySucceeds(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "retry-tool",
+		MaxRounds:      2,
+		ToolMaxRetries: 2,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "flaky"}},
+				}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			if actCalls < 3 {
+				return nil, errors.New("transient")
+			}
+			return &Effect{Result: "ok"}, nil
+		}},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	if actCalls != 3 {
+		t.Fatalf("Act calls = %d, want 3 (2 retries after 1 failure)", actCalls)
+	}
+	for _, e := range events {
+		if e.Kind == EventError {
+			t.Fatalf("unexpected error event: %v", e.Err)
+		}
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone", last)
+	}
+}
+
+// TestActWithRetryExhausted verifies retries are exhausted and the final
+// error still flows through tool feedback (loop continues).
+func TestActWithRetryExhausted(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "retry-exhaust",
+		MaxRounds:      2,
+		ToolMaxRetries: 2,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "broken"}},
+				}, nil
+			}
+			return &Decision{Text: "recovered"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			return nil, errors.New("always-fails")
+		}},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	if actCalls != 3 {
+		t.Fatalf("Act calls = %d, want 3 (initial + 2 retries)", actCalls)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone (error is feedback, not failure)", last)
+	}
+}
+
+// TestActEffectErrNoRetry verifies Effect.Err (a business error) is never
+// retried — retrying could duplicate side effects.
+func TestActEffectErrNoRetry(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "business-error",
+		MaxRounds:      2,
+		ToolMaxRetries: 3,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "business"}},
+				}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			return &Effect{Err: "rejected by business logic"}, nil
+		}},
+	}
+	collectEvents(context.Background(), lc)
+
+	if actCalls != 1 {
+		t.Fatalf("Act calls = %d, want 1 (Effect.Err must not be retried)", actCalls)
+	}
+}
+
+// TestToolTimeoutNoRetry verifies a timeout-derived error is not retried and
+// flows through tool feedback as an error entry.
+func TestToolTimeoutNoRetry(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	var capturedCtx []string
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "timeout",
+		MaxRounds:      2,
+		ToolTimeout:    20 * time.Millisecond,
+		ToolMaxRetries: 2,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 2 {
+				capturedCtx = p.Context
+			}
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "slow"}},
+				}, nil
+			}
+			return &Decision{Text: "recovered"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			<-ctx.Done() // block until the per-tool timeout fires
+			return nil, ctx.Err()
+		}},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	if actCalls != 1 {
+		t.Fatalf("Act calls = %d, want 1 (timeout error must not be retried)", actCalls)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone", last)
+	}
+	found := false
+	for _, c := range capturedCtx {
+		if strings.Contains(c, "deadline exceeded") || strings.Contains(c, "context canceled") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("context = %v, want entry containing timeout/cancel error", capturedCtx)
+	}
+}
+
+// TestSandboxBoundsReachesPrompt verifies Sandbox.Bounds is snapshotted once
+// per Stimulate and surfaced via Prompt.Bounds.
+func TestSandboxBoundsReachesPrompt(t *testing.T) {
+	var gotBounds string
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "bounds",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			gotBounds = p.Bounds
+			return &Decision{Text: "ok"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Sandbox: &boundsSandbox{},
+	}
+	collectEvents(context.Background(), lc)
+
+	if gotBounds != "only /workspace" {
+		t.Fatalf("Prompt.Bounds = %q, want %q", gotBounds, "only /workspace")
+	}
+}
+
+// TestDecisionLoopBeforeStimulateSeesBounds verifies the BeforeStimulate
+// prototype carries the Sandbox snapshot (read-only: hook overrides are not
+// written back — the Thinker still receives the snapshot value).
+func TestDecisionLoopBeforeStimulateSeesBounds(t *testing.T) {
+	var hookBounds, thinkBounds string
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "bounds",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			thinkBounds = p.Bounds
+			return &Decision{Text: "ok"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+		Sandbox: &boundsSandbox{},
+		Hooks: &Hooks{
+			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
+				hookBounds = p.Bounds
+				p.Bounds = "hooked" // must not leak into the loop
+				return nil
+			},
+		},
+	}
+	collectEvents(context.Background(), lc)
+
+	if hookBounds != "only /workspace" {
+		t.Fatalf("hook Prompt.Bounds = %q, want %q", hookBounds, "only /workspace")
+	}
+	if thinkBounds != "only /workspace" {
+		t.Fatalf("thinker Prompt.Bounds = %q, want snapshot %q (hook override must not write back)", thinkBounds, "only /workspace")
+	}
+}
+
+// boundsSandbox permits everything and declares a fixed boundary.
+type boundsSandbox struct{}
+
+func (boundsSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+	return true, "", nil
+}
+
+func (boundsSandbox) Bounds() string { return "only /workspace" }
+
+// TestActWithRetryAndTimeoutTransientError verifies a transient effector error
+// is still retried when ToolTimeout is configured but does not fire
+// (regression: actCtx.Err() must be captured before cancel(), otherwise the
+// retry path is skipped whenever a timeout is configured).
+func TestActWithRetryAndTimeoutTransientError(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "retry-with-timeout",
+		MaxRounds:      2,
+		ToolTimeout:    5 * time.Second, // large: never fires
+		ToolMaxRetries: 2,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "flaky"}},
+				}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			if actCalls < 3 {
+				return nil, errors.New("transient")
+			}
+			return &Effect{Result: "ok"}, nil
+		}},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	if actCalls != 3 {
+		t.Fatalf("Act calls = %d, want 3 (2 retries after 1 failure)", actCalls)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone", last)
+	}
+}
+
+// TestActNegativeRetriesExecutesOnce verifies a negative ToolMaxRetries still
+// executes the tool once (contract: <=0 disables retry, not execution).
+func TestActNegativeRetriesExecutesOnce(t *testing.T) {
+	actCalls := 0
+	calls := 0
+	lc := &LoopContext{
+		CellID:         "c1",
+		Input:          "negative-retries",
+		MaxRounds:      2,
+		ToolMaxRetries: -1,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{
+					Text:      "do-it",
+					ToolCalls: []ToolCall{{ID: "t1", Name: "tool"}},
+				}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actCalls++
+			return nil, errors.New("boom")
+		}},
+	}
+	collectEvents(context.Background(), lc)
+
+	if actCalls != 1 {
+		t.Fatalf("Act calls = %d, want 1 (negative retries = execute once, no retry)", actCalls)
 	}
 }

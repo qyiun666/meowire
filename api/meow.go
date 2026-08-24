@@ -9,18 +9,53 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"sync"
 	"sync/atomic"
 
 	"github.com/qyiun666/meowire/internal/cell"
+	"github.com/qyiun666/meowire/internal/nerve"
 )
 
 // Agent is the facade — the sole entry point for the host.
 // cell and closer are set once at construction and never replaced;
-// only closed needs synchronization.
+// only closed and the pause state need synchronization.
 type Agent struct {
 	cell   *cell.Cell
 	closer Closer
 	closed atomic.Bool
+
+	pauseMu  sync.Mutex
+	paused   atomic.Bool
+	resumeCh chan struct{} // closed = resumed; recreated on each Pause
+}
+
+// Swappable port slot names for Replace (dynamic wiring).
+const (
+	SlotThink   = "think"
+	SlotAct     = "act"
+	SlotSandbox = "sandbox"
+	SlotBudget  = "budget"
+	SlotHooks   = "hooks"
+)
+
+// Replace swaps one runtime port (SlotThink/SlotAct/SlotSandbox/SlotBudget/
+// SlotHooks). It takes effect at the next Stimulate — each Stimulate builds a
+// fresh LoopContext, so an in-flight Stimulate keeps the ports it started
+// with. This is the dynamic-wiring counterpart of synaptic plasticity: hosts
+// swap organs between stimuli (another LLM, a stricter permission policy)
+// without rebuilding the agent. Closer is never swappable (resource
+// binding). Safe for concurrent use; a no-op after Close. Returns the
+// previous port value (nil if none was set); wrong slot or port type returns
+// an error.
+func (a *Agent) Replace(slot string, port any) (any, error) {
+	if a.closed.Load() {
+		return nil, nil
+	}
+	old, err := a.cell.Replace(slot, port)
+	if err != nil {
+		return nil, fmt.Errorf("meow: %w", err)
+	}
+	return old, nil
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
@@ -42,11 +77,21 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 	}
 }
 
-// Close shuts down the agent.
+// Close shuts down the agent. Any Stimulate blocked on a pending pause is
+// unblocked so its iterator can finish (or be stopped by ctx cancellation);
+// subsequent Stimulate calls fail with ErrCellClosed.
 func (a *Agent) Close() error {
 	if !a.closed.CompareAndSwap(false, true) {
 		return nil
 	}
+	// Unblock any goroutine waiting in waitIfPaused before tearing down.
+	a.pauseMu.Lock()
+	a.paused.Store(false)
+	if a.resumeCh != nil {
+		close(a.resumeCh)
+		a.resumeCh = nil
+	}
+	a.pauseMu.Unlock()
 	var errs []error
 	if err := a.cell.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("meow: cell: %w", err))
@@ -60,4 +105,56 @@ func (a *Agent) Close() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// Pause requests a pause. It takes effect at the next gap point (before a
+// Think or before a tool execution); an in-flight Think/Act is not
+// interrupted. Idempotent and safe for concurrent use; a no-op after Close.
+func (a *Agent) Pause() {
+	if a.closed.Load() {
+		return
+	}
+	a.pauseMu.Lock()
+	defer a.pauseMu.Unlock()
+	if a.closed.Load() { // Close may have completed after the fast-path check
+		return
+	}
+	if a.paused.Swap(true) {
+		return // already paused
+	}
+	a.resumeCh = make(chan struct{})
+}
+
+// Resume clears a pending pause. Idempotent and safe for concurrent use;
+// a no-op after Close.
+func (a *Agent) Resume() {
+	if a.closed.Load() {
+		return
+	}
+	a.pauseMu.Lock()
+	defer a.pauseMu.Unlock()
+	if a.closed.Load() { // Close may have completed after the fast-path check
+		return
+	}
+	if !a.paused.Swap(false) {
+		return // not paused
+	}
+	if a.resumeCh != nil {
+		close(a.resumeCh)
+		a.resumeCh = nil // closed channels are never re-closed
+	}
+}
+
+// pauseGate builds a PauseGate bound to this Agent's pause state. It is
+// injected into the cell at assembly; each Stimulate gets a fresh gate so a
+// pause requested mid-Stimulate is honored at the next gap point.
+func (a *Agent) pauseGate() *nerve.PauseGate {
+	return &nerve.PauseGate{
+		IsPaused: a.paused.Load,
+		ResumeCh: func() <-chan struct{} {
+			a.pauseMu.Lock()
+			defer a.pauseMu.Unlock()
+			return a.resumeCh
+		},
+	}
 }

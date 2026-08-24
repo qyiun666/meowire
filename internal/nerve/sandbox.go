@@ -10,4 +10,7 @@ import "context"
 // The host implements security policies; the framework only provides the interception point.
 type Sandbox interface {
 	Allow(ctx context.Context, a Action) (allowed bool, reason string, err error)
+	// Bounds returns the execution boundary description (host defined),
+	// surfaced to the Thinker via Prompt.Bounds once per Stimulate.
+	Bounds() string
 }

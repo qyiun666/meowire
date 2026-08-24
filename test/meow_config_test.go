@@ -14,7 +14,7 @@ import (
 // TestConfigApplied verifies MaxRounds etc. flow through to LoopContext.
 func TestConfigApplied(t *testing.T) {
 	thinkCalls := 0
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			thinkCalls++
 			return &meowire.Decision{
@@ -45,7 +45,7 @@ func TestConfigApplied(t *testing.T) {
 
 // TestConfigMaxToolOutput verifies MaxToolOutput truncation.
 func TestConfigMaxToolOutput(t *testing.T) {
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "done"}, nil
 		}},

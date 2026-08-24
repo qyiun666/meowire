@@ -14,7 +14,7 @@ import (
 // TestPortWiring verifies hooks are invoked during Stimulate.
 func TestPortWiring(t *testing.T) {
 	var hookCalled bool
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Hooks: &meowire.Hooks{
 			OnCycleEnd: func(ctx context.Context, output string) {
 				hookCalled = true
@@ -33,7 +33,7 @@ func TestPortWiring(t *testing.T) {
 
 // TestStimulateEventSequence verifies full event sequence: State→Text→Done.
 func TestStimulateEventSequence(t *testing.T) {
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "final-output"}, nil
 		}},
@@ -78,7 +78,7 @@ func TestStimulateEventSequence(t *testing.T) {
 func TestStimulateBoundaryHooks(t *testing.T) {
 	var beforeCalls, afterCalls int
 	var gotText, gotOutput string
-	a, err := meowire.New(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(meowire.Organs{
 		Think: &fnThinker{fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "final-output"}, nil
 		}},

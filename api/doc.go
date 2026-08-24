@@ -18,10 +18,20 @@
 //   - Ports: internal/nerve/port.go (Thinker/Effector/Closer), internal/nerve/hook.go (Hooks)
 //   - Guard ports: internal/nerve/sandbox.go (Sandbox), internal/nerve/context.go (ContextBudget)
 //   - Events: internal/nerve/event.go
+//   - Wiring blueprint: internal/nerve/wire.go (wiring graph — ConnectomeNodes
+//     are the data-object nodes, Connectome is the slot edge list; each slot
+//     carries TargetID, Semantics, Phase, Category, Parallel, Required),
+//     wiring.go (WiringDiagram / BuildGraph / SlotsByTarget / Validate /
+//     RenderDiagram / RenderJSON: blueprint × assembly comparison as a graph)
+//   - Dynamic wiring: Agent.Replace(slot, port) swaps runtime ports between
+//     Stimulates (plasticity); AgentCard(Organs) renders the A2A-style
+//     capability card; Signal.Status carries A2A task lifecycle states
 //   - Synapse: internal/synapse/ (inter-agent connections: Link/Fire only)
 //   - Memory: internal/memory/ (standalone contract, host reference)
-//   - Composition: assemble.go (New(Organs, Config) single assembly point)
-//   - Facade: meow.go (Agent: Stimulate returns iter.Seq[Event]; Close)
+//   - Composition: assemble.go (Blueprint{Organs, Config, Strict} + New(Blueprint)
+//     single assembly point; error-level findings always block, Strict promotes
+//     warn-level findings)
+//   - Facade: meow.go (Agent: Stimulate returns iter.Seq[Event]; Pause/Resume; Close)
 //
 // Sealed internals: all implementation packages live under internal/ and are
 // not importable outside this module. The api package is the sole public

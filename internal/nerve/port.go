@@ -23,6 +23,7 @@ type Prompt struct {
 	Methods  []MethodSpec // Built-in capability description (gene projection, describes only)
 	Tools    []ToolSpec   // Available tool list (host defined)
 	Context  []string     // Context (host injected base; framework appends tool feedback within cycle)
+	Bounds   string       // Execution boundary description (Sandbox.Bounds snapshot, host defined)
 
 	// Dynamic part (updated each round)
 	Input string // Current stimulus text

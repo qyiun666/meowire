@@ -10,14 +10,30 @@
 package nerve
 
 // Signal is the signal carrier in the bionic network.
+// Status tracks the task lifecycle when the signal is a task exchange
+// (A2A-style states; "" = not tracked).
 type Signal struct {
 	ID         string     // Unique identifier
 	From       string     // Sender ID
 	To         string     // Target ID
 	Kind       SignalKind // Signal category
+	Status     TaskStatus // Task lifecycle state ("" = not tracked)
 	Payload    []byte     // Content
 	ErrPayload bool       // Structured error flag
 }
+
+// TaskStatus tracks an inter-agent task lifecycle (A2A-style states,
+// matching the Agent2Agent protocol task states).
+type TaskStatus string
+
+const (
+	TaskSubmitted  TaskStatus = "submitted"  // Task created and queued
+	TaskWorking    TaskStatus = "working"    // Task in progress
+	TaskNeedsInput TaskStatus = "needs-input" // Awaiting input from the caller
+	TaskCompleted  TaskStatus = "completed"  // Task finished successfully
+	TaskFailed     TaskStatus = "failed"     // Task finished with an error
+	TaskCancelled  TaskStatus = "cancelled"  // Task aborted before completion
+)
 
 // SignalKind categorizes signal types.
 type SignalKind int

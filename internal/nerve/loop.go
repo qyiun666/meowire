@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -22,7 +23,7 @@ const (
 	StateIdle     LoopState = iota // Idle (waiting for stimulus)
 	StateThinking                  // Thinking (Thinker invoked)
 	StateActing                    // Acting (Effector invoked)
-	StatePaused                    // Reserved for future pause/resume support
+	StatePaused                    // Paused (yielded by pause gate at gap points)
 	StateDone                      // Done (cycle completed)
 	StateError                     // Error
 )
@@ -50,6 +51,19 @@ func (s LoopState) String() string {
 // DefaultMaxRounds is the default round limit when MaxRounds <= 0.
 const DefaultMaxRounds = 8
 
+// PauseGate is the pause gate (optional; nil = pause unsupported).
+// The loop checks it at gap points (before each Think and before each tool
+// execution); a pending pause yields EventState(StatePaused) and blocks
+// until ResumeCh is closed or ctx is canceled.
+type PauseGate struct {
+	// IsPaused reports whether a pause has been requested.
+	IsPaused func() bool
+	// ResumeCh returns the latest resume notification channel
+	// (closed = resumed); fetched at each pause so a pause request issued
+	// after the gate was built is still honored.
+	ResumeCh func() <-chan struct{}
+}
+
 // LoopContext carries all data needed for a single Cycle invocation.
 type LoopContext struct {
 	// Identity
@@ -67,17 +81,21 @@ type LoopContext struct {
 	Hooks   *Hooks
 	Sandbox Sandbox
 	Budget  *ContextBudget
+	Pause   *PauseGate
 
 	// Config
-	MaxRounds     int // Hard round limit (<=0 uses DefaultMaxRounds)
-	MaxToolOutput int // Tool output truncation length (<=0 = no truncation)
-	MaxRetries    int // Think retry count (<=0 = no retry)
+	MaxRounds      int           // Hard round limit (<=0 uses DefaultMaxRounds)
+	MaxToolOutput  int           // Tool output truncation length (<=0 = no truncation)
+	MaxRetries     int           // Think retry count (<=0 = no retry)
+	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = no timeout)
+	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
 
 	// Dynamic state
 	State   LoopState
 	Input   string
 	Plan    string
 	Context []string // Host injected constant context + tool result accumulation within cycle
+	Bounds  string   // Sandbox.Bounds() snapshot, taken once per Stimulate
 
 	// Host injected fixed parts
 	System string
@@ -105,6 +123,12 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 
 	hadToolCalls := false
 
+	// Snapshot the execution boundary once per Stimulate, before the
+	// BeforeStimulate hook so the prototype carries it (read-only).
+	if lc.Sandbox != nil {
+		lc.Bounds = lc.Sandbox.Bounds()
+	}
+
 	// BeforeStimulate hook: once per Stimulate, before any event is yielded.
 	// An error terminates the whole Stimulate without entering the loop.
 	// It runs before the ctx check so it fires exactly once even on a
@@ -126,6 +150,11 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 			return
 		}
 
+		// Gap point: honor a pending pause before each Think
+		if !waitIfPaused(ctx, lc, yield) {
+			return
+		}
+
 		// Apply context budget trimming before each Think
 		if lc.Budget != nil && lc.Budget.Trimmer != nil && lc.Budget.MaxTokens > 0 {
 			lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
@@ -144,6 +173,7 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 			Methods:  lc.Methods,
 			Tools:    lc.Tools,
 			Context:  lc.Context,
+			Bounds:   lc.Bounds,
 			Input:    lc.Input,
 			State:    lc.State.String(),
 			Plan:     lc.Plan,
@@ -199,14 +229,33 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 				return
 			}
 
-			// Sandbox check
-			if reason, denied := checkSandbox(ctx, lc, tc); denied {
-				fb := fmt.Sprintf("[denied: %s]", reason)
-				lc.Context = append(lc.Context, fb)
-				if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
+			// Gap point: honor a pending pause before each tool execution
+			if !waitIfPaused(ctx, lc, yield) {
+				return
+			}
+
+			// Sandbox check: every decision of a configured sandbox produces an
+			// EventSandbox audit record (allowed or denied). With no sandbox
+			// wired there is no membrane and no verdict to audit.
+			if lc.Sandbox != nil {
+				if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
+					if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+						CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
+					}}) {
+						return
+					}
+					fb := fmt.Sprintf("[denied: %s]", reason)
+					lc.Context = append(lc.Context, fb)
+					if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
+						return
+					}
+					continue
+				}
+				if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+					CellID: lc.CellID, Call: tc, Allowed: true,
+				}}) {
 					return
 				}
-				continue
 			}
 
 			act := Action{CellID: lc.CellID, Call: tc}
@@ -217,8 +266,8 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 				return
 			}
 
-			// Execute tool
-			eff, err := lc.Act.Act(ctx, act)
+			// Execute tool (with optional per-tool timeout and retry)
+			eff, err := actWithRetry(ctx, lc, act)
 			if eff == nil && err == nil {
 				eff = &Effect{Err: "nil effect from effector"}
 			}
@@ -313,6 +362,63 @@ func thinkWithRetry(ctx context.Context, lc *LoopContext, p *Prompt) (*Decision,
 	return nil, fmt.Errorf("nerve.thinkWithRetry: %w", err)
 }
 
+// actWithRetry executes a tool with an optional per-attempt timeout and retry
+// on effector errors only (Effect.Err is a business error and is never
+// retried — retrying could duplicate side effects). A ctx cancellation or a
+// timeout-derived error is not retried. The final error flows through
+// toolFeedback like any other tool failure (resistance is feedback).
+func actWithRetry(ctx context.Context, lc *LoopContext, act Action) (*Effect, error) {
+	maxAttempts := lc.ToolMaxRetries
+	if maxAttempts < 0 {
+		maxAttempts = 0 // negative config means "no retry", still execute once
+	}
+	var eff *Effect
+	var err error
+	for attempt := 0; attempt <= maxAttempts; attempt++ {
+		actCtx, cancel := ctx, func() {}
+		if lc.ToolTimeout > 0 {
+			actCtx, cancel = context.WithTimeout(ctx, lc.ToolTimeout)
+		}
+		eff, err = lc.Act.Act(actCtx, act)
+		actErr := actCtx.Err() // capture BEFORE cancel: after cancel it is always non-nil
+		cancel()               // released immediately; never deferred inside a retry loop
+		if err == nil {
+			return eff, nil
+		}
+		if ctx.Err() != nil || (lc.ToolTimeout > 0 && actErr != nil) {
+			return eff, err // parent canceled or per-attempt timeout actually fired
+		}
+	}
+	return eff, err
+}
+
+// waitIfPaused checks the pause gate at gap points. When a pause is pending it
+// yields EventState(StatePaused) and blocks until ResumeCh is closed, ctx is
+// canceled (error path), or the consumer stops the loop. Returns false when
+// the caller must return immediately.
+func waitIfPaused(ctx context.Context, lc *LoopContext, yield func(Event) bool) bool {
+	if lc.Pause == nil || lc.Pause.IsPaused == nil || !lc.Pause.IsPaused() {
+		return true
+	}
+	if !yield(Event{Kind: EventState, State: StatePaused}) {
+		return false
+	}
+	if lc.Pause.ResumeCh == nil {
+		return true
+	}
+	resume := lc.Pause.ResumeCh()
+	if resume == nil {
+		return true
+	}
+	select {
+	case <-resume:
+		return true
+	case <-ctx.Done():
+		emitError(ctx, lc, yield, fmt.Errorf("nerve: cycle: %w", ctx.Err()))
+		return false
+	}
+}
+
 // hookBeforeThink calls Hooks.BeforeThink if set.
 func hookBeforeThink(ctx context.Context, lc *LoopContext, p *Prompt) error {
 	if lc.Hooks == nil || lc.Hooks.BeforeThink == nil {
@@ -365,7 +471,8 @@ func hookOnCycleEnd(ctx context.Context, lc *LoopContext, output string) {
 // hookBeforeStimulate calls Hooks.BeforeStimulate if set.
 // The hook receives a Prompt prototype; its content fields are written back
 // to the LoopContext after the call, so the modifications apply to every
-// round of the Stimulate (State is loop-managed and not written back).
+// round of the Stimulate (State and Bounds are framework-managed and not
+// written back — Bounds carries the Sandbox snapshot read-only).
 func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 	if lc.Hooks == nil || lc.Hooks.BeforeStimulate == nil {
 		return nil
@@ -379,6 +486,7 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 		// in-place mutations (or an early hook error) never leak into lc.
 		// The write-back below then adopts the prototype's slice wholesale.
 		Context: append([]string(nil), lc.Context...),
+		Bounds:  lc.Bounds,
 		Input:   lc.Input,
 		Plan:    lc.Plan,
 		State:   lc.State.String(),
@@ -423,18 +531,19 @@ func emitError(ctx context.Context, lc *LoopContext, yield func(Event) bool, err
 	}
 }
 
-// checkSandbox checks Sandbox if non-nil; returns reason and whether denied.
-func checkSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (reason string, denied bool) {
+// checkSandbox checks Sandbox if non-nil; returns the policy reason, whether
+// the action is denied, and the evaluation error (nil = clean decision).
+func checkSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (reason string, denied bool, sbErr error) {
 	if lc.Sandbox == nil {
-		return "", false
+		return "", false, nil
 	}
 	act := Action{CellID: lc.CellID, Call: tc}
 	allowed, reason, err := lc.Sandbox.Allow(ctx, act)
 	if err != nil {
-		return fmt.Sprintf("sandbox error: %v", err), true
+		return fmt.Sprintf("sandbox error: %v", err), true, err
 	}
 	if !allowed {
-		return reason, true
+		return reason, true, nil
 	}
-	return "", false
+	return "", false, nil
 }

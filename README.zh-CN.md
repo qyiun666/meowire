@@ -13,7 +13,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入六个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
 - **零依赖。** 仅标准库。没有需要审计的传递依赖树。
-- **小巧可读。** 源码约 1200 行。整个循环只有一个文件（`internal/nerve/loop.go`，含测试约 370 行）。
+- **小巧可读。** 源码约 1900 行。整个循环只有一个文件（`internal/nerve/loop.go`，含测试约 530 行）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
   `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
 
@@ -21,17 +21,46 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 
 - **Think→Act 决策循环**，支持每轮重试与硬性轮数上限
 - **类型化事件流** —— `Stimulate` 返回 `iter.Seq[Event]`，宿主观察
-  `EventText`、`EventToolCall`、`EventToolResult`、`EventState`、`EventDone`、`EventError`、`EventUsage`
+  `EventText`、`EventToolCall`、`EventToolResult`、`EventState`、`EventDone`、`EventError`、`EventUsage`、
+  `EventSandbox`（动作级审计记录）
+- **动作级审计轨迹** —— 每个 Sandbox 决策（允许/拒绝）产出 `EventSandbox`
+  判定（工具、原因、错误）；持久化事件流即得完整"谁/做了什么/为什么被允许"审计，
+  符合 Authority 安全模型
+- **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
+  图（数据对象节点 + 插槽边），供人或机器渲染
+- **动态接线（突触可塑性）** —— `Agent.Replace(slot, port)` 运行时替换
+  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口
+- **Agent Card（A2A 就绪）** —— `AgentCard(Organs)` 把装配渲染为机器可读能力卡（JSON）；
+  发布到 `/.well-known/agent-card.json` 即可被其他 agent 发现
+- **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
+  （submitted/working/needs-input/completed/failed/cancelled），端到端追踪跨 agent 任务
 - **六个宿主注入端口**（全部必填，无 stub）：
   `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截）、
   `Sandbox`（权限门）、`ContextBudget`（上下文裁剪）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （人工审批、异步任务），再 `Stimulate` 继续。无需框架支持即可实现人机协作
+- **Pause/Resume** —— 间隙点（每轮 Think 前 / 每个工具执行前）的进程内暂停；
+  循环产出 `EventState(StatePaused)` 并保留循环内状态，直到恢复
+- **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
+  `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
 - **扁平多 agent 模型** —— 子 agent 与 agent 间通信是宿主工具
   （`spawn_agent` / `send_message`），绝不做框架级嵌套
 - **阻力是反馈，不是失败** —— 被拒绝的工具、工具错误、目标繁忙都以 `EventToolResult`
   反馈回流循环，循环继续
+
+## 升级到 v2.0
+
+- **`New` 接收单个 `Blueprint{Organs, Config, Strict}`** —— 一次定义、多次 `New`：
+  在调用点把 `Organs`/`Config` 包进 `Blueprint`。`Strict: true` 时 warn 级装配问题
+  （半配 hook 对、记忆/计划通路不完整）也会被拒绝。
+- **`Sandbox` 现在必须实现 `Bounds() string`** —— 返回执行边界描述；
+  框架每次 `Stimulate` 快照一次，通过 `Prompt.Bounds` 以只读方式提供给 hook 与 Thinker：
+  ```go
+  func (s *MySandbox) Bounds() string { return "read-only /workspace" }
+  ```
+- **缺失端口错误改为 `errors.Join` 聚合** —— 单端口缺失保持精确的 `meow: required port X not injected` 格式；
+  请用 `errors.Is` / `strings.Contains` 匹配，切勿精确比较错误字符串。
 
 ## 架构
 
@@ -51,7 +80,7 @@ meowire (模块根)
 | `Cell` | `internal/cell/cell.go` | 极简内核：ID + 端口 + 循环 |
 | `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
 | `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
-| `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用 |
+| `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪上下文 |
 | `Event` | 事件 | 循环的类型化观察镜像 |
 | `Synapse` / `Memory` | internal | 供宿主参考的独立契约 |
@@ -109,8 +138,12 @@ func (sandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error
 	return true, "", nil
 }
 
+func (sandbox) Bounds() string { return "read-only /workspace" }
+
 func main() {
-	agent, err := meowire.New(meowire.Organs{
+	// Blueprint：一次定义，多次 New（flat model 多 agent）
+	bp := meowire.Blueprint{
+		Organs: meowire.Organs{
 		Think:   thinker{},
 		Act:     effector{},
 		Closer:  closer{},
@@ -120,7 +153,10 @@ func main() {
 			MaxTokens: 8192,
 			Trimmer:   func(c []string, max int) []string { return c },
 		},
-	}, meowire.Config{})
+		},
+		Config: meowire.Config{},
+	}
+	agent, err := meowire.New(bp)
 	if err != nil {
 		panic(err)
 	}
@@ -176,6 +212,8 @@ Meowire 是**扁平模型**：一个 `Agent` = 一个内核。宿主拥有所有
 - 子 agent：`spawn_agent` 宿主工具，结果以 `EventToolResult` 反馈回流
 - agent 间通信：`send_message` 宿主工具（路由语义参考 `internal/synapse`）；
   阻力（目标繁忙、未知 agent）成为反馈，绝不是硬停止
+- 能力发现：`AgentCard` 渲染 A2A 风格卡片；`Signal.Status`（A2A 六态任务生命周期）
+  端到端追踪每个跨 agent 任务
 
 ## 开发
 
@@ -197,4 +235,5 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | 宿主集成指南 | [docs/host-integration.md](docs/host-integration.md) |
+| 协议映射指南 | [docs/protocols.md](docs/protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |
