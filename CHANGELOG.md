@@ -5,6 +5,17 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Docs
+
+- `host-integration.md`/`.en.md` — §6.3 adds a side-by-side boundary table
+  between Step-Resume (break + Stimulate, host-driven takeover) and the
+  suspension-resume protocol (WaitInput + Resume, tool-requested input): who
+  initiates, what state survives, how each resumes, and which scenarios each
+  path serves — reinforcing the single-path guarantee (ask_user has exactly
+  one form).
+
 ## [1.3.0] - 2026-08-25
 
 ### Added

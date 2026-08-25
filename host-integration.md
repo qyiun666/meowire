@@ -370,6 +370,19 @@ EventState(error) → EventError(Err)
 1. **提前停止（Step-Resume 基础，宿主主动接管）**：`for range` 中 break/return 即放弃本轮——停止点及之后的工具**不会执行**，本轮累积状态全部丢弃。宿主主动接管（人工审批、异步任务、`ErrMaxRounds` 续跑）用此路径：自行保存进度，再调用 `Stimulate` 继续。**注意：工具请求外部输入（ask_user）的唯一形式是 §6.4 的 `WaitInput` + `Resume` 协议——禁止用 break + `Stimulate` 模拟**（`Session` 不透明，挂起上下文无法手工重建）。
 2. **无状态 step**：每次 `Stimulate` 是一次无状态 step，无跨调用状态残留。宿主自己保存历史，下次通过 `Organs.Context`（或 `Hooks.BeforeThink`）放回去。
 
+**两条路径的边界（防混用，v1.3.0）：**
+
+| 维度 | Step-Resume（break + Stimulate） | 挂起-恢复（WaitInput + Resume，§6.4） |
+|------|--------------------------------|---------------------------------------|
+| 发起方 | 宿主主动中断 | 工具（LLM）请求输入 |
+| 状态 | 本轮全部丢弃，宿主自存进度 | 框架快照 `Session` 完整保留 |
+| 恢复 | `Stimulate` 从零开始（无状态 step） | `Resume` 自动恢复（先剩余工具再 Think） |
+| 轮次 | 重来 | 不占轮（挂起轮配额） |
+| 上下文 | 宿主手工重建（`Organs.Context` / `BeforeThink`） | 自动恢复（`Session.Context`） |
+| 适用场景 | 人工审批、异步任务、`ErrMaxRounds` 续跑 | `ask_user` 等工具提问、等待外部输入 |
+
+两者不可互相替代：**工具请求输入只能走挂起-恢复（唯一形式）**；break + Stimulate 仅限宿主主动接管。机制上 break 是 Go 迭代器的标准消费语义（框架在每个事件后检查 yield 返回值，保证停止点之后的工具不执行），不存在需要删除的"另一套实现"。
+
 ### 6.4 挂起-恢复协议（ask_user，v1.3.0）
 
 工具请求外部输入时的框架级协议——**不阻塞、不丢轮**，替代宿主在 Effector 内同步阻塞的旧做法：
