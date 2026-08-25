@@ -89,14 +89,16 @@ type Effector interface {
 | `Action.Call` | Tool call `{ID, Name, Args}`, `Args` is a JSON string |
 | `Effect.Result` | Success result text (formatted by the framework as `[tool] result` and appended to Context) |
 | `Effect.Err` | Tool-side error text (formatted as `[tool] error: ...`) |
+| `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the response and calls `agent.Resume(sess, response)` (see §6.4) |
 | return error | Execution-layer error (also formatted into feedback) |
 
 **Host responsibilities:**
 - Tool registry + dispatcher: route by `Name`, deserialize `Args`, serialize results
 - Multi-agent tools live here: `spawn_agent` (New → Stimulate → return result),
   `send_message` (cross-agent messaging, see §7.2) — flat-model convention
-- `ask_user`-style tools may **block synchronously** here waiting for human
-  input; must monitor `ctx.Done` so cancellation interrupts the wait
+- `ask_user`-style tools: **return `&Effect{WaitInput: question}` instead of blocking synchronously**
+  (blocking drags the Close wait; the suspension is expressed by the framework so the
+  UI can show "the cat is waiting for an answer"), see §6.4
 - Tool failures can be returned as `Effect{Err: ...}` instead of an error; both
   flow back as feedback and the loop continues (**resistance is feedback, not failure**)
 
@@ -111,11 +113,11 @@ type Closer interface {
 Releases host resources: LLM clients, HTTP connections, etc. The framework
 guarantees `Agent.Close` is idempotent (CAS); repeated calls have no side effects.
 
-### 2.4 Pause / Resume — process-level suspension (Agent-level control, not a port)
+### 2.4 Pause / Unpause — process-level suspension (Agent-level control, not a port)
 
 ```go
-agent.Pause()   // request a pause: takes effect at the next gap point
-agent.Resume()  // resume: clears the pause flag
+agent.Pause()     // request a pause: takes effect at the next gap point
+agent.Unpause()   // resume: clears the pause flag (named Resume in v1.2.1; renamed in v1.3.0 — Resume now continues a suspended loop, see §6.4)
 ```
 
 - **Gap-effective**: a pause request never interrupts an in-flight Think/Act;
@@ -123,13 +125,13 @@ agent.Resume()  // resume: clears the pause flag
 - A pending pause yields `EventState(StatePaused)`; resuming continues without an extra event
 - Pause state is **Agent-level and survives across Stimulate calls**: a Stimulate
   started while paused first suspends at its entry gap point
-- `Pause` / `Resume` are **idempotent and concurrency-safe**; no-ops after `Close`
+- `Pause` / `Unpause` are **idempotent and concurrency-safe**; no-ops after `Close`
 - **`Close` unblocks a pending pause**: an iterator suspended in pause is woken up
   and can finish normally (or be stopped by ctx cancellation) instead of hanging
 - A ctx cancellation while paused follows the normal error path
   (`EventState(StateError)` → `EventError`)
 - Difference from Step-Resume: Step-Resume abandons the round and restarts
-  statelessly; Pause/Resume **keeps the in-cycle state and suspends in place**
+  statelessly; Pause/Unpause **keeps the in-cycle state and suspends in place**
 
 ### 2.5 Hooks — interception callbacks (all eight required; explicit no-op where no behavior is wanted — absence fails assembly)
 
@@ -253,6 +255,18 @@ type Config struct {
 | `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and flow back as feedback) | no timeout |
 | `ToolMaxRetries` | Tool retry count on effector errors (**executor err only**; `Effect.Err` is never retried — avoids duplicate side effects) | no retry |
 
+**Runtime hot update (v1.3.0):**
+
+```go
+cfg := agent.GetConfig()  // read current values
+cfg.MaxRounds = 20        // change only the fields you want
+agent.UpdateConfig(cfg)   // wholesale swap: takes effect at the next Stimulate/Resume (an in-flight loop keeps its snapshot)
+```
+
+- Zero-value semantics identical to `New`: **wholesale replacement** — unset fields
+  fall back to defaults; always read-modify-write (as above)
+- Division of labor with `Replace`: `Replace` swaps ports (capability), `UpdateConfig` tunes scalars (parameters)
+
 ---
 
 ## 5. Step 4: `New` Assembly Validation
@@ -273,7 +287,7 @@ agent, err := meowire.New(bp)
     (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
   - `info` (empty Identity/Tools/Context, default rounds): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
   - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
-- After assembly the host calls `Stimulate` / `Pause` / `Resume` / `Close`, and may
+- After assembly the host calls `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`, and may
   swap ports at runtime via `Replace` and export the capability card via `AgentCard` (below)
 - All six ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
 
@@ -289,6 +303,11 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at
   Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
   port is returned (host decides whether to shut the old implementation down)
 - Concurrency-safe; no-op after `Close`; unknown slot or wrong port type returns an error
+- **Audit event (v1.3.0)**: every successful Replace records a `ReplaceAudit{CellID, Slot, Old, New}`,
+  emitted as `EventReplace` at the start of the next Stimulate/Resume (the moment the swap
+  takes effect — same level as `EventSandbox`, persistable); failed swaps record nothing;
+  zero output without swaps. The host closes its model-switch audit loop from the event
+  stream instead of maintaining a hand-rolled state machine
 
 ### 5.2 Capability card: `AgentCard` (A2A style)
 
@@ -340,10 +359,23 @@ EventState(thinking) → EventText → [EventUsage] → EventState(acting)
   → (EventToolCall → [EventSandbox] → EventToolResult) × N → back to EventState(thinking) → …
 ```
 
-**Pause path (inserted at gap points; the original sequence resumes after Resume):**
+**Pause path (inserted at gap points; the original sequence resumes after Unpause):**
 
 ```
-… → EventState(paused) → (blocks until Resume / ctx cancellation) → continue the original sequence
+… → EventState(paused) → (blocks until Unpause / ctx cancellation) → continue the original sequence
+```
+
+**Suspension path (tool returns `Effect.WaitInput`; the iterator ends normally; see §6.4):**
+
+```
+… → EventState(acting) → EventToolCall → EventSandbox → EventState(waiting)
+  → EventWaitInput(tool name + question + Session) → iterator ends normally (no Done/Error)
+```
+
+**Port-swap audit (at the start of the next Stimulate/Resume, before any other event; multiple in order):**
+
+```
+EventReplace(slot/old/new) → normal sequence follows
 ```
 
 **Error path:**
@@ -352,7 +384,7 @@ EventState(thinking) → EventText → [EventUsage] → EventState(acting)
 EventState(error) → EventError(Err)
 ```
 
-**After Close:** Stimulate yields `EventError(ErrCellClosed)` directly.
+**After Close:** Stimulate/Resume yields `EventError(ErrCellClosed)` directly.
 
 ### 6.2 `Event` fields (only the fields for the Kind are set; the rest are zero values)
 
@@ -362,10 +394,12 @@ EventState(error) → EventError(Err)
 | `EventToolCall` | `ToolCall *ToolCall` | Tool the LLM decided to call |
 | `EventToolResult` | `Effect *Effect` | Tool execution result (includes Sandbox denials: `Effect.Err = "[denied: reason]"`) |
 | `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (allowed/denied, tool, policy reason, evaluation error); not emitted when no sandbox is wired |
-| `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/done/error) |
+| `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
 | `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
+| `EventWaitInput` | `Wait *WaitInput` | Tool requests external input: `WaitInput{CellID, Call, Question, Session}` — the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
+| `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, Old, New}`; emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
 
 `SandboxVerdict{CellID, Call, Allowed, Reason, Err}`: one record per decision of a
 configured sandbox, emitted before the tool runs; persisting the event stream yields
@@ -374,13 +408,82 @@ the action-level audit log (who, on whose behalf, when, what, why permitted). Se
 
 ### 6.3 Two semantics the host must know
 
-1. **Early stop (basis of Step-Resume)**: breaking/returning in `for range`
+1. **Early stop (basis of Step-Resume, host-driven takeover)**: breaking/returning in `for range`
    abandons the round — tools at or after the stop point **do not** execute,
    and all state accumulated in this round is discarded. The host may
-   interrupt the stream for human approval/async work, then `Stimulate` again.
+   interrupt the stream for human approval/async work (saving its own
+   progress), then `Stimulate` again. **Note: the only form for a tool
+   requesting external input (ask_user) is the §6.4 `WaitInput` + `Resume`
+   protocol — do not simulate it with break + `Stimulate`** (the `Session`
+   is opaque; a suspended context cannot be rebuilt by hand).
 2. **Stateless step**: each `Stimulate` is one stateless step with no state
    across calls. The host keeps history itself and re-injects it via
    `Organs.Context` (or `Hooks.BeforeThink`).
+
+### 6.4 Suspension-resume protocol (ask_user, v1.3.0)
+
+The framework-level protocol for tools that need external input — **no blocking,
+no lost rounds**, replacing the old host-side synchronous block inside Effector:
+
+```go
+// ① Tool side (Effector): declare the suspension, never block
+func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+    if a.Call.Name == "ask_user" {
+        return &meowire.Effect{WaitInput: "May I delete this file?"}, nil
+    }
+    ...
+}
+```
+
+```go
+// ② Host side: save the Session, show the question, resume once the response arrives
+//    (consume Resume exactly like Stimulate)
+var sess meowire.Session
+for ev := range agent.Stimulate(ctx, "tidy the desktop") {
+    switch ev.Kind {
+    case meowire.EventWaitInput:
+        sess = ev.Wait.Session          // save the resume handle
+        ui.Show(ev.Wait.Question)       // "the cat is waiting for an answer"
+        go func() {                     // timeout is host-controlled (default deny)
+            select {
+            case ans := <-ui.Answer():
+                resumeCh <- ans
+            case <-time.After(60 * time.Second):
+                resumeCh <- "[denied: timeout]"
+            }
+        }()
+    }
+}
+ans := <-resumeCh
+for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimulate
+    ...
+}
+```
+
+**Semantics:**
+
+- **Suspension = the iterator ends normally**: yields `EventState(StateWaiting)` →
+  `EventWaitInput` and ends — no `EventDone`/`EventError`; `OnCycleEnd`/`AfterStimulate`
+  still fire exactly once (the host distinguishes suspension by `StateWaiting` —
+  **do not persist an unfinished round**)
+- **`Session` is an opaque value object** (snapshot of round/context/remaining tool calls/
+  accumulated output): the host only saves and returns it, never inspects it;
+  **single-use** — resuming twice re-executes the remaining tool calls (duplicate side
+  effects; host responsibility)
+- **No extra round**: Resume continues from the suspended round; the Think that digests
+  the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
+- **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;
+  it runs before the next Think after resume
+- **Response shape**: appended to Context as `[tool] <response>`, visible to the first
+  Think after resume; timeouts are host-controlled (default deny, inject `[denied: timeout]`)
+- **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
+  of the round's tools, then re-enters Think
+- **Resume hooks are identical to Stimulate** (`BeforeStimulate` fires as usual; with
+  host append semantics `Session.Context` merges naturally with retrieval results);
+  `Close` makes Resume yield `ErrCellClosed`; `Session` is an in-memory handle — it
+  dies on host restart (treat as timeout-deny)
+- **Division of labor with Say injection**: `Say`/`BeforeThink` inject new messages
+  (`p.Input`); `Resume` injects the suspension response (tool-feedback shape) — no overlap
 
 ---
 
@@ -389,7 +492,7 @@ the action-level audit log (who, on whose behalf, when, what, why permitted). Se
 ### 7.1 `Close() error`
 
 Idempotent (CAS); closes the cell then the host Closer; errors are joined
-with `errors.Join`. Stimulate after Close returns `ErrCellClosed`. The host
+with `errors.Join`. Stimulate/Resume after Close returns `ErrCellClosed`. The host
 should `defer agent.Close()`.
 
 ### 7.2 Optional extensions
@@ -670,8 +773,9 @@ func main() {
    corrupt the loop context via the shared backing array (§2.5)
 2. **Port concurrency safety**: Thinker/Effector are called concurrently if the
    same Agent is stimulated concurrently
-3. **Host ports must respect ctx cancellation**, especially in blocking
-   `ask_user` scenarios (otherwise cancellation cannot interrupt)
+3. **Host ports must respect ctx cancellation**; `ask_user` must never block
+   inside Effector (framework-level suspension protocol, §6.4) — the host-side
+   wait timeout is self-controlled (default deny `[denied: timeout]`)
 4. **`Organs.Context` is a slice**: update it to the latest history via
    `BeforeThink` before each Think (MemHop)
 5. **`ErrMaxRounds` is not a bug**: it fires when the last round has pending

@@ -39,7 +39,7 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		a.Resume()
+		a.Unpause()
 	}()
 
 	var events []meowire.Event
@@ -67,7 +67,7 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 }
 
 // TestAgentPauseBlocksStimulateEntry verifies a pending pause suspends a new
-// Stimulate at its first gap point until Resume is called.
+// Stimulate at its first gap point until Unpause is called.
 func TestAgentPauseBlocksStimulateEntry(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
@@ -102,7 +102,7 @@ func TestAgentPauseBlocksStimulateEntry(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for EventState(StatePaused)")
 	}
-	a.Resume()
+	a.Unpause()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -133,12 +133,12 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		wg.Add(2)
 		go func() { defer wg.Done(); a.Pause() }()
-		go func() { defer wg.Done(); a.Resume() }()
+		go func() { defer wg.Done(); a.Unpause() }()
 	}
 	wg.Wait()
 
-	// After the storm the agent must still be usable: final Resume then run.
-	a.Resume()
+	// After the storm the agent must still be usable: final Unpause then run.
+	a.Unpause()
 	var gotDone bool
 	for ev := range a.Stimulate(context.Background(), "work") {
 		if ev.Kind == meowire.EventDone {

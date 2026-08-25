@@ -492,6 +492,8 @@ func main() {
 	}
 	defer agent.Close()
 
+	var pendingSession meowire.Session // 挂起会话句柄（EventWaitInput 带出，Resume 传回）
+
 	// ② 消费事件流（Step-Resume：break 即放弃本轮，可稍后再 Stimulate）
 	for ev := range agent.Stimulate(context.Background(), "帮我算 (23+45)*2") {
 		switch ev.Kind {
@@ -503,6 +505,11 @@ func main() {
 			fmt.Println("📦", ev.Effect.Result, ev.Effect.Err)
 		case meowire.EventSandbox:
 			fmt.Printf("🛡 %s %s allowed=%v reason=%s\n", ev.Verdict.CellID, ev.Verdict.Call.Name, ev.Verdict.Allowed, ev.Verdict.Reason)
+		case meowire.EventWaitInput: // 挂起：保存 Session，向用户展示问题；响应到达后 Resume(ctx, sess, ans) 续跑
+			fmt.Println("❓", ev.Wait.Call.Name, ev.Wait.Question)
+			pendingSession = ev.Wait.Session
+		case meowire.EventReplace: // 端口替换审计：模型切换闭环从这里取，不再手工维护状态机
+			fmt.Printf("🔁 slot=%s old=%T new=%T\n", ev.Replace.Slot, ev.Replace.Old, ev.Replace.New)
 		case meowire.EventUsage:
 			fmt.Println("💰", ev.Usage.Total, "tokens")
 		case meowire.EventDone:
@@ -679,7 +686,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 6. **`ToolCalls` 空 = 循环结束**——LLM 每轮都要返回内容或工具调用，两者皆空会得到空结果
 7. **`ErrMaxRounds` 不是 bug**：最后一轮仍有工具调用时抛出；配合 Step-Resume（宿主保存进度 → 重新 `Stimulate` 传剩余任务）是预期用法
-8. **提前停止**：`for range` 中 break 即放弃本轮，停止点之后的工具不执行——这是人工审批（ask_user）的实现方式
+8. **提前停止（宿主主动接管）**：`for range` 中 break 即放弃本轮，停止点之后的工具不执行——宿主主动接管（人工审批、异步任务）用此路径；工具请求输入（ask_user）的唯一形式是 `Effect.WaitInput` + `EventWaitInput`/`Resume`（上文 ②），不要用 break + `Stimulate` 模拟（`Session` 不透明，挂起上下文无法手工重建）
 9. **事件流是观察镜像**：不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
 10. **暂停 vs Step-Resume**：Pause 保留循环内状态原地挂起（间隙点生效）；Step-Resume 放弃本轮无状态重来
 

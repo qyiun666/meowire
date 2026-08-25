@@ -25,7 +25,8 @@ you can rely on.
 - **Think→Act decision loop** with per-round retry and a hard round limit
 - **Typed event stream** — `Stimulate` returns `iter.Seq[Event]`; the host observes
   `EventText`, `EventToolCall`, `EventToolResult`, `EventState`, `EventDone`, `EventError`, `EventUsage`,
-  `EventSandbox` (action-level audit record)
+  `EventSandbox` (action-level audit record), `EventWaitInput` (loop suspended waiting for external input),
+  `EventReplace` (port-swap audit record)
 - **Action-level audit trail** — every sandbox decision (allowed or denied) yields an
   `EventSandbox` verdict (tool, reason, error); persist the event stream for a complete
   "who/what/why was permitted" audit, per the Authority security model
@@ -33,7 +34,10 @@ you can rely on.
   assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
 - **Dynamic wiring (synaptic plasticity)** — `Agent.Replace(slot, port)` swaps
   `Think`/`Act`/`Sandbox`/`Budget`/`Hooks` at runtime; takes effect at the next `Stimulate`,
-  an in-flight `Stimulate` keeps the ports it started with
+  an in-flight `Stimulate` keeps the ports it started with; every successful swap is
+  audited as `EventReplace` at the start of the next Stimulate/Resume
+- **Runtime config updates** — `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` tune
+  `MaxRounds` and the other scalar limits hot, without rebuilding the agent
 - **Agent Card (A2A-ready)** — `AgentCard(Organs)` renders the assembly as a machine-readable
   capability card (JSON); publish it at `/.well-known/agent-card.json` for agent discovery
 - **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
@@ -49,9 +53,16 @@ you can rely on.
   absence), `Sandbox` (permission membrane), `ContextBudget` (context
   regulator — needs a Trimmer and MaxTokens)
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
-  (human approval, async tool), then `Stimulate` again. Human-in-the-loop without framework support
-- **Pause/Resume** — process-level suspension at gap points (before each Think / tool execution);
-  the loop yields `EventState(StatePaused)` and keeps its in-cycle state until resumed
+  (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
+  input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
+- **Pause/Unpause** — process-level suspension at gap points (before each Think / tool execution);
+  the loop yields `EventState(StatePaused)` and keeps its in-cycle state until unpaused
+- **Suspension-resume (ask_user)** — a tool returns `Effect{WaitInput: question}` and the loop
+  suspends: it yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`)
+  and ends the iterator normally — no blocking, no extra round, no budget during the wait.
+  `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as tool feedback
+  (`[tool] <response>`), remaining tools run first, then the loop resumes from the suspended round.
+  Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
 - **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
   `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
@@ -211,11 +222,15 @@ Stopping consumption (yield returns false) **abandons the round**: tools at or a
 point do **not** execute, and all state accumulated in this round is discarded.
 `OnCycleEnd` is guaranteed to run exactly once per `Cycle` — on success, on error, and on abort.
 
-### Step-Resume (human-in-the-loop)
+### Step-Resume (host-driven takeover)
 
-Stop the iterator, execute the tool host-side (human approval, async work, external service),
-append the result to your history, then call `Stimulate` again. Each `Stimulate` is a stateless
-step — this is the recommended way to implement `ask_user`, long-running tasks, and retries.
+Stop the iterator, do host-side work (async tool, manual approval, external service), save your own
+progress, then call `Stimulate` again. Each `Stimulate` is a stateless step — this is the way to
+implement host-driven takeover, long-running tasks, and retries. Tool-requested input (`ask_user`)
+is **not** done this way: a tool returns `Effect{WaitInput: question}` and the loop suspends with an
+opaque `Session` — resume it via `Agent.Resume(ctx, sess, response)` (see Suspension-resume above).
+The two paths are mutually exclusive; a break-based `ask_user` would lose the suspended context
+(the `Session` is opaque and cannot be rebuilt by hand).
 
 ### Round limits
 

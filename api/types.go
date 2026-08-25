@@ -44,6 +44,9 @@ type (
 	EventKind      = nerve.EventKind
 	LoopState      = nerve.LoopState
 	SandboxVerdict = nerve.SandboxVerdict
+	WaitInput      = nerve.WaitInput // EventWaitInput payload: tool + question + resume Session
+	Session        = nerve.Session    // opaque resume handle — save from EventWaitInput, pass to Resume
+	ReplaceAudit   = nerve.ReplaceAudit
 )
 
 // Memory contract for host-implemented memory backends.
@@ -97,20 +100,23 @@ const (
 	StateThinking LoopState = nerve.StateThinking
 	StateActing   LoopState = nerve.StateActing
 	StatePaused   LoopState = nerve.StatePaused
+	StateWaiting  LoopState = nerve.StateWaiting
 	StateDone     LoopState = nerve.StateDone
 	StateError    LoopState = nerve.StateError
 )
 
 // EventKind constants.
 const (
-	EventText       EventKind = nerve.EventText
-	EventToolCall   EventKind = nerve.EventToolCall
-	EventToolResult EventKind = nerve.EventToolResult
-	EventState      EventKind = nerve.EventState
-	EventDone       EventKind = nerve.EventDone
-	EventError      EventKind = nerve.EventError
-	EventUsage      EventKind = nerve.EventUsage
-	EventSandbox    EventKind = nerve.EventSandbox
+	EventText        EventKind = nerve.EventText
+	EventToolCall    EventKind = nerve.EventToolCall
+	EventToolResult  EventKind = nerve.EventToolResult
+	EventState       EventKind = nerve.EventState
+	EventDone        EventKind = nerve.EventDone
+	EventError       EventKind = nerve.EventError
+	EventUsage       EventKind = nerve.EventUsage
+	EventSandbox     EventKind = nerve.EventSandbox
+	EventWaitInput   EventKind = nerve.EventWaitInput
+	EventReplace     EventKind = nerve.EventReplace
 )
 
 // SignalKind constants.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,6 +25,7 @@ const (
 	StateThinking                  // Thinking (Thinker invoked)
 	StateActing                    // Acting (Effector invoked)
 	StatePaused                    // Paused (yielded by pause gate at gap points)
+	StateWaiting                   // Waiting for external input (loop suspended, EventWaitInput)
 	StateDone                      // Done (cycle completed)
 	StateError                     // Error
 )
@@ -39,6 +41,8 @@ func (s LoopState) String() string {
 		return "acting"
 	case StatePaused:
 		return "paused"
+	case StateWaiting:
+		return "waiting"
 	case StateDone:
 		return "done"
 	case StateError:
@@ -50,6 +54,20 @@ func (s LoopState) String() string {
 
 // DefaultMaxRounds is the default round limit when MaxRounds <= 0.
 const DefaultMaxRounds = 8
+
+// LoopConfig is the scalar runtime configuration of the loop (host
+// provided). Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
+// MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables Think retry;
+// ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
+// retry. UpdateConfig swaps it wholesale; the next Stimulate/Resume snapshots
+// the new values (an in-flight loop keeps the values it started with).
+type LoopConfig struct {
+	MaxRounds      int
+	MaxToolOutput  int
+	MaxRetries     int
+	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = none)
+	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
+}
 
 // PauseGate is the pause gate (optional; nil = pause unsupported).
 // The loop checks it at gap points (before each Think and before each tool
@@ -96,6 +114,11 @@ type LoopContext struct {
 	Context []string // Host injected constant context + tool result accumulation within cycle
 	Bounds  string   // Sandbox.Bounds() snapshot, taken once per Stimulate
 
+	// PendingReplace: port swap audits recorded since the last Stimulate/
+	// Resume, emitted as EventReplace before any other event (the swap takes
+	// effect now — each Stimulate/Resume snapshots the ports it starts with).
+	PendingReplace []ReplaceAudit
+
 	// Host injected fixed parts
 	System string
 	Tools  []ToolSpec
@@ -107,101 +130,120 @@ type DecisionLoop struct{}
 // Cycle runs the decision loop, yielding events to the caller.
 // The yield function returns false to stop the loop early.
 func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event) bool) {
-	maxRounds := effectiveMaxRounds(lc.MaxRounds)
+	var finalOutput string
+	defer cycleGuarantees(ctx, lc, &finalOutput)()
+	if !cyclePrelude(ctx, lc, yield) {
+		return
+	}
 	var out strings.Builder
 	out.Grow(256)
+	finalOutput = roundLoop(ctx, lc, 1, &out, yield)
+}
+
+// Resume continues a suspended loop from the Session captured in
+// EventWaitInput: the external response is injected as tool feedback of the
+// pending tool ("[tool] <response>" appended to the context), the remaining
+// tool calls of the suspended round run first, then the round loop resumes
+// from the suspended round — the Think that digests the response uses the
+// suspended round's quota, so the suspension consumes no extra round. The
+// event stream is isomorphic with Stimulate (same hooks, same guarantees). A
+// zero-value Session is rejected with an error event.
+func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, response string, yield func(Event) bool) {
 	var finalOutput string
+	defer cycleGuarantees(ctx, lc, &finalOutput)()
+	if !sess.valid() {
+		emitError(ctx, lc, yield, fmt.Errorf("nerve: resume: invalid session"))
+		return
+	}
+	// Load the session: stimulus, plan, accumulated context + the suspension
+	// response as feedback of the pending tool, and the accumulated output.
+	lc.Input = sess.input
+	lc.Plan = sess.plan
+	lc.Context = append(slices.Clone(sess.context), fmt.Sprintf("[%s] %s", sess.pending.Name, response))
+	var out strings.Builder
+	out.Grow(256)
+	out.WriteString(sess.output)
+	if !cyclePrelude(ctx, lc, yield) {
+		return
+	}
+	// Finish the suspended round's remaining tool calls (same round, no new
+	// Think) before re-entering the round loop. A tool that suspends again
+	// yields a fresh EventWaitInput and ends the iterator normally.
+	if len(sess.remaining) > 0 {
+		lc.State = StateActing
+		if !yield(Event{Kind: EventState, State: StateActing}) {
+			return
+		}
+		waiting, ok := runToolCalls(ctx, lc, sess.remaining, sess.round, &out, yield)
+		if !ok || waiting != nil {
+			return
+		}
+	}
+	finalOutput = roundLoop(ctx, lc, sess.round, &out, yield)
+}
 
-	// OnCycleEnd and AfterStimulate are guaranteed exactly once per Cycle —
-	// on normal completion, error path, or early consumer stop (yield=false).
-	// AfterStimulate is protected from an OnCycleEnd panic via a nested defer.
-	defer func() {
-		defer func() { lc.Hooks.AfterStimulate(ctx, finalOutput) }()
-		lc.Hooks.OnCycleEnd(ctx, finalOutput)
-	}()
+// cycleGuarantees returns the deferred cleanup shared by Cycle and Resume:
+// OnCycleEnd and AfterStimulate are guaranteed exactly once per invocation —
+// on normal completion, error path, suspension, or early consumer stop
+// (yield=false). AfterStimulate is protected from an OnCycleEnd panic via a
+// nested defer. finalOutput is dereferenced at cleanup time.
+func cycleGuarantees(ctx context.Context, lc *LoopContext, finalOutput *string) func() {
+	return func() {
+		defer func() { lc.Hooks.AfterStimulate(ctx, *finalOutput) }()
+		lc.Hooks.OnCycleEnd(ctx, *finalOutput)
+	}
+}
 
-	// Snapshot the execution boundary once per Stimulate, before the
-	// BeforeStimulate hook so the prototype carries it (read-only).
+// cyclePrelude runs the shared prologue of Cycle and Resume: snapshot the
+// execution boundary once (before the BeforeStimulate hook so the prototype
+// carries it read-only), fire BeforeStimulate exactly once before any event,
+// check context cancellation, then emit pending EventReplace audits (the
+// moment the swaps take effect — before any other event). Returns false when
+// the caller must return immediately (an error was emitted or the consumer
+// stopped).
+func cyclePrelude(ctx context.Context, lc *LoopContext, yield func(Event) bool) bool {
 	lc.Bounds = lc.Sandbox.Bounds()
-
-	// BeforeStimulate hook: once per Stimulate, before any event is yielded.
-	// An error terminates the whole Stimulate without entering the loop.
-	// It runs before the ctx check so it fires exactly once even on a
-	// canceled context (AfterStimulate is already guaranteed by the defer).
 	if err := hookBeforeStimulate(ctx, lc); err != nil {
 		emitError(ctx, lc, yield, err)
-		return
+		return false
 	}
 	if cerr := ctx.Err(); cerr != nil {
 		emitError(ctx, lc, yield, fmt.Errorf("nerve: cycle: %w", cerr))
-		return
+		return false
 	}
+	for _, ra := range lc.PendingReplace {
+		if !yield(Event{Kind: EventReplace, Replace: &ra}) {
+			return false
+		}
+	}
+	return true
+}
 
+// roundLoop runs the round loop from startRound up to the effective max
+// rounds: pause gate, budget trim, Think, then Act. A round without tool
+// calls completes the loop with StateDone + EventDone and returns the final
+// accumulated output. A tool suspension ends the loop normally (the wait
+// events were already yielded) without Done, returning "" — callers must not
+// treat it as an error. Exhausting the cap with a pending tool call emits
+// ErrMaxRounds. Errors are emitted inside; a consumer stop aborts silently.
+func roundLoop(ctx context.Context, lc *LoopContext, startRound int, out *strings.Builder, yield func(Event) bool) (finalOutput string) {
+	maxRounds := effectiveMaxRounds(lc.MaxRounds)
 	var round int
-	for round = 1; round <= maxRounds; round++ {
+	for round = startRound; round <= maxRounds; round++ {
 		// Check ctx cancellation between rounds
 		if cerr := ctx.Err(); cerr != nil {
 			emitError(ctx, lc, yield, fmt.Errorf("nerve: cycle: %w", cerr))
-			return
+			return ""
 		}
 
 		// Gap point: honor a pending pause before each Think
 		if !waitIfPaused(ctx, lc, yield) {
-			return
+			return ""
 		}
 
-		// Apply context budget trimming before each Think
-		lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
-
-		// Thinking phase
-		lc.State = StateThinking
-		if !yield(Event{Kind: EventState, State: StateThinking}) {
-			return
-		}
-
-		// Build prompt
-		p := &Prompt{
-			System:   lc.System,
-			Identity: lc.Identity,
-			Methods:  lc.Methods,
-			Tools:    lc.Tools,
-			Context:  lc.Context,
-			Bounds:   lc.Bounds,
-			Input:    lc.Input,
-			State:    lc.State.String(),
-			Plan:     lc.Plan,
-		}
-
-		// BeforeThink hook
-		if err := hookBeforeThink(ctx, lc, p); err != nil {
-			emitError(ctx, lc, yield, err)
-			return
-		}
-
-		// Think with retry
-		dec, err := thinkWithRetry(ctx, lc, p)
-		if err != nil {
-			emitError(ctx, lc, yield, err)
-			return
-		}
-
-		// AfterThink hook
-		if err := hookAfterThink(ctx, lc, dec); err != nil {
-			emitError(ctx, lc, yield, err)
-			return
-		}
-
-		// Accumulate text output
-		out.WriteString(dec.Text)
-		if !yield(Event{Kind: EventText, Text: dec.Text}) {
-			return
-		}
-
-		// Report token usage of this Think (nil = skip accounting)
-		if dec.Usage != nil {
-			if !yield(Event{Kind: EventUsage, Usage: dec.Usage}) {
-				return
-			}
+		dec, ok := thinkRound(ctx, lc, out, yield)
+		if !ok {
+			return ""
 		}
 
 		// No tool calls → end of cycle
@@ -212,66 +254,16 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 		// Acting phase
 		lc.State = StateActing
 		if !yield(Event{Kind: EventState, State: StateActing}) {
-			return
+			return ""
 		}
-
-		for _, tc := range dec.ToolCalls {
-			if !yield(Event{Kind: EventToolCall, ToolCall: &tc}) {
-				return
-			}
-
-			// Gap point: honor a pending pause before each tool execution
-			if !waitIfPaused(ctx, lc, yield) {
-				return
-			}
-
-			// Sandbox check: every decision of the membrane produces an
-			// EventSandbox audit record (allowed or denied) before the tool runs.
-			if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
-				if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-					CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
-				}}) {
-					return
-				}
-				fb := fmt.Sprintf("[denied: %s]", reason)
-				lc.Context = append(lc.Context, fb)
-				if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
-					return
-				}
-				continue
-			}
-			if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-				CellID: lc.CellID, Call: tc, Allowed: true,
-			}}) {
-				return
-			}
-
-			act := Action{CellID: lc.CellID, Call: tc}
-
-			// BeforeAct hook
-			if err := hookBeforeAct(ctx, lc, &act); err != nil {
-				emitError(ctx, lc, yield, err)
-				return
-			}
-
-			// Execute tool (with optional per-tool timeout and retry)
-			eff, err := actWithRetry(ctx, lc, act)
-			if eff == nil && err == nil {
-				eff = &Effect{Err: "nil effect from effector"}
-			}
-
-			// Compute feedback
-			fb := toolFeedback(tc, eff, err, lc.MaxToolOutput)
-
-			// AfterAct hook
-			lc.Hooks.AfterAct(ctx, &act, eff, err)
-
-			// Append feedback to context
-			lc.Context = append(lc.Context, fb)
-
-			if !yield(Event{Kind: EventToolResult, Effect: eff}) {
-				return
-			}
+		waiting, ok := runToolCalls(ctx, lc, dec.ToolCalls, round, out, yield)
+		if !ok {
+			return ""
+		}
+		if waiting != nil {
+			// Loop suspended waiting for external input: the iterator ends
+			// normally here; the host resumes via Resume(sess, response).
+			return ""
 		}
 	}
 
@@ -280,19 +272,179 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 	// calls breaks out below the cap).
 	if round > maxRounds {
 		emitError(ctx, lc, yield, ErrMaxRounds)
-		return
+		return ""
 	}
 
-	// Done
-	finalOutput = out.String()
+	// Done — the output is finalized before StateDone so OnCycleEnd still
+	// receives it when the consumer stops at the done event.
+	final := out.String()
 	lc.State = StateDone
 	if !yield(Event{Kind: EventState, State: StateDone}) {
-		return
+		return final
 	}
-	if !yield(Event{Kind: EventDone, Output: finalOutput}) {
-		return
+	if !yield(Event{Kind: EventDone, Output: final}) {
+		return final
 	}
-	// OnCycleEnd hook: guaranteed by Cycle's defer above.
+	return final
+}
+
+// thinkRound runs one round's Think phase: context budget trimming, the
+// StateThinking event, prompt assembly, Think with retry, AfterThink, and
+// the text/usage events. Returns the decision (nil = the loop must end; an
+// error was emitted or the consumer stopped).
+func thinkRound(ctx context.Context, lc *LoopContext, out *strings.Builder, yield func(Event) bool) (*Decision, bool) {
+	// Apply context budget trimming before each Think
+	lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
+
+	lc.State = StateThinking
+	if !yield(Event{Kind: EventState, State: StateThinking}) {
+		return nil, false
+	}
+
+	// Build prompt
+	p := &Prompt{
+		System:   lc.System,
+		Identity: lc.Identity,
+		Methods:  lc.Methods,
+		Tools:    lc.Tools,
+		Context:  lc.Context,
+		Bounds:   lc.Bounds,
+		Input:    lc.Input,
+		State:    lc.State.String(),
+		Plan:     lc.Plan,
+	}
+
+	// BeforeThink hook
+	if err := hookBeforeThink(ctx, lc, p); err != nil {
+		emitError(ctx, lc, yield, err)
+		return nil, false
+	}
+
+	// Think with retry
+	dec, err := thinkWithRetry(ctx, lc, p)
+	if err != nil {
+		emitError(ctx, lc, yield, err)
+		return nil, false
+	}
+
+	// AfterThink hook
+	if err := hookAfterThink(ctx, lc, dec); err != nil {
+		emitError(ctx, lc, yield, err)
+		return nil, false
+	}
+
+	// Accumulate text output
+	out.WriteString(dec.Text)
+	if !yield(Event{Kind: EventText, Text: dec.Text}) {
+		return nil, false
+	}
+
+	// Report token usage of this Think (nil = skip accounting)
+	if dec.Usage != nil {
+		if !yield(Event{Kind: EventUsage, Usage: dec.Usage}) {
+			return nil, false
+		}
+	}
+	return dec, true
+}
+
+// runToolCalls executes one tool call list (a round's calls or the calls
+// remaining after a suspension): pause gate, sandbox gate, Act, feedback.
+// Returns waiting non-nil when a tool suspended the loop — the framework
+// already yielded StateWaiting + EventWaitInput, the caller must end the
+// iterator normally (no Done, no error). ok=false means the loop must end
+// (an error was emitted or the consumer stopped).
+func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round int, out *strings.Builder, yield func(Event) bool) (waiting *WaitInput, ok bool) {
+	for i, tc := range calls {
+		if !yield(Event{Kind: EventToolCall, ToolCall: &tc}) {
+			return nil, false
+		}
+
+		// Gap point: honor a pending pause before each tool execution
+		if !waitIfPaused(ctx, lc, yield) {
+			return nil, false
+		}
+
+		eff, err, handled, ok := runOneTool(ctx, lc, tc, yield)
+		if !ok {
+			return nil, false
+		}
+		if handled {
+			continue // denied: feedback already appended and yielded
+		}
+
+		// Suspension: the tool requests external input. Snapshot the loop
+		// state into a Session, yield the wait events, and end the iterator
+		// normally — the host resumes later via Resume(sess, response).
+		// WaitInput wins over err (explicit intent); a nil effect never
+		// suspends.
+		if eff != nil && eff.WaitInput != "" {
+			sess := Session{}.snapshot(round, lc.Input, lc.Plan, lc.Context, out.String(), tc, calls[i+1:])
+			w := &WaitInput{CellID: lc.CellID, Call: tc, Question: eff.WaitInput, Session: sess}
+			lc.State = StateWaiting
+			if !yield(Event{Kind: EventState, State: StateWaiting}) {
+				return nil, false
+			}
+			if !yield(Event{Kind: EventWaitInput, Wait: w}) {
+				return nil, false
+			}
+			return w, true
+		}
+
+		// Compute feedback and append to context
+		fb := toolFeedback(tc, eff, err, lc.MaxToolOutput)
+		lc.Hooks.AfterAct(ctx, &Action{CellID: lc.CellID, Call: tc}, eff, err)
+		lc.Context = append(lc.Context, fb)
+
+		if !yield(Event{Kind: EventToolResult, Effect: eff}) {
+			return nil, false
+		}
+	}
+	return nil, true
+}
+
+// runOneTool gates and executes one tool call: the sandbox membrane (every
+// decision yields an EventSandbox audit record), the BeforeAct hook, then
+// Act with timeout/retry. handled=true means the call was denied — the
+// feedback was already appended to the context and yielded as
+// EventToolResult, the caller must skip its own feedback. ok=false means the
+// loop must end (an error was emitted or the consumer stopped).
+func runOneTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) (eff *Effect, err error, handled bool, ok bool) {
+	// Sandbox check: every decision of the membrane produces an EventSandbox
+	// audit record (allowed or denied) before the tool runs.
+	if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
+		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+			CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
+		}}) {
+			return nil, nil, false, false
+		}
+		fb := fmt.Sprintf("[denied: %s]", reason)
+		lc.Context = append(lc.Context, fb)
+		if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
+			return nil, nil, false, false
+		}
+		return nil, nil, true, true
+	}
+	if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+		CellID: lc.CellID, Call: tc, Allowed: true,
+	}}) {
+		return nil, nil, false, false
+	}
+
+	act := Action{CellID: lc.CellID, Call: tc}
+
+	// BeforeAct hook
+	if err := hookBeforeAct(ctx, lc, &act); err != nil {
+		emitError(ctx, lc, yield, err)
+		return nil, nil, false, false
+	}
+
+	// Execute tool (with optional per-tool timeout and retry)
+	eff, err = actWithRetry(ctx, lc, act)
+	if eff == nil && err == nil {
+		eff = &Effect{Err: "nil effect from effector"}
+	}
+	return eff, err, false, true
 }
 
 // effectiveMaxRounds returns DefaultMaxRounds if maxRounds <= 0.

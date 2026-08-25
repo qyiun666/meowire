@@ -22,14 +22,18 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **Think→Act 决策循环**，支持每轮重试与硬性轮数上限
 - **类型化事件流** —— `Stimulate` 返回 `iter.Seq[Event]`，宿主观察
   `EventText`、`EventToolCall`、`EventToolResult`、`EventState`、`EventDone`、`EventError`、`EventUsage`、
-  `EventSandbox`（动作级审计记录）
+  `EventSandbox`（动作级审计记录）、`EventWaitInput`（循环挂起等待外部输入）、
+  `EventReplace`（端口替换审计记录）
 - **动作级审计轨迹** —— 每个 Sandbox 决策（允许/拒绝）产出 `EventSandbox`
   判定（工具、原因、错误）；持久化事件流即得完整"谁/做了什么/为什么被允许"审计，
   符合 Authority 安全模型
 - **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
   图（数据对象节点 + 插槽边），供人或机器渲染
 - **动态接线（突触可塑性）** —— `Agent.Replace(slot, port)` 运行时替换
-  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口
+  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
+  每次成功替换以 `EventReplace` 在下次 Stimulate/Resume 开头审计产出
+- **运行期配置热更新** —— `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` 热调
+  `MaxRounds` 等标量限制，免整 Agent 重建
 - **Agent Card（A2A 就绪）** —— `AgentCard(Organs)` 把装配渲染为机器可读能力卡（JSON）；
   发布到 `/.well-known/agent-card.json` 即可被其他 agent 发现
 - **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
@@ -44,9 +48,15 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
   `ContextBudget`（上下文调节器 —— 必须有 Trimmer 与 MaxTokens）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
-  （人工审批、异步任务），再 `Stimulate` 继续。无需框架支持即可实现人机协作
-- **Pause/Resume** —— 间隙点（每轮 Think 前 / 每个工具执行前）的进程内暂停；
-  循环产出 `EventState(StatePaused)` 并保留循环内状态，直到恢复
+  （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
+  不在此列，走下面的挂起-恢复协议（唯一形式）
+- **Pause/Unpause** —— 间隙点（每轮 Think 前 / 每个工具执行前）的进程内暂停；
+  循环产出 `EventState(StatePaused)` 并保留循环内状态，直到恢复（v1.3.0 由 Resume 改名）
+- **挂起-恢复（ask_user）** —— 工具返回 `Effect{WaitInput: 问题}` 即挂起：循环产出
+  `EventState(StateWaiting)` + `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束**
+  ——不阻塞、不占轮次、等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：
+  响应以 `[工具名] <response>` 工具反馈形态进入循环，先执行剩余工具，再从挂起轮继续。
+  超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
@@ -199,11 +209,14 @@ func main() {
 停止消费（yield 返回 false）**放弃本轮**：停止点及其后的工具**不会**执行，
 本轮累积的所有状态被丢弃。`OnCycleEnd` 保证每次 `Cycle` 恰好执行一次 —— 正常、错误、中止三条路径都覆盖。
 
-### Step-Resume（人机协作）
+### Step-Resume（宿主主动接管）
 
-停止迭代器，在宿主侧执行工具（人工审批、异步工作、外部服务），把结果追加到你的历史中，
-然后再次 `Stimulate`。每次 `Stimulate` 都是无状态步骤 —— 这是实现 `ask_user`、
-长任务和重试的推荐方式。
+停止迭代器，在宿主侧处理（异步工具、人工接管、外部服务），自行保存进度，然后再次
+`Stimulate`。每次 `Stimulate` 都是无状态步骤 —— 这是宿主主动接管、长任务和重试的实现方式。
+工具请求输入（ask_user）**不在此列**：工具返回 `Effect{WaitInput: 问题}`，循环携带不透明
+`Session` 挂起，宿主经 `Agent.Resume(ctx, sess, response)` 续跑（见上文“挂起-恢复”）。
+两条路径互斥；用 break + `Stimulate` 模拟 ask_user 会丢失挂起上下文（`Session` 不透明，
+无法手工重建）。
 
 ### 轮数上限
 

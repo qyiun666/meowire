@@ -11,7 +11,6 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/qyiun666/meowire/internal/nerve"
 )
@@ -31,12 +30,9 @@ type Cell struct {
 	// injected by the api layer; nil = pause unsupported).
 	PauseGate func() *nerve.PauseGate
 
-	// Config
-	MaxRounds      int
-	MaxToolOutput  int
-	MaxRetries     int
-	ToolTimeout    time.Duration
-	ToolMaxRetries int
+	// Config is the scalar runtime configuration, swapped wholesale by
+	// UpdateConfig; each Stimulate/Resume snapshots the current values.
+	Config nerve.LoopConfig
 
 	// Host-injected fixed parts
 	System  string
@@ -45,13 +41,18 @@ type Cell struct {
 	Context []string // Default context (host injected)
 
 	closed atomic.Bool
-	wireMu sync.Mutex // guards runtime-swappable ports (Replace)
+	wireMu sync.Mutex // guards runtime-swappable ports, Config, and pendingReplace
+	// pendingReplace: port swap audits recorded by Replace, drained into the
+	// LoopContext of the next Stimulate/Resume (the moment the swap takes
+	// effect) and emitted as EventReplace.
+	pendingReplace []nerve.ReplaceAudit
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
 // The port references used by this Stimulate are snapshotted under the wire
 // lock: a concurrent Replace takes effect at the next Stimulate, never
-// mid-flight.
+// mid-flight. Pending Replace audits are drained into this Stimulate's
+// LoopContext and emitted as EventReplace before any other event.
 func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
 		closed := c.closed.Load()
@@ -59,40 +60,98 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
 			return
 		}
-		c.wireMu.Lock()
-		think, act := c.Think, c.Act
-		hooks, sandbox, budget := c.Hooks, c.Sandbox, c.Budget
-		pauseGate := c.PauseGate
-		c.wireMu.Unlock()
-		if think == nil || act == nil {
+		lc := c.snapshot(text)
+		if lc == nil {
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: nil Think or Act port")})
 			return
 		}
-		lc := &nerve.LoopContext{
-			CellID:         c.ID,
-			Identity:       c.Identity,
-			Methods:        slices.Clone(c.Methods),
-			Think:          think,
-			Act:            act,
-			Hooks:          hooks,
-			Sandbox:        sandbox,
-			Budget:         budget,
-			MaxRounds:      c.MaxRounds,
-			MaxToolOutput:  c.MaxToolOutput,
-			MaxRetries:     c.MaxRetries,
-			ToolTimeout:    c.ToolTimeout,
-			ToolMaxRetries: c.ToolMaxRetries,
-			State:          nerve.StateIdle,
-			Input:          text,
-			System:         c.System,
-			Tools:          slices.Clone(c.Tools),
-			Context:        slices.Clone(c.Context),
-		}
-		if pauseGate != nil {
-			lc.Pause = pauseGate()
-		}
 		nerve.DecisionLoop{}.Cycle(ctx, lc, yield)
 	}
+}
+
+// Resume continues a suspended loop from a Session captured in
+// EventWaitInput; the event stream is isomorphic with Stimulate. The port
+// snapshot, pending Replace audits, and config are taken exactly like
+// Stimulate — a concurrent Replace/UpdateConfig takes effect here, never
+// mid-flight.
+func (c *Cell) Resume(ctx context.Context, sess nerve.Session, response string) iter.Seq[nerve.Event] {
+	return func(yield func(nerve.Event) bool) {
+		closed := c.closed.Load()
+		if closed {
+			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
+			return
+		}
+		lc := c.snapshot("")
+		if lc == nil {
+			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: nil Think or Act port")})
+			return
+		}
+		nerve.DecisionLoop{}.Resume(ctx, lc, sess, response, yield)
+	}
+}
+
+// snapshot snapshots the current ports, config, and pending Replace audits
+// under the wire lock and builds a fresh LoopContext; the audits are drained
+// so they are emitted at the start of this Stimulate/Resume (the moment the
+// swaps take effect). Returns nil when a required port is missing.
+func (c *Cell) snapshot(text string) *nerve.LoopContext {
+	c.wireMu.Lock()
+	think, act := c.Think, c.Act
+	hooks, sandbox, budget := c.Hooks, c.Sandbox, c.Budget
+	pauseGate := c.PauseGate
+	cfg := c.Config
+	pendingReplace := c.pendingReplace
+	c.pendingReplace = nil
+	c.wireMu.Unlock()
+	if think == nil || act == nil {
+		return nil
+	}
+	lc := &nerve.LoopContext{
+		CellID:         c.ID,
+		Identity:       c.Identity,
+		Methods:        slices.Clone(c.Methods),
+		Think:          think,
+		Act:            act,
+		Hooks:          hooks,
+		Sandbox:        sandbox,
+		Budget:         budget,
+		MaxRounds:      cfg.MaxRounds,
+		MaxToolOutput:  cfg.MaxToolOutput,
+		MaxRetries:     cfg.MaxRetries,
+		ToolTimeout:    cfg.ToolTimeout,
+		ToolMaxRetries: cfg.ToolMaxRetries,
+		State:          nerve.StateIdle,
+		Input:          text,
+		System:         c.System,
+		Tools:          slices.Clone(c.Tools),
+		Context:        slices.Clone(c.Context),
+		PendingReplace: pendingReplace,
+	}
+	if pauseGate != nil {
+		lc.Pause = pauseGate()
+	}
+	return lc
+}
+
+// UpdateConfig swaps the scalar loop configuration wholesale (zero-value
+// semantics identical to New). It takes effect at the next Stimulate/Resume
+// (each snapshots the config into a fresh LoopContext — an in-flight loop
+// keeps the values it started with). Safe for concurrent use; a no-op after
+// Close.
+func (c *Cell) UpdateConfig(cfg nerve.LoopConfig) {
+	if c.closed.Load() {
+		return
+	}
+	c.wireMu.Lock()
+	defer c.wireMu.Unlock()
+	c.Config = cfg
+}
+
+// GetConfig returns the current scalar loop configuration.
+func (c *Cell) GetConfig() nerve.LoopConfig {
+	c.wireMu.Lock()
+	defer c.wireMu.Unlock()
+	return c.Config
 }
 
 // Replace swaps one runtime port; it takes effect at the next Stimulate
@@ -128,6 +187,7 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 		}
 		old := c.Think
 		c.Think = v
+		c.recordReplace(slot, old, v)
 		return old, nil
 	case "act":
 		v, ok := port.(nerve.Effector)
@@ -136,6 +196,7 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 		}
 		old := c.Act
 		c.Act = v
+		c.recordReplace(slot, old, v)
 		return old, nil
 	case "sandbox":
 		v, ok := port.(nerve.Sandbox)
@@ -144,6 +205,7 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 		}
 		old := c.Sandbox
 		c.Sandbox = v
+		c.recordReplace(slot, old, v)
 		return old, nil
 	case "budget":
 		v, ok := port.(*nerve.ContextBudget)
@@ -152,6 +214,7 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 		}
 		old := c.Budget
 		c.Budget = v
+		c.recordReplace(slot, old, v)
 		return old, nil
 	case "hooks":
 		v, ok := port.(*nerve.Hooks)
@@ -160,10 +223,18 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 		}
 		old := c.Hooks
 		c.Hooks = v
+		c.recordReplace(slot, old, v)
 		return old, nil
 	default:
 		return nil, fmt.Errorf("cell.Replace: unknown slot %q", slot)
 	}
+}
+
+// recordReplace appends one ReplaceAudit for a successful swap; the audit is
+// emitted as EventReplace at the start of the next Stimulate/Resume (the
+// moment the swap takes effect). wireMu must be held by the caller.
+func (c *Cell) recordReplace(slot string, old, new any) {
+	c.pendingReplace = append(c.pendingReplace, nerve.ReplaceAudit{CellID: c.ID, Slot: slot, Old: old, New: new})
 }
 
 // completeHooks reports whether all eight hook callbacks are non-nil.

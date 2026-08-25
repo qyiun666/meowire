@@ -9,9 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/qyiun666/meowire/internal/cell"
+	"github.com/qyiun666/meowire/internal/nerve"
 )
 
 // Organs holds all host-provided ports (all required — no defaults, no stubs).
@@ -68,17 +68,14 @@ func FullHooks(h Hooks) *Hooks {
 	return &h
 }
 
-// Config holds agent configuration.
+// Config holds the scalar loop configuration (alias of the internal
+// LoopConfig — the single source of truth for config semantics).
 // Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables retry;
 // ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool retry.
-type Config struct {
-	MaxRounds      int
-	MaxToolOutput  int
-	MaxRetries     int
-	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = none)
-	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
-}
+// UpdateConfig swaps it wholesale at runtime; the next Stimulate/Resume
+// snapshots the new values.
+type Config = nerve.LoopConfig
 
 // Blueprint is a host assembly blueprint instance: ports + config. Define
 // once, New many times — every instance shares the same wiring and is
@@ -109,22 +106,18 @@ func New(b Blueprint) (*Agent, error) {
 
 	o, cfg := b.Organs, b.Config
 	c := &cell.Cell{
-		ID:             cmp.Or(o.ID, "agent"),
-		Identity:       o.Identity,
-		Think:          o.Think,
-		Act:            o.Act,
-		Hooks:          o.Hooks,
-		Sandbox:        o.Sandbox,
-		Budget:         o.Budget,
-		MaxRounds:      cfg.MaxRounds,
-		MaxToolOutput:  cfg.MaxToolOutput,
-		MaxRetries:     cfg.MaxRetries,
-		ToolTimeout:    cfg.ToolTimeout,
-		ToolMaxRetries: cfg.ToolMaxRetries,
-		System:         o.System,
-		Methods:        o.Methods,
-		Tools:          o.Tools,
-		Context:        o.Context,
+		ID:       cmp.Or(o.ID, "agent"),
+		Identity: o.Identity,
+		Think:    o.Think,
+		Act:      o.Act,
+		Hooks:    o.Hooks,
+		Sandbox:  o.Sandbox,
+		Budget:   o.Budget,
+		Config:   cfg,
+		System:   o.System,
+		Methods:  o.Methods,
+		Tools:    o.Tools,
+		Context:  o.Context,
 	}
 
 	a := &Agent{cell: c, closer: o.Closer}

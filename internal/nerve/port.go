@@ -4,7 +4,10 @@
 // port.go — host ports: LLM/tool contracts.
 package nerve
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // MethodSpec is a method specification (gene Method capability projection, describes only).
 type MethodSpec struct {
@@ -67,9 +70,63 @@ type Action struct {
 }
 
 // Effect is an execution result.
+// WaitInput, when non-empty, suspends the loop: the tool requests external
+// input (the field carries the question text). The loop yields
+// EventWaitInput with a Session snapshot and ends the iterator normally;
+// the host collects the input and resumes via Resume(sess, response). A
+// WaitInput declared while err is non-nil wins over the error (it is an
+// explicit intent); a nil Effect is never treated as a suspension.
 type Effect struct {
 	Result string
 	Err    string
+	// WaitInput non-empty = suspend and wait for external input.
+	WaitInput string
+}
+
+// WaitInput is the EventWaitInput payload: which tool suspended the loop,
+// what it asked, and the resume handle. The host saves Session and passes
+// it back to Resume once the external input arrives.
+type WaitInput struct {
+	CellID   string
+	Call     ToolCall // the tool that requested input
+	Question string   // the question text (Effect.WaitInput)
+	Session  Session  // resume handle — host saves and returns it
+}
+
+// Session is an opaque value object snapshotting the loop state at the
+// suspension point (round, accumulated context, remaining tool calls,
+// accumulated output, plan, input). It is produced by the framework inside
+// EventWaitInput and consumed by Resume; hosts only save it and pass it
+// back — its fields are unexported and must not be inspected or mutated.
+// A Session is single-use: resuming it twice re-executes the remaining tool
+// calls with duplicate side effects (host responsibility).
+type Session struct {
+	round     int        // round at suspension; Resume continues from it (no extra round)
+	input     string     // stimulus text at suspension
+	plan      string     // plan at suspension
+	context   []string   // accumulated context at suspension (incl. prior tool feedback)
+	output    string     // accumulated text output at suspension (EventDone prefix)
+	pending   ToolCall   // the tool that requested input (feedback formatting)
+	remaining []ToolCall // tool calls after the suspending one
+}
+
+// valid reports whether s is a usable session (zero value is rejected).
+// round is the discriminator: the framework always snapshots round >= 1,
+// and a zero-value Session has round 0. context may be nil (a host that
+// injects no base context) — Resume appends onto nil slices fine.
+func (s Session) valid() bool { return s.round >= 1 }
+
+// snapshot returns a deep-enough copy of the session for later resumption.
+func (s Session) snapshot(round int, input, plan string, context []string, output string, pending ToolCall, remaining []ToolCall) Session {
+	return Session{
+		round:     round,
+		input:     input,
+		plan:      plan,
+		context:   slices.Clone(context),
+		output:    output,
+		pending:   pending,
+		remaining: slices.Clone(remaining),
+	}
 }
 
 // Thinker is the LLM host port (the brain).

@@ -15,18 +15,23 @@
 ## Interface Contract
 
 - `DecisionLoop{}.Cycle(ctx, *LoopContext, yield)`: pure orchestration — Think → Act → yield events
-- `LoopState`: StateIdle/StateThinking/StateActing/StatePaused/StateDone/StateError (StatePaused yielded by the pause gate at gap points)
+- `DecisionLoop{}.Resume(ctx, *LoopContext, sess Session, response string, yield)`: continues a suspended loop from a Session — response injected as tool feedback, remaining tools run, round loop resumes from the suspended round (no extra round, no budget during the wait); stream/hooks/guarantees isomorphic with Cycle
+- `LoopState`: StateIdle/StateThinking/StateActing/StatePaused/StateWaiting/StateDone/StateError (StatePaused yielded by the pause gate at gap points; StateWaiting + EventWaitInput yielded when a tool suspends)
+- `LoopConfig{MaxRounds, MaxToolOutput, MaxRetries, ToolTimeout, ToolMaxRetries}`: scalar loop config (single source; api.Config aliases it); UpdateConfig swaps it wholesale — next Stimulate/Resume snapshots the new values
 - `LoopContext{CellID, Identity string, Methods []MethodSpec, Think, Act, Hooks, Sandbox, Budget, Pause, MaxRounds, MaxToolOutput, MaxRetries, ToolTimeout, ToolMaxRetries, State, Input, Plan, Context, Bounds, System, Tools}`: all ports injected via fields
 - `PauseGate{IsPaused, ResumeCh}`: optional pause gate (nil = unsupported); the loop checks it at gap points (before each Think, before each tool execution) — a pending pause yields EventState(StatePaused) and blocks until ResumeCh closes or ctx cancels (error path)
 - `Prompt{System, Identity string, Methods []MethodSpec, Tools, Context, Bounds, Input, State, Plan}`: sole data package delivered to Thinker; Context = host-injected base + framework-appended tool feedback within cycle; Bounds = Sandbox.Bounds() snapshot taken once per Stimulate
 - `Decision{Text, ToolCalls, Usage}`: Thinker output; non-empty ToolCalls triggers Act phase; Usage (nil = skip) is yielded as EventUsage
-- `Action{CellID, Call}` / `Effect{Result, Err}`: tool execution pair
+- `Action{CellID, Call}` / `Effect{Result, Err, WaitInput}`: tool execution pair; WaitInput non-empty = suspend the loop (request external input; the field is the question text) — the loop yields EventWaitInput and ends the iterator normally, the host resumes via Resume(sess, response); WaitInput wins over err (explicit intent), a nil effect never suspends
+- `WaitInput{CellID, Call, Question, Session}`: EventWaitInput payload — which tool suspended, what it asked, and the resume handle
+- `Session` (opaque): snapshot at the suspension point (round/input/plan/context/output/pending/remaining — all unexported); produced by the framework, consumed by Resume; hosts only save and pass it back; single-use (resuming twice re-executes remaining tools — host responsibility); valid iff round >= 1 (zero value rejected)
 - `Identity string`: identity description text, host composed (no structure enforced)
 - `MethodSpec{Name, Desc, Input, Output}`: built-in capability description (gene projection, describes only)
 - `ToolSpec{Name, Desc, Input, Output}`: host-defined tool specification
 - `Usage{Prompt, Completion, Total}`: token accounting; host accumulates via EventUsage events
-- `Event{Kind, Text, ToolCall, Effect, State, Err, Output, Usage, Verdict}`: typed event from each loop iteration
-- `EventKind`: EventText/EventToolCall/EventToolResult/EventState/EventDone/EventError/EventUsage/EventSandbox
+- `Event{Kind, Text, ToolCall, Effect, State, Err, Output, Usage, Verdict, Wait, Replace}`: typed event from each loop iteration
+- `EventKind`: EventText/EventToolCall/EventToolResult/EventState/EventDone/EventError/EventUsage/EventSandbox/EventWaitInput/EventReplace
+- `ReplaceAudit{CellID, Slot, Old, New}`: audit record carried by EventReplace — one per successful Replace, emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), before any other event; failed swaps record nothing
 - `SandboxVerdict{CellID string, Call ToolCall, Allowed bool, Reason string, Err error}`: audit record carried by EventSandbox — one verdict per tool execution (the membrane is required, so every execution is audited)
 - `Hooks{BeforeStimulate, AfterStimulate, BeforeThink, AfterThink, BeforeAct, AfterAct, OnError, OnCycleEnd}`: interception points (**all eight required since 1.2.0 — explicit no-op, not absence; a nil callback fails assembly**); BeforeStimulate fires once before any event with a Prompt prototype — content fields (System/Identity/Methods/Tools/Context/Input/Plan) are written back to LoopContext and apply to every round, State is not written back, error aborts the whole Stimulate; AfterStimulate fires exactly once at cycle end (all paths); AfterAct receives the tool execution error (err non-nil = effector failure)
 - `Sandbox` interface: `Allow(ctx, Action) (bool, string, error)` + `Bounds() string` — **required membrane (since 1.2.0 the loop never tolerates nil)**: every tool execution passes Allow (denied → `[denied: reason]` feedback, loop continues), every decision first yields EventSandbox (allowed or denied) as the audit record; Bounds snapshotted once per Stimulate before the BeforeStimulate hook and carried read-only on the Prompt prototype (hooks may read it but cannot override it — not written back)
@@ -36,9 +41,23 @@
 - `SignalKind`: KindStimulus/KindResponse/KindNotice (host-side routing semantics)
 - `TaskStatus`: A2A-style task lifecycle states (TaskSubmitted/TaskWorking/TaskNeedsInput/TaskCompleted/TaskFailed/TaskCancelled) carried by `Signal.Status`; "" = not tracked
 
+## Contract Change Checklist
+
+Changes to public contracts (EventKind / Event fields / port interfaces Thinker/Effector/Sandbox/ContextBudget / Signal) must sync every one of:
+
+- `api/types.go` aliases (constants and types)
+- This document's Interface Contract enumerations
+- `host-integration.md` + `host-integration.en.md` (6.2 event table, 6.1 sequences, port tables)
+- `reference-host.md` host example switch (only when a new event needs host handling — the switch is intentionally non-exhaustive)
+- `CHANGELOG.md` (Keep a Changelog entry)
+- `.qoder/repowiki` event-system doc
+
+`test/contract_sync_test.go` automates all of the above except `reference-host.md`; a missed sync fails `go test ./...`.
+
 ## Key Decisions
 
 - DecisionLoop is pure orchestration — no default Think/Act implementations, no stubs
+- Suspension (v1.3.0): a tool returning Effect.WaitInput suspends the loop — snapshot a Session (round/Context/remaining calls/output), yield StateWaiting + EventWaitInput, end the iterator normally (no Done/Error); OnCycleEnd/AfterStimulate still fire exactly once (finalOutput "" on the suspension path, like the error path); Resume reloads the session (context + "[tool] <response>" feedback), runs the remaining calls of the suspended round, then re-enters the round loop from the suspended round — the digesting Think uses the suspended round's quota (no extra round); budget Trimmer runs only before each Think (none during the wait); timeouts are host-controlled (resume with "[denied: timeout]")
 - MaxRounds<=0 uses DefaultMaxRounds=8; round exhaustion with remaining ToolCalls yields ErrMaxRounds via emitError
 - Think retry: MaxRetries attempts, ctx cancellation returns immediately
 - Tool execution: actWithRetry applies per-attempt ToolTimeout (<=0 = none) and ToolMaxRetries (<=0 = none) — retry on effector err only (Effect.Err never retried, avoids duplicate side effects); timeout/cancel errors not retried; the final error still flows through toolFeedback (resistance is feedback)
@@ -58,3 +77,5 @@
 - History/context accumulation happens within the loop only (Context field grows with tool feedback)
 - Emit/yield returns false to stop early — callers control termination; abort discards the round, tools after the stop point do not execute, OnCycleEnd still runs (defer)
 - StatePaused is produced by the pause gate at gap points (before each Think / tool execution); pause blocks until ResumeCh closes or ctx cancels (emitError); a consumer abort during the pause exits without blocking
+- StateWaiting is produced by a tool suspension (Effect.WaitInput) — distinct from StatePaused (gap-point pause): the iterator ends normally, the host resumes via Resume(sess, response); Session is single-use and never mutated by the framework
+- PendingReplace (LoopContext field) is drained by the cell snapshot; the loop emits them before any other event — hosts must not inspect them mid-cycle

@@ -5,6 +5,72 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-25
+
+### Added
+
+- **Suspension-resume protocol (ask_user)** — `Effect.WaitInput` suspends the
+  loop: the framework snapshots an opaque `Session` (round/context/remaining
+  tool calls/output), yields `EventState(StateWaiting)` + `EventWaitInput`
+  (tool, question, Session) and ends the iterator normally — no blocking, no
+  extra round (the digesting Think uses the suspended round's quota), no
+  budget during the wait. `Agent.Resume(ctx, sess, response)` continues the
+  loop: the response enters the context as `[tool] <response>`, the
+  suspended round's remaining tools run first, then the loop resumes from
+  the suspended round. Timeouts are host-controlled (resume with
+  `[denied: timeout]`). Replaces the host-side synchronous block inside
+  Effector. `Session` is an opaque value object (single-use, host-held).
+- **Runtime config updates** — `Agent.UpdateConfig(cfg)` swaps the scalar
+  loop config wholesale (takes effect at the next Stimulate/Resume),
+  `Agent.GetConfig()` reads it back (read-modify-write); `Config` is now an
+  alias of the internal `LoopConfig` (single source of truth).
+- **Port-swap audit events** — every successful `Replace` records a
+  `ReplaceAudit{CellID, Slot, Old, New}` emitted as `EventReplace` at the
+  start of the next Stimulate/Resume (the moment the swap takes effect),
+  same persistable level as `EventSandbox`; failed swaps record nothing.
+
+### Changed
+
+- **`Agent.Resume()` renamed to `Agent.Unpause()`** — clears a pending
+  gap-point pause; `Resume(ctx, sess, response)` now means continuing a
+  suspended loop. Hosts calling `Unpause()` must update their call sites.
+
+### Internal
+
+- `loop.go` refactored into reusable segments — `cyclePrelude` (shared
+  prologue: Bounds snapshot / BeforeStimulate / ctx check / pending
+  `EventReplace` emission), `roundLoop`, `thinkRound`, `runToolCalls`,
+  `runOneTool`; `Cycle` and `Resume` share the same path, so the Resume
+  event stream is isomorphic with Stimulate (same hooks, same guarantees).
+- `cell.Cell` config fields converged into `Config nerve.LoopConfig`;
+  `snapshot()` (ports + config + pending Replace audits under the wire
+  lock) is shared by Stimulate and Resume.
+- **Contract documentation drift guard** — new `test/contract_sync_test.go`
+  extracts the `EventKind` enum from `internal/nerve/event.go` (single
+  source of truth) and fails when the api aliases (`api/types.go`),
+  `internal/nerve/agent.md`, `host-integration.md`/`.en.md` event tables,
+  or the repowiki event-system doc drift from it. `reference-host.md`
+  stays manual: its event switch is an example, not a contract.
+
+### Docs
+
+- `internal/nerve/agent.md` — added a Contract Change Checklist section
+  listing every document a public-contract change must sync.
+- repowiki event-system doc — event enumeration restored to the current
+  contract (`EventSandbox` had been missing since 1.2.0).
+- `host-integration.md`/`.en.md` — §2.4 Pause/Unpause, §4 runtime config
+  updates, §5.1 Replace audit, §6.1 suspension sequence, §6.2 event table,
+  new §6.4 suspension-resume protocol.
+- **Single-path guarantee for ask_user** — README (en/zh-CN),
+  `host-integration.md`/`.en.md`, and `reference-host.md` now declare
+  `Effect.WaitInput` + `Resume` as the **only** form for a tool requesting
+  external input; Step-Resume (break + `Stimulate`) is explicitly scoped to
+  host-driven takeover (manual approval, async work, `ErrMaxRounds`
+  continuation). The two paths are mutually exclusive — a break-based
+  `ask_user` would lose the suspended context (the `Session` is opaque and
+  cannot be rebuilt by hand), and the pitfall list now forbids blocking
+  inside Effector.
+
 ## [1.2.1] - 2026-08-24
 
 ### Fixed

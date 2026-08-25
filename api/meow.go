@@ -77,6 +77,47 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 	}
 }
 
+// Resume continues a suspended loop from the Session captured in an
+// EventWaitInput event: the external response is injected as tool feedback
+// ("[tool] <response>" appended to the context), the suspended round's
+// remaining tool calls run first, then the round loop resumes from the
+// suspended round — the suspension consumes no extra round and no budget.
+// The event stream is isomorphic with Stimulate (same hooks, same
+// guarantees, same consumption model); timeouts are host-controlled
+// (resume with "[denied: timeout]"). The Session is single-use: resuming it
+// twice re-executes the remaining tool calls (host responsibility). Yields
+// ErrCellClosed after Close.
+func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.Seq[Event] {
+	return func(yield func(Event) bool) {
+		if a.closed.Load() {
+			yield(Event{Kind: EventError, Err: ErrCellClosed})
+			return
+		}
+		for ev := range a.cell.Resume(ctx, sess, response) {
+			if !yield(ev) {
+				return
+			}
+		}
+	}
+}
+
+// UpdateConfig swaps the scalar loop configuration wholesale (zero-value
+// semantics identical to New). It takes effect at the next Stimulate/Resume
+// — an in-flight loop keeps the values it started with. Pair with GetConfig
+// for read-modify-write updates (a zero field resets to its default). Safe
+// for concurrent use; a no-op after Close.
+func (a *Agent) UpdateConfig(cfg Config) {
+	if a.closed.Load() {
+		return
+	}
+	a.cell.UpdateConfig(cfg)
+}
+
+// GetConfig returns the current scalar loop configuration.
+func (a *Agent) GetConfig() Config {
+	return a.cell.GetConfig()
+}
+
 // Close shuts down the agent. Any Stimulate blocked on a pending pause is
 // unblocked so its iterator can finish (or be stopped by ctx cancellation);
 // subsequent Stimulate calls fail with ErrCellClosed.
@@ -125,9 +166,11 @@ func (a *Agent) Pause() {
 	a.resumeCh = make(chan struct{})
 }
 
-// Resume clears a pending pause. Idempotent and safe for concurrent use;
-// a no-op after Close.
-func (a *Agent) Resume() {
+// Unpause clears a pending pause (the counterpart of Pause). Idempotent and
+// safe for concurrent use; a no-op after Close. The loop resumes at its next
+// gap point. Note: the name changed from Resume in v1.2.1 — Resume now
+// continues a suspended loop (see Resume(ctx, sess, response)).
+func (a *Agent) Unpause() {
 	if a.closed.Load() {
 		return
 	}
