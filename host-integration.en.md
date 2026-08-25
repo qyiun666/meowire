@@ -420,23 +420,16 @@ the action-level audit log (who, on whose behalf, when, what, why permitted). Se
    across calls. The host keeps history itself and re-injects it via
    `Organs.Context` (or `Hooks.BeforeThink`).
 
-**Boundary between the two paths (anti-mixing, v1.3.0):**
-
-| Dimension | Step-Resume (break + Stimulate) | Suspension-resume (WaitInput + Resume, §6.4) |
-|-----------|--------------------------------|-----------------------------------------------|
-| Who initiates | Host-driven interruption | Tool (LLM) requests input |
-| State | Whole round discarded; host saves its own progress | Framework snapshots an opaque `Session` in full |
-| Resume | `Stimulate` restarts from scratch (stateless step) | `Resume` restores automatically (remaining tools first, then Think) |
-| Rounds | Restart | No extra round (suspended round's quota) |
-| Context | Host rebuilds by hand (`Organs.Context` / `BeforeThink`) | Restored automatically (`Session.Context`) |
-| Use cases | Manual approval, async work, `ErrMaxRounds` continuation | `ask_user`-style tools, waiting for external input |
-
-The two paths cannot replace each other: **a tool requesting input must use the
-suspension-resume protocol (the only form)**; break + Stimulate is limited to
-host-driven takeover. Mechanically, break is the standard Go iterator
-consumption semantics (the framework checks the yield return after every
-event, guaranteeing tools after the stop point never run) — there is no
-"second implementation" to remove.
+**Boundary of the two paths, in plain words**: a tool requesting input
+(ask_user) must use the §6.4 suspension-resume protocol — the framework
+keeps the `Session` and consumes no extra round; the host saves the session,
+shows the question, and resumes with `Resume` once the answer arrives. Use
+break + `Stimulate` only for host-driven takeover (manual approval, async
+work, `ErrMaxRounds` continuation) — the round's state is discarded and you
+re-inject your own progress. The two paths cannot replace each other: break
+is just the standard Go iterator consumption semantics (tools after the stop
+point never run), not a second implementation — simulating ask_user with
+break loses the suspended context.
 
 ### 6.4 Suspension-resume protocol (ask_user, v1.3.0)
 

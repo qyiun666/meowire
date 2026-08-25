@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 
-- `host-integration.md`/`.en.md` — §6.3 adds a side-by-side boundary table
-  between Step-Resume (break + Stimulate, host-driven takeover) and the
-  suspension-resume protocol (WaitInput + Resume, tool-requested input): who
-  initiates, what state survives, how each resumes, and which scenarios each
-  path serves — reinforcing the single-path guarantee (ask_user has exactly
-  one form).
+- `host-integration.md`/`.en.md` — §6.3 clarifies the boundary between
+  Step-Resume (break + Stimulate, host-driven takeover) and the
+  suspension-resume protocol (WaitInput + Resume, tool-requested input) in
+  plain language: ask_user has exactly one form, and break is the standard
+  Go iterator consumption semantics (tools after the stop point never run),
+  not a second implementation.
 
 ## [1.3.0] - 2026-08-25
 
