@@ -284,9 +284,10 @@ func TestDecisionLoopHooks(t *testing.T) {
 	}
 }
 
-// TestDecisionLoopToolErrorBackfill: Tool returns error → feedback contains error text → next Think sees it in Context.
+// TestDecisionLoopToolErrorBackfill: Tool returns error → the failure text
+// reaches the next Think via ToolResults.Err (structured track only).
 func TestDecisionLoopToolErrorBackfill(t *testing.T) {
-	var capturedCtx []string
+	var capturedResults []ToolResult
 	calls := 0
 	lc := &LoopContext{
 		CellID:    "c1",
@@ -295,7 +296,7 @@ func TestDecisionLoopToolErrorBackfill(t *testing.T) {
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			calls++
 			if calls == 2 {
-				capturedCtx = p.Context
+				capturedResults = append([]ToolResult(nil), p.ToolResults...)
 			}
 			if calls == 1 {
 				return &Decision{
@@ -311,16 +312,12 @@ func TestDecisionLoopToolErrorBackfill(t *testing.T) {
 	}
 	collectEvents(context.Background(), lc)
 
-	// Verify that the second Think call received context containing the error
-	found := false
-	for _, c := range capturedCtx {
-		if strings.Contains(c, "boom") {
-			found = true
-			break
-		}
+	// Verify that the second Think call received the error in the structured track.
+	if len(capturedResults) != 1 || capturedResults[0].ID != "t1" || capturedResults[0].Name != "broken" {
+		t.Fatalf("ToolResults = %+v, want one entry t1/broken", capturedResults)
 	}
-	if !found {
-		t.Fatalf("context = %v, want entry containing 'boom'", capturedCtx)
+	if !strings.Contains(capturedResults[0].Err, "boom") || capturedResults[0].Result != "" {
+		t.Fatalf("ToolResults[0] = %+v, want Err containing 'boom' and empty Result", capturedResults[0])
 	}
 }
 
@@ -637,24 +634,19 @@ func TestDecisionLoopOnCycleEndOnError(t *testing.T) {
 	}
 }
 
-// TestToolFeedbackUTF8Truncation verifies toolFeedback handles multi-byte UTF-8 correctly.
-func TestToolFeedbackUTF8Truncation(t *testing.T) {
-	tc := ToolCall{Name: "test"}
-
+// TestTruncateTextUTF8Truncation verifies truncateText handles multi-byte UTF-8 correctly.
+func TestTruncateTextUTF8Truncation(t *testing.T) {
 	// Multi-byte string: "你好世界" is 12 bytes (3 bytes per char)
-	eff := &Effect{Result: "你好世界"}
-
-	// Truncate at 5 bytes (falls inside second character)
-	fb := toolFeedback(tc, eff, nil, 5)
+	fb := truncateText("你好世界", 5)
 	if fb == "" {
-		t.Fatal("expected non-empty feedback")
+		t.Fatal("expected non-empty output")
 	}
 	if !strings.Contains(fb, "[truncated,") {
 		t.Fatalf("expected truncation marker, got: %q", fb)
 	}
 
 	// Truncate at 1 byte (falls inside first character)
-	fb2 := toolFeedback(tc, eff, nil, 1)
+	fb2 := truncateText("你好世界", 1)
 	if fb2 == "" {
 		t.Fatal("expected non-empty feedback for maxLen=1")
 	}
@@ -1109,7 +1101,8 @@ func TestDecisionLoopBeforeStimulateMutatesPrompt(t *testing.T) {
 	if len(firstCtx) != 1 || firstCtx[0] != "injected-history" {
 		t.Fatalf("first round context = %v, want [injected-history]", firstCtx)
 	}
-	// Tool feedback is appended after round 1; the injected entry must persist.
+	// Tool results no longer enter Context (structured track only); the
+	// injected entry must persist across rounds.
 	found := false
 	for _, c := range secondCtx {
 		if c == "injected-history" {
@@ -1343,7 +1336,7 @@ func TestActWithRetrySucceeds(t *testing.T) {
 }
 
 // TestActWithRetryExhausted verifies retries are exhausted and the final
-// error still flows through tool feedback (loop continues).
+// error still flows through ToolResults.Err (loop continues).
 func TestActWithRetryExhausted(t *testing.T) {
 	actCalls := 0
 	calls := 0
@@ -1411,11 +1404,11 @@ func TestActEffectErrNoRetry(t *testing.T) {
 }
 
 // TestToolTimeoutNoRetry verifies a timeout-derived error is not retried and
-// flows through tool feedback as an error entry.
+// flows through ToolResults.Err as a structured error entry.
 func TestToolTimeoutNoRetry(t *testing.T) {
 	actCalls := 0
 	calls := 0
-	var capturedCtx []string
+	var capturedResults []ToolResult
 	lc := &LoopContext{
 		CellID:         "c1",
 		Input:          "timeout",
@@ -1425,7 +1418,7 @@ func TestToolTimeoutNoRetry(t *testing.T) {
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			calls++
 			if calls == 2 {
-				capturedCtx = p.Context
+				capturedResults = append([]ToolResult(nil), p.ToolResults...)
 			}
 			if calls == 1 {
 				return &Decision{
@@ -1450,15 +1443,11 @@ func TestToolTimeoutNoRetry(t *testing.T) {
 	if last.Kind != EventDone {
 		t.Fatalf("last event = %+v, want EventDone", last)
 	}
-	found := false
-	for _, c := range capturedCtx {
-		if strings.Contains(c, "deadline exceeded") || strings.Contains(c, "context canceled") {
-			found = true
-			break
-		}
+	if len(capturedResults) != 1 || capturedResults[0].ID != "t1" {
+		t.Fatalf("ToolResults = %+v, want one entry t1", capturedResults)
 	}
-	if !found {
-		t.Fatalf("context = %v, want entry containing timeout/cancel error", capturedCtx)
+	if !strings.Contains(capturedResults[0].Err, "deadline exceeded") && !strings.Contains(capturedResults[0].Err, "context canceled") {
+		t.Fatalf("ToolResults[0].Err = %q, want timeout/cancel error", capturedResults[0].Err)
 	}
 }
 

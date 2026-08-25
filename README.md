@@ -60,9 +60,14 @@ you can rely on.
 - **Suspension-resume (ask_user)** — a tool returns `Effect{WaitInput: question}` and the loop
   suspends: it yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`)
   and ends the iterator normally — no blocking, no extra round, no budget during the wait.
-  `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as tool feedback
-  (`[tool] <response>`), remaining tools run first, then the loop resumes from the suspended round.
+  `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the
+  pending tool's structured result (`Prompt.ToolResults` entry, ID preserved),
+  remaining tools run first, then the loop resumes from the suspended round.
   Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
+- **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
+  (`ToolResult{ID, Name, Result, Err}`, single track; `call_xxx` IDs preserved);
+  rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the
+  host Thinker's decision — the text track (`Context`) keeps host base + sandbox denials
 - **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
   `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
@@ -214,8 +219,8 @@ func main() {
 ### The event stream is an observation mirror
 
 `Stimulate` runs one step of the loop and returns an `iter.Seq[Event]`. Tool execution happens
-*inside* the loop via your `Effector`; results are appended to the next round's `Prompt.Context`
-automatically. The host observes (`EventToolCall` / `EventToolResult`) but never feeds data back
+*inside* the loop via your `Effector`; results enter the next round's `Prompt.ToolResults`
+(structured track). The host observes (`EventToolCall` / `EventToolResult`) but never feeds data back
 into an open iterator.
 
 Stopping consumption (yield returns false) **abandons the round**: tools at or after the stop

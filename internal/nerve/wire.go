@@ -43,8 +43,9 @@ type WireNode struct {
 // call; callers must not rely on identity between calls.
 func ConnectomeNodes() []WireNode {
 	return []WireNode{
-		{ID: "prompt", Name: "Prompt", Desc: "full prompt bundle: System+Identity+Methods+Tools+Context+Input+Plan"},
-		{ID: "context", Name: "Context", Desc: "conversation context list"},
+		{ID: "prompt", Name: "Prompt", Desc: "full prompt bundle: System+Identity+Methods+Tools+Context+Input+Plan+ToolResults"},
+		{ID: "context", Name: "Context", Desc: "conversation context list (host base + sandbox denials)"},
+		{ID: "toolresults", Name: "ToolResults", Desc: "structured tool feedback list (single track)"},
 		{ID: "plan", Name: "Plan", Desc: "host-side plan text"},
 		{ID: "bounds", Name: "Bounds", Desc: "execution boundary snapshot"},
 		{ID: "decision", Name: "Decision", Desc: "Thinker output"},
@@ -147,10 +148,10 @@ func Connectome() []WirePoint {
 			Desc: "exactly once per Cycle on normal, error and early-stop paths"},
 
 		// --- framework built-ins (phase 1: always active, not host slots) ---
-		{ID: "F1", Name: "toolFeedback", Phase: 1, Category: CategorySense,
-			TargetID: "context", Target: "Context", Semantics: SemAppend,
+		{ID: "F1", Name: "ToolResults", Phase: 1, Category: CategorySense,
+			TargetID: "toolresults", Target: "ToolResults", Semantics: SemAppend,
 			Parallel: false, Required: true,
-			Desc: "framework built-in: tool results appended to context each round"},
+			Desc: "framework built-in: structured tool results appended each round (single feedback track)"},
 		{ID: "G1", Name: "PauseGate", Phase: 1, Category: CategoryDecide,
 			TargetID: "timing", Target: "loop timing", Semantics: SemGate,
 			Parallel: false, Required: false,

@@ -233,17 +233,66 @@ func TestSandboxBoundsReachesThinker(t *testing.T) {
 	}
 }
 
+// TestToolResultsReachThinker verifies structured tool feedback flows from
+// the agent facade to the Thinker: Prompt.ToolResults accumulates across
+// rounds with the LLM-provided call IDs preserved and Result carrying the
+// raw output (host view of the B1 structured-feedback contract).
+func TestToolResultsReachThinker(t *testing.T) {
+	calls := 0
+	var results []meowire.ToolResult
+	a, err := testNew(testOrgans(meowire.Organs{
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			calls++
+			if calls == 1 {
+				return &meowire.Decision{Text: "r1", ToolCalls: []meowire.ToolCall{
+					{ID: "call_001", Name: "tool1"},
+					{ID: "call_002", Name: "tool2"},
+				}}, nil
+			}
+			results = append([]meowire.ToolResult(nil), p.ToolResults...)
+			return &meowire.Decision{Text: "r2"}, nil
+		}},
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+			return &meowire.Effect{Result: "out-" + a.Call.Name}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer a.Close()
+
+	var gotDone bool
+	for ev := range a.Stimulate(context.Background(), "work") {
+		if ev.Kind == meowire.EventDone {
+			gotDone = true
+		}
+	}
+	if !gotDone {
+		t.Fatal("expected EventDone")
+	}
+	if len(results) != 2 {
+		t.Fatalf("Prompt.ToolResults = %+v, want 2 entries", results)
+	}
+	if results[0].ID != "call_001" || results[0].Name != "tool1" || results[0].Result != "out-tool1" || results[0].Err != "" {
+		t.Fatalf("ToolResults[0] = %+v, want call_001/tool1/Result=out-tool1", results[0])
+	}
+	if results[1].ID != "call_002" || results[1].Result != "out-tool2" {
+		t.Fatalf("ToolResults[1] = %+v, want call_002/Result=out-tool2", results[1])
+	}
+}
+
 // TestConfigToolTimeout verifies Config.ToolTimeout bounds each tool execution
-// and the timeout error flows back as feedback (loop continues, no retry).
+// and the timeout error flows back as a structured ToolResults.Err entry
+// (loop continues, no retry).
 func TestConfigToolTimeout(t *testing.T) {
 	actCalls := 0
 	calls := 0
-	var capturedCtx []string
+	var capturedResults []meowire.ToolResult
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			calls++
 			if calls == 2 {
-				capturedCtx = p.Context
+				capturedResults = append([]meowire.ToolResult(nil), p.ToolResults...)
 			}
 			if calls == 1 {
 				return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "slow"}}}, nil
@@ -273,15 +322,11 @@ func TestConfigToolTimeout(t *testing.T) {
 	if actCalls != 1 {
 		t.Fatalf("Act calls = %d, want 1 (timeout error must not be retried)", actCalls)
 	}
-	found := false
-	for _, c := range capturedCtx {
-		if strings.Contains(c, "deadline exceeded") {
-			found = true
-			break
-		}
+	if len(capturedResults) != 1 || capturedResults[0].ID != "x" {
+		t.Fatalf("ToolResults = %+v, want one entry x", capturedResults)
 	}
-	if !found {
-		t.Fatalf("context = %v, want entry containing 'deadline exceeded'", capturedCtx)
+	if !strings.Contains(capturedResults[0].Err, "deadline exceeded") {
+		t.Fatalf("ToolResults[0].Err = %q, want entry containing 'deadline exceeded'", capturedResults[0].Err)
 	}
 }
 

@@ -119,9 +119,10 @@ func TestDecisionLoopWaitInputMidList(t *testing.T) {
 	if len(rem) != 1 || rem[0].Name != "tool3" {
 		t.Fatalf("session remaining = %+v, want [tool3]", rem)
 	}
-	// The snapshot keeps the tool1 feedback in the accumulated context.
-	if !strings.Contains(strings.Join(wait.Session.context, "\n"), "[tool1]") {
-		t.Fatalf("session context missing tool1 feedback: %v", wait.Session.context)
+	// The snapshot keeps the tool1 result in the structured track (tool
+	// results no longer enter Context).
+	if len(wait.Session.toolResults) != 1 || wait.Session.toolResults[0].ID != "t1" || wait.Session.toolResults[0].Result != "ok" {
+		t.Fatalf("session toolResults = %+v, want one entry t1/ok", wait.Session.toolResults)
 	}
 }
 
@@ -160,10 +161,10 @@ func TestDecisionLoopResumeNoExtraRound(t *testing.T) {
 }
 
 // TestDecisionLoopResumeFeedbackForm verifies the external response enters
-// the next Think's context as "[tool] <response>".
+// the next Think's ToolResults as the pending tool's structured result.
 func TestDecisionLoopResumeFeedbackForm(t *testing.T) {
 	thinks := 0
-	var nextContext []string
+	var nextResults []ToolResult
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "work",
@@ -172,7 +173,7 @@ func TestDecisionLoopResumeFeedbackForm(t *testing.T) {
 			if thinks == 1 {
 				return &Decision{Text: "ask", ToolCalls: []ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
 			}
-			nextContext = append([]string(nil), p.Context...)
+			nextResults = append([]ToolResult(nil), p.ToolResults...)
 			return &Decision{Text: "final"}, nil
 		}},
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
@@ -181,14 +182,11 @@ func TestDecisionLoopResumeFeedbackForm(t *testing.T) {
 	}
 	_, wait := runSuspendingCycle(t, lc)
 	collectResume(context.Background(), lc, wait.Session, "yes")
-	found := false
-	for _, c := range nextContext {
-		if c == "[ask_user] yes" {
-			found = true
-		}
+	if len(nextResults) != 1 {
+		t.Fatalf("post-resume ToolResults = %+v, want one entry", nextResults)
 	}
-	if !found {
-		t.Fatalf("resume response missing from next Think context: %v", nextContext)
+	if nextResults[0].ID != "t1" || nextResults[0].Name != "ask_user" || nextResults[0].Result != "yes" || nextResults[0].Err != "" {
+		t.Fatalf("post-resume ToolResults[0] = %+v, want t1/ask_user/Result=yes", nextResults[0])
 	}
 }
 
@@ -315,7 +313,7 @@ func TestDecisionLoopResumeCtxCancel(t *testing.T) {
 	cancel()
 	// A valid session: the cancellation must fail through the prologue, not
 	// through the session validity check.
-	sess := Session{}.snapshot(1, "w", "", []string{}, "", ToolCall{ID: "t1", Name: "ask_user"}, nil)
+	sess := Session{}.snapshot(1, "w", "", []string{}, "", ToolCall{ID: "t1", Name: "ask_user"}, nil, nil)
 	events := collectResume(ctx, lc, sess, "yes")
 	last := events[len(events)-1]
 	if last.Kind != EventError {

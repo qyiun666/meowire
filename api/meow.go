@@ -78,8 +78,8 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 }
 
 // Resume continues a suspended loop from the Session captured in an
-// EventWaitInput event: the external response is injected as tool feedback
-// ("[tool] <response>" appended to the context), the suspended round's
+// EventWaitInput event: the external response is injected as the pending
+// tool's structured result (a Prompt.ToolResults entry), the suspended round's
 // remaining tool calls run first, then the round loop resumes from the
 // suspended round — the suspension consumes no extra round and no budget.
 // The event stream is isomorphic with Stimulate (same hooks, same

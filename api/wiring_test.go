@@ -262,19 +262,29 @@ func TestBuildGraph(t *testing.T) {
 // TestSlotsByTarget: the find-by-function query returns every slot touching
 // a data object, and only those.
 func TestSlotsByTarget(t *testing.T) {
-	// Context: P6 (trim), H3 (replace), F1 (append) — nothing else.
+	// Context: P6 (trim), H3 (replace) — nothing else (tool results moved to
+	// the ToolResults node since v1.3.1).
 	slots := SlotsByTarget(fullOrgans(), "context")
 	got := map[string]bool{}
 	for _, s := range slots {
 		got[s.Wire.ID] = true
 	}
-	for _, id := range []string{"P6", "H3", "F1"} {
+	for _, id := range []string{"P6", "H3"} {
 		if !got[id] {
 			t.Errorf("Context slots missing %s", id)
 		}
 	}
-	if len(slots) != 3 {
-		t.Errorf("Context slots = %d, want 3", len(slots))
+	if len(slots) != 2 {
+		t.Errorf("Context slots = %d, want 2", len(slots))
+	}
+	// ToolResults: F1 (append) — the single structured feedback track.
+	trSlots := SlotsByTarget(fullOrgans(), "toolresults")
+	trGot := map[string]bool{}
+	for _, s := range trSlots {
+		trGot[s.Wire.ID] = true
+	}
+	if !trGot["F1"] || len(trSlots) != 1 {
+		t.Errorf("ToolResults slots = %v, want exactly F1", trSlots)
 	}
 	if len(SlotsByTarget(fullOrgans(), "plan")) != 0 {
 		t.Error("plan node has no direct slots (host-side object)")

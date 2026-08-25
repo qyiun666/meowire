@@ -227,7 +227,8 @@ func (t *thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decisi
 | `Bounds` | 追加进 `system` | 执行边界（"只能访问 /workspace"）——让大脑知道限制 |
 | `Methods` | 追加进 `system` | 内置能力声明（只描述不执行） |
 | `Tools` | `tools` 参数 | function schema（Step 3 下） |
-| `Context` | 多条 `system`/`user` | 记忆基底 + 框架循环内追加的工具反馈 |
+| `Context` | 多条 `system`/`user` | 记忆基底 + 框架追加的 sandbox 裁决（工具结果不在文本轨） |
+| `ToolResults` | 追加进 `user` | 结构化工具结果（`[tool_call_id=xxx]` 标记条目，见下）——框架唯一反馈轨道，必须渲染 |
 | `Input` | `user` 消息 | 本次刺激 |
 | `State` / `Plan` | 追加进 `user` | 循环状态 + 任务计划 |
 
@@ -241,6 +242,20 @@ func buildMessages(p *meowire.Prompt) []chatMsg {
 	msgs := []chatMsg{{Role: "system", Content: sys.String()}}
 	for _, c := range p.Context {
 		msgs = append(msgs, chatMsg{Role: "system", Content: "[上下文] " + c})
+	}
+	// 工具结果：结构化条目（user 内联，带 tool_call_id 标记）。
+	// 想升级为原生 tool 角色消息（OpenAI 系要求历史 assistant 消息
+	// 含对应 tool_calls）时，以 ID 关联即可——ID 已由框架透传。
+	var fb bytes.Buffer
+	for _, tr := range p.ToolResults {
+		if tr.Err != "" {
+			fmt.Fprintf(&fb, "\n[tool_call_id=%s][tool-result %s] error: %s", tr.ID, tr.Name, tr.Err)
+		} else {
+			fmt.Fprintf(&fb, "\n[tool_call_id=%s][tool-result %s] %s", tr.ID, tr.Name, tr.Result)
+		}
+	}
+	if fb.Len() > 0 {
+		msgs = append(msgs, chatMsg{Role: "user", Content: "[工具结果]" + fb.String()})
 	}
 	statePlan := p.Input
 	if p.Plan != "" {
@@ -316,8 +331,8 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 
 | 返回 | 框架行为 |
 |---|---|
-| `Effect{Err: "..."}` | 业务错误 → 格式化为 `[工具名] error: ...` 反馈回 Context，**不重试**（防重复副作用） |
-| `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试 |
+| `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归宿主 |
+| `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试；最终错误同样写入 `ToolResults.Err` |
 
 多 agent 工具（`send_message`/`spawn_agent`）也在这里实现，见 Step 8。
 
@@ -430,7 +445,7 @@ func buildHooks(mem *hostMemory) *meowire.Hooks {
 ```
 
 **⚠️ 两个关键陷阱：**
-1. **`BeforeThink`（不是 `BeforeStimulate`）里必须整体替换 `p.Context`**（`p.Context = append(p.Context[:0], newCtx...)` 或赋新切片）——它和循环内上下文共享底层数组，直接 append 会污染循环上下文。回合级注入放 `BeforeStimulate`（原型浅拷贝，安全），轮内动态注入才放 `BeforeThink`
+1. **`BeforeThink`（不是 `BeforeStimulate`）里必须整体替换 `p.Context`**（`p.Context = append(p.Context[:0], newCtx...)` 或赋新切片）——它和循环内上下文共享 底层数组，直接 append 会污染循环上下文；`p.ToolResults` 同理（与循环结构化轨共享底层数组），整体替换、禁止原地 append。回合级注入放 `BeforeStimulate`（原型浅拷贝，安全），轮内动态注入才放 `BeforeThink`
 2. `AfterStimulate` 的 `output` 参数是整轮累计输出——三路径（正常/错误/消费者 break）都恰好执行一次，是结算和持久化的正确落点
 
 ---
@@ -692,7 +707,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 ### 记忆与上下文
 
-11. **`BeforeThink` 必须整体替换 `p.Context`**（共享底层数组，直接 append 污染循环上下文）；回合级注入放 `BeforeStimulate`
+11. **`BeforeThink` 必须整体替换 `p.Context`**（共享底层数组，直接 append 污染循环上下文）；`p.ToolResults` 同理；回合级注入放 `BeforeStimulate`
 12. **`Organs.Context` 是切片且每轮快照**：宿主每次 `Stimulate` 前经 `BeforeStimulate` 更新为最新历史（MemHop：历史宿主管，框架不消费）
 13. **裁剪器只剪不报错**：`MaxTokens` 超了不会中断循环，只会丢上下文条目——想硬停用别的机制
 

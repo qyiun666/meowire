@@ -45,7 +45,8 @@ type Thinker interface {
 | `Identity` | 身份描述文本（宿主自拼，如“你叫 meow，角色 assistant，语气温暖”） | 宿主，构造时固定 |
 | `Methods` | 内置能力描述（基因投影，仅描述不执行；`MethodSpec{Name, Desc, Input, Output}`） | 宿主，构造时固定 |
 | `Tools` | 可用工具清单（function schema） | 宿主，构造时固定 |
-| `Context` | 上下文切片：宿主常驻基底 + 框架循环内追加的工具反馈 | 宿主基底 + 框架追加 |
+| `Context` | 上下文切片：宿主常驻基底 + 框架追加的 sandbox 裁决（`[denied: ...]`）；工具结果不再进文本轨 | 宿主基底 + 框架追加 |
+| `ToolResults` | 结构化工具结果（`ToolResult{ID, Name, Result, Err}`）：循环内累积，ID 为 LLM 返回的 `call_xxx`，Result/Err 为截断后的原始输出；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记等）归宿主 Thinker | 框架，循环内追加 |
 | `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
 | `State` | 当前循环状态字符串（`"thinking"`/`"acting"`/…） | 框架自动更新 |
@@ -79,10 +80,10 @@ type Effector interface {
 |------|------|
 | `Action.CellID` | 触发工具的 agent 标识（= Organs.ID） |
 | `Action.Call` | 工具调用 `{ID, Name, Args}`，`Args` 为 JSON 字符串 |
-| `Effect.Result` | 成功结果文本（框架格式化为 `[工具名] 结果` 追加进 Context） |
-| `Effect.Err` | 工具自身错误文本（框架格式化为 `[工具名] error: ...`） |
+| `Effect.Result` | 成功结果文本（框架截断后写入 `ToolResults.Result`，渲染归宿主） |
+| `Effect.Err` | 工具自身错误文本（框架截断后写入 `ToolResults.Err`；`Err` 非空 = 调用失败） |
 | `Effect.WaitInput` | 非空 = 请求外部输入（字段即问题文本）；框架产出 `EventWaitInput`（携带 Session）并**正常结束本轮迭代器**，宿主收集响应后调 `agent.Resume(sess, response)` 续跑（见 §6.4） |
-| 返回 error | 执行层错误（同样被格式化进反馈） |
+| 返回 error | 执行层错误（同样写入 `ToolResults.Err`，循环继续） |
 
 **宿主职责：**
 - 工具注册表 + 分发器：按 `Name` 路由、反序列化 `Args`、序列化结果
@@ -141,7 +142,7 @@ type Hooks struct {
 | `OnError` | 不可恢复错误时 | 告警上报 |
 | `OnCycleEnd` | **每轮恰好一次**（正常/错误/消费者提前停止三条路径都触发） | 结算、持久化最终输出 |
 
-**⚠️ `BeforeThink` 必须整体替换 `p.Context`（`p.Context = append(p.Context[:0], newCtx...)` 或直接赋新切片）——它与循环上下文共享底层数组，直接 append 会污染循环内上下文。**
+**⚠️ `BeforeThink` 必须整体替换 `p.Context`（`p.Context = append(p.Context[:0], newCtx...)` 或直接赋新切片）——它与循环上下文共享底层数组，直接 append 会污染 循环内上下文；`p.ToolResults` 同理（与循环结构化轨共享底层数组），整体替换、禁止原地 append。**
 
 ### 2.6 Sandbox —— 权限门（安全红线落点）
 
@@ -230,7 +231,7 @@ type Config struct {
 | `MaxRounds` | 硬性轮数上限；**最后一轮仍有工具调用时以 `ErrMaxRounds` 结束**（该轮工具结果不会被下一轮 Think 消化），配合 Step-Resume 防死循环 | 8 |
 | `MaxToolOutput` | 工具反馈截断长度（按 UTF-8 安全截断，超长附 `[truncated, N bytes total]`） | 不截断 |
 | `MaxRetries` | Think 重试次数（仅重试 Think；工具失败防护在宿主侧 Effector/AfterAct） | 不重试 |
-| `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，按反馈回灌 Context） | 无超时 |
+| `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，写入 `ToolResults.Err` 继续循环） | 无超时 |
 | `ToolMaxRetries` | 工具执行失败重试次数（**仅执行器 error**；`Effect.Err` 不重试，防重复副作用） | 不重试 |
 
 **运行期热更新（v1.3.0）**：
@@ -354,7 +355,7 @@ EventState(error) → EventError(Err)
 |------|---------|------|
 | `EventText` | `Text` | LLM 整段文本输出 |
 | `EventToolCall` | `ToolCall *ToolCall` | LLM 决定调用的工具 |
-| `EventToolResult` | `Effect *Effect` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[denied: reason]"`） |
+| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[denied: reason]"`）；`ToolCall` 回显调用，用于 ID 关联 |
 | `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox 决策审计记录（允许/拒绝、工具、策略原因、评估错误）；未配置 Sandbox 时不产出 |
 | `EventState` | `State LoopState` | 循环状态（idle/thinking/acting/paused/**waiting**/done/error） |
 | `EventDone` | `Output` | 整轮累计文本输出 |
@@ -416,10 +417,10 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **`Session` 是不透明值对象**（`round`/Context/剩余工具调用/累积输出快照）：宿主只保存、传回，不碰内部；**单次消费**——重复 Resume 会重复执行剩余工具（副作用重复，宿主责任）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
 - **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行
-- **响应形态**：以 `[工具名] <response>` 追加进 Context，进入恢复后的第一次 Think；超时由宿主控制（默认拒绝，如上注入 `[denied: timeout]`）
+- **响应形态**：作为挂起工具的结构化结果写入 `ToolResults`（`ID` 为挂起调用的 `call_xxx`），进入恢复后的第一次 Think；超时由宿主控制（默认拒绝，如上注入 `[denied: timeout]`）
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
-- **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（工具反馈形态）——两者无重叠
+- **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠
 
 ---
 

@@ -111,8 +111,12 @@ type LoopContext struct {
 	State   LoopState
 	Input   string
 	Plan    string
-	Context []string // Host injected constant context + tool result accumulation within cycle
+	Context []string // Host-injected base + sandbox denials (tool results live in ToolResults)
 	Bounds  string   // Sandbox.Bounds() snapshot, taken once per Stimulate
+
+	// Structured tool feedback accumulated within this cycle (single track:
+	// tool results no longer enter Context; rendering is the host's call).
+	ToolResults []ToolResult
 
 	// PendingReplace: port swap audits recorded since the last Stimulate/
 	// Resume, emitted as EventReplace before any other event (the swap takes
@@ -141,9 +145,9 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 }
 
 // Resume continues a suspended loop from the Session captured in
-// EventWaitInput: the external response is injected as tool feedback of the
-// pending tool ("[tool] <response>" appended to the context), the remaining
-// tool calls of the suspended round run first, then the round loop resumes
+// EventWaitInput: the external response is injected as the pending tool's
+// structured result (a ToolResults entry), the remaining tool calls of the
+// suspended round run first, then the round loop resumes
 // from the suspended round — the Think that digests the response uses the
 // suspended round's quota, so the suspension consumes no extra round. The
 // event stream is isomorphic with Stimulate (same hooks, same guarantees). A
@@ -155,11 +159,17 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		emitError(ctx, lc, yield, fmt.Errorf("nerve: resume: invalid session"))
 		return
 	}
-	// Load the session: stimulus, plan, accumulated context + the suspension
-	// response as feedback of the pending tool, and the accumulated output.
+	// Load the session: stimulus, plan, accumulated context and the
+	// suspension response as the pending tool's structured result (single
+	// track — rendering is the host's call), plus the accumulated output.
 	lc.Input = sess.input
 	lc.Plan = sess.plan
-	lc.Context = append(slices.Clone(sess.context), fmt.Sprintf("[%s] %s", sess.pending.Name, response))
+	lc.Context = slices.Clone(sess.context)
+	lc.ToolResults = append(slices.Clone(sess.toolResults), ToolResult{
+		ID:     sess.pending.ID,
+		Name:   sess.pending.Name,
+		Result: truncateText(response, lc.MaxToolOutput),
+	})
 	var out strings.Builder
 	out.Grow(256)
 	out.WriteString(sess.output)
@@ -303,15 +313,16 @@ func thinkRound(ctx context.Context, lc *LoopContext, out *strings.Builder, yiel
 
 	// Build prompt
 	p := &Prompt{
-		System:   lc.System,
-		Identity: lc.Identity,
-		Methods:  lc.Methods,
-		Tools:    lc.Tools,
-		Context:  lc.Context,
-		Bounds:   lc.Bounds,
-		Input:    lc.Input,
-		State:    lc.State.String(),
-		Plan:     lc.Plan,
+		System:      lc.System,
+		Identity:    lc.Identity,
+		Methods:     lc.Methods,
+		Tools:       lc.Tools,
+		Context:     lc.Context,
+		Bounds:      lc.Bounds,
+		Input:       lc.Input,
+		State:       lc.State.String(),
+		Plan:        lc.Plan,
+		ToolResults: lc.ToolResults,
 	}
 
 	// BeforeThink hook
@@ -379,7 +390,7 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 		// WaitInput wins over err (explicit intent); a nil effect never
 		// suspends.
 		if eff != nil && eff.WaitInput != "" {
-			sess := Session{}.snapshot(round, lc.Input, lc.Plan, lc.Context, out.String(), tc, calls[i+1:])
+			sess := Session{}.snapshot(round, lc.Input, lc.Plan, lc.Context, out.String(), tc, calls[i+1:], lc.ToolResults)
 			w := &WaitInput{CellID: lc.CellID, Call: tc, Question: eff.WaitInput, Session: sess}
 			lc.State = StateWaiting
 			if !yield(Event{Kind: EventState, State: StateWaiting}) {
@@ -391,12 +402,22 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 			return w, true
 		}
 
-		// Compute feedback and append to context
-		fb := toolFeedback(tc, eff, err, lc.MaxToolOutput)
+		// Compute feedback — structured track only: tool results no longer
+		// enter the Context text track (rendering is the host's decision;
+		// Context keeps host-injected base + sandbox denials).
 		lc.Hooks.AfterAct(ctx, &Action{CellID: lc.CellID, Call: tc}, eff, err)
-		lc.Context = append(lc.Context, fb)
+		tr := ToolResult{ID: tc.ID, Name: tc.Name}
+		switch {
+		case err != nil:
+			tr.Err = truncateText(err.Error(), lc.MaxToolOutput)
+		case eff.Err != "":
+			tr.Err = truncateText(eff.Err, lc.MaxToolOutput)
+		default:
+			tr.Result = truncateText(eff.Result, lc.MaxToolOutput)
+		}
+		lc.ToolResults = append(lc.ToolResults, tr)
 
-		if !yield(Event{Kind: EventToolResult, Effect: eff}) {
+		if !yield(Event{Kind: EventToolResult, Effect: eff, ToolCall: &tc}) {
 			return nil, false
 		}
 	}
@@ -406,7 +427,7 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 // runOneTool gates and executes one tool call: the sandbox membrane (every
 // decision yields an EventSandbox audit record), the BeforeAct hook, then
 // Act with timeout/retry. handled=true means the call was denied — the
-// feedback was already appended to the context and yielded as
+// denial was already appended to the Context text track and yielded as
 // EventToolResult, the caller must skip its own feedback. ok=false means the
 // loop must end (an error was emitted or the consumer stopped).
 func runOneTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) (eff *Effect, err error, handled bool, ok bool) {
@@ -420,7 +441,7 @@ func runOneTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Ev
 		}
 		fb := fmt.Sprintf("[denied: %s]", reason)
 		lc.Context = append(lc.Context, fb)
-		if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}}) {
+		if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {
 			return nil, nil, false, false
 		}
 		return nil, nil, true, true
@@ -455,31 +476,23 @@ func effectiveMaxRounds(maxRounds int) int {
 	return maxRounds
 }
 
-// toolFeedback formats tool result/error as feedback string; truncates to maxLen if > 0.
-func toolFeedback(tc ToolCall, eff *Effect, err error, maxLen int) string {
-	var fb string
-	switch {
-	case err != nil:
-		fb = "[" + tc.Name + "] error: " + err.Error()
-	case eff.Err != "":
-		fb = "[" + tc.Name + "] error: " + eff.Err
-	default:
-		fb = "[" + tc.Name + "] " + eff.Result
+// truncateText truncates a feedback payload to maxLen bytes, keeping UTF-8
+// rune boundaries; appends a truncation marker. maxLen <= 0 = no truncation.
+func truncateText(s string, maxLen int) string {
+	if maxLen <= 0 || len(s) <= maxLen {
+		return s
 	}
-	if maxLen > 0 && len(fb) > maxLen {
-		truncAt := maxLen
-		for truncAt > 0 && !utf8.RuneStart(fb[truncAt]) {
-			truncAt--
-		}
-		if truncAt == 0 {
-			// maxLen falls inside the first character; cut after the first rune.
-			// Actual output may slightly exceed maxLen to keep UTF-8 intact.
-			_, size := utf8.DecodeRuneInString(fb)
-			truncAt = size
-		}
-		fb = fb[:truncAt] + fmt.Sprintf("[truncated, %d bytes total]", len(fb))
+	truncAt := maxLen
+	for truncAt > 0 && !utf8.RuneStart(s[truncAt]) {
+		truncAt--
 	}
-	return fb
+	if truncAt == 0 {
+		// maxLen falls inside the first character; cut after the first rune.
+		// Actual output may slightly exceed maxLen to keep UTF-8 intact.
+		_, size := utf8.DecodeRuneInString(s)
+		truncAt = size
+	}
+	return s[:truncAt] + fmt.Sprintf("[truncated, %d bytes total]", len(s))
 }
 
 // thinkWithRetry retries Think up to MaxRetries times; on ctx cancellation returns immediately.
@@ -510,7 +523,7 @@ func thinkWithRetry(ctx context.Context, lc *LoopContext, p *Prompt) (*Decision,
 // on effector errors only (Effect.Err is a business error and is never
 // retried — retrying could duplicate side effects). A ctx cancellation or a
 // timeout-derived error is not retried. The final error flows through
-// toolFeedback like any other tool failure (resistance is feedback).
+// ToolResults.Err like any other tool failure (resistance is feedback).
 func actWithRetry(ctx context.Context, lc *LoopContext, act Action) (*Effect, error) {
 	maxAttempts := lc.ToolMaxRetries
 	if maxAttempts < 0 {
@@ -601,11 +614,14 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 		// Shallow copy: the prototype gets its own backing array so that
 		// in-place mutations (or an early hook error) never leak into lc.
 		// The write-back below then adopts the prototype's slice wholesale.
-		Context: append([]string(nil), lc.Context...),
-		Bounds:  lc.Bounds,
-		Input:   lc.Input,
-		Plan:    lc.Plan,
-		State:   lc.State.String(),
+		// ToolResults is copied likewise but is read-only: hosts inject
+		// history via Context, the structured track stays framework-managed.
+		Context:     append([]string(nil), lc.Context...),
+		ToolResults: append([]ToolResult(nil), lc.ToolResults...),
+		Bounds:      lc.Bounds,
+		Input:       lc.Input,
+		Plan:        lc.Plan,
+		State:       lc.State.String(),
 	}
 	if err := lc.Hooks.BeforeStimulate(ctx, proto); err != nil {
 		return fmt.Errorf("nerve.hookBeforeStimulate: %w", err)

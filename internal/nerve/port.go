@@ -25,13 +25,17 @@ type Prompt struct {
 	Identity string       // Identity description text (host composed)
 	Methods  []MethodSpec // Built-in capability description (gene projection, describes only)
 	Tools    []ToolSpec   // Available tool list (host defined)
-	Context  []string     // Context (host injected base; framework appends tool feedback within cycle)
+	Context  []string     // Context (host-injected base + sandbox denials; tool results live in ToolResults)
 	Bounds   string       // Execution boundary description (Sandbox.Bounds snapshot, host defined)
 
 	// Dynamic part (updated each round)
 	Input string // Current stimulus text
 	State string // Current loop state (framework auto-updated)
 	Plan  string // Task plan/progress (host injected, brain can update)
+
+	// Structured tool feedback accumulated within this cycle (single track:
+	// tool results no longer enter Context; rendering is the host's call).
+	ToolResults []ToolResult
 }
 
 // ToolSpec is a tool specification (host defined, framework passthrough).
@@ -40,6 +44,23 @@ type ToolSpec struct {
 	Desc   string // Description
 	Input  string // Input parameter description (JSON Schema)
 	Output string // Output description
+}
+
+// ToolResult is a structured tool feedback entry (framework populated
+// within a cycle; the sole feedback track — tool results never enter the
+// Context text track, which keeps host base + sandbox denials).
+// ID/Name echo the originating ToolCall (ID is the LLM-provided call id,
+// e.g. call_xxx). Result carries the successful output and Err the failure
+// text — Err non-empty means the call failed, and exactly one of the two is
+// set; both are post-truncation when MaxToolOutput applies. Rendering
+// (tool-role messages, [tool_call_id=xxx] markers, plain text) is the host
+// Thinker's decision. Sandbox denials are verdicts, not tool results, and
+// never appear here.
+type ToolResult struct {
+	ID     string // Tool call ID (LLM-provided, e.g. call_xxx)
+	Name   string // Tool name (echo of ToolCall.Name)
+	Result string // Successful tool output (truncated per MaxToolOutput)
+	Err    string // Failure text (truncated per MaxToolOutput; non-empty = failed)
 }
 
 // Usage is the token usage (carried by Decision, host accumulates; nil = skip accounting).
@@ -101,13 +122,14 @@ type WaitInput struct {
 // A Session is single-use: resuming it twice re-executes the remaining tool
 // calls with duplicate side effects (host responsibility).
 type Session struct {
-	round     int        // round at suspension; Resume continues from it (no extra round)
-	input     string     // stimulus text at suspension
-	plan      string     // plan at suspension
-	context   []string   // accumulated context at suspension (incl. prior tool feedback)
-	output    string     // accumulated text output at suspension (EventDone prefix)
-	pending   ToolCall   // the tool that requested input (feedback formatting)
-	remaining []ToolCall // tool calls after the suspending one
+	round       int          // round at suspension; Resume continues from it (no extra round)
+	input       string       // stimulus text at suspension
+	plan        string       // plan at suspension
+	context     []string     // accumulated context at suspension (host base + sandbox denials)
+	output      string       // accumulated text output at suspension (EventDone prefix)
+	pending     ToolCall     // the tool that requested input (resume response attaches to its result)
+	remaining   []ToolCall   // tool calls after the suspending one
+	toolResults []ToolResult // accumulated structured tool feedback at suspension
 }
 
 // valid reports whether s is a usable session (zero value is rejected).
@@ -117,15 +139,16 @@ type Session struct {
 func (s Session) valid() bool { return s.round >= 1 }
 
 // snapshot returns a deep-enough copy of the session for later resumption.
-func (s Session) snapshot(round int, input, plan string, context []string, output string, pending ToolCall, remaining []ToolCall) Session {
+func (s Session) snapshot(round int, input, plan string, context []string, output string, pending ToolCall, remaining []ToolCall, toolResults []ToolResult) Session {
 	return Session{
-		round:     round,
-		input:     input,
-		plan:      plan,
-		context:   slices.Clone(context),
-		output:    output,
-		pending:   pending,
-		remaining: slices.Clone(remaining),
+		round:       round,
+		input:       input,
+		plan:        plan,
+		context:     slices.Clone(context),
+		output:      output,
+		pending:     pending,
+		remaining:   slices.Clone(remaining),
+		toolResults: slices.Clone(toolResults),
 	}
 }
 

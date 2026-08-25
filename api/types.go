@@ -31,6 +31,7 @@ type (
 	MethodSpec = nerve.MethodSpec
 	Prompt     = nerve.Prompt
 	ToolSpec   = nerve.ToolSpec
+	ToolResult = nerve.ToolResult
 	Decision   = nerve.Decision
 	ToolCall   = nerve.ToolCall
 	Action     = nerve.Action
@@ -45,7 +46,7 @@ type (
 	LoopState      = nerve.LoopState
 	SandboxVerdict = nerve.SandboxVerdict
 	WaitInput      = nerve.WaitInput // EventWaitInput payload: tool + question + resume Session
-	Session        = nerve.Session    // opaque resume handle — save from EventWaitInput, pass to Resume
+	Session        = nerve.Session   // opaque resume handle — save from EventWaitInput, pass to Resume
 	ReplaceAudit   = nerve.ReplaceAudit
 )
 
@@ -107,16 +108,16 @@ const (
 
 // EventKind constants.
 const (
-	EventText        EventKind = nerve.EventText
-	EventToolCall    EventKind = nerve.EventToolCall
-	EventToolResult  EventKind = nerve.EventToolResult
-	EventState       EventKind = nerve.EventState
-	EventDone        EventKind = nerve.EventDone
-	EventError       EventKind = nerve.EventError
-	EventUsage       EventKind = nerve.EventUsage
-	EventSandbox     EventKind = nerve.EventSandbox
-	EventWaitInput   EventKind = nerve.EventWaitInput
-	EventReplace     EventKind = nerve.EventReplace
+	EventText       EventKind = nerve.EventText
+	EventToolCall   EventKind = nerve.EventToolCall
+	EventToolResult EventKind = nerve.EventToolResult
+	EventState      EventKind = nerve.EventState
+	EventDone       EventKind = nerve.EventDone
+	EventError      EventKind = nerve.EventError
+	EventUsage      EventKind = nerve.EventUsage
+	EventSandbox    EventKind = nerve.EventSandbox
+	EventWaitInput  EventKind = nerve.EventWaitInput
+	EventReplace    EventKind = nerve.EventReplace
 )
 
 // SignalKind constants.

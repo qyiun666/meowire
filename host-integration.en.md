@@ -52,7 +52,8 @@ type Thinker interface {
 | `Identity` | Identity description text (host composed, e.g. "You are meow, role assistant, warm tone") | Host, fixed at construction |
 | `Methods` | Built-in capability description (gene projection, describes only; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
 | `Tools` | Available tool list (function schemas) | Host, fixed at construction |
-| `Context` | Context slice: host base + tool feedback appended by the framework within the cycle | Host base + framework appends |
+| `Context` | Context slice: host base + framework-appended sandbox denials (`[denied: ...]`); tool results no longer enter the text track | Host base + framework appends |
+| `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
 | `State` | Current loop state string (`"thinking"`/`"acting"`/…) | Framework, auto-updated |
@@ -87,10 +88,10 @@ type Effector interface {
 |-------|---------|
 | `Action.CellID` | Agent ID that triggered the tool (= Organs.ID) |
 | `Action.Call` | Tool call `{ID, Name, Args}`, `Args` is a JSON string |
-| `Effect.Result` | Success result text (formatted by the framework as `[tool] result` and appended to Context) |
-| `Effect.Err` | Tool-side error text (formatted as `[tool] error: ...`) |
+| `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the host's call) |
+| `Effect.Err` | Tool-side error text (truncated into `ToolResults.Err`; non-empty `Err` = the call failed) |
 | `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the response and calls `agent.Resume(sess, response)` (see §6.4) |
-| return error | Execution-layer error (also formatted into feedback) |
+| return error | Execution-layer error (also written to `ToolResults.Err`; the loop continues) |
 
 **Host responsibilities:**
 - Tool registry + dispatcher: route by `Name`, deserialize `Args`, serialize results
@@ -100,7 +101,8 @@ type Effector interface {
   (blocking drags the Close wait; the suspension is expressed by the framework so the
   UI can show "the cat is waiting for an answer"), see §6.4
 - Tool failures can be returned as `Effect{Err: ...}` instead of an error; both
-  flow back as feedback and the loop continues (**resistance is feedback, not failure**)
+  flow back as structured `ToolResults` entries and the loop continues
+  (**resistance is feedback, not failure**)
 
 ### 2.3 Closer — the cleaner
 
@@ -159,7 +161,7 @@ type Hooks struct {
 | `OnError` | On unrecoverable error | Alerting |
 | `OnCycleEnd` | **Exactly once per cycle** (normal, error, and early-consumer-stop paths) | Settlement, persist final output |
 
-**⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context.**
+**⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context. The same applies to `p.ToolResults` (shared with the loop's structured track): replace wholesale, never append in place.**
 
 ### 2.6 Sandbox — the permission gate (the security red line)
 
@@ -250,9 +252,9 @@ type Config struct {
 | Field | Semantics | Zero-value default |
 |-------|-----------|--------------------|
 | `MaxRounds` | Hard round limit; **if the last round still has pending tool calls the loop ends with `ErrMaxRounds`** (those tool results are never re-thought); pair with Step-Resume to prevent infinite loops | 8 |
-| `MaxToolOutput` | Tool-feedback truncation length (UTF-8-safe; overlong output gets `[truncated, N bytes total]`) | no truncation |
+| `MaxToolOutput` | Tool-feedback truncation length for `ToolResults.Result`/`Err` (UTF-8-safe; overlong output gets `[truncated, N bytes total]`) | no truncation |
 | `MaxRetries` | Think retry count (retries Think only; tool-failure protection is host-side, in Effector/AfterAct) | no retry |
-| `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and flow back as feedback) | no timeout |
+| `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and are written to `ToolResults.Err`) | no timeout |
 | `ToolMaxRetries` | Tool retry count on effector errors (**executor err only**; `Effect.Err` is never retried — avoids duplicate side effects) | no retry |
 
 **Runtime hot update (v1.3.0):**
@@ -392,7 +394,7 @@ EventState(error) → EventError(Err)
 |------|--------------|---------|
 | `EventText` | `Text` | Whole-segment LLM text output |
 | `EventToolCall` | `ToolCall *ToolCall` | Tool the LLM decided to call |
-| `EventToolResult` | `Effect *Effect` | Tool execution result (includes Sandbox denials: `Effect.Err = "[denied: reason]"`) |
+| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | Tool execution result (includes Sandbox denials: `Effect.Err = "[denied: reason]"`); `ToolCall` echoes the call for ID association |
 | `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (allowed/denied, tool, policy reason, evaluation error); not emitted when no sandbox is wired |
 | `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
@@ -485,8 +487,9 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;
   it runs before the next Think after resume
-- **Response shape**: appended to Context as `[tool] <response>`, visible to the first
-  Think after resume; timeouts are host-controlled (default deny, inject `[denied: timeout]`)
+- **Response shape**: appended as the pending tool's structured result in `ToolResults`
+  (`ID` = the suspended call's `call_xxx`), visible to the first Think after resume;
+  timeouts are host-controlled (default deny, inject `[denied: timeout]`)
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think
 - **Resume hooks are identical to Stimulate** (`BeforeStimulate` fires as usual; with
@@ -494,7 +497,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   `Close` makes Resume yield `ErrCellClosed`; `Session` is an in-memory handle — it
   dies on host restart (treat as timeout-deny)
 - **Division of labor with Say injection**: `Say`/`BeforeThink` inject new messages
-  (`p.Input`); `Resume` injects the suspension response (tool-feedback shape) — no overlap
+  (`p.Input`); `Resume` injects the suspension response (structured result in `ToolResults`) — no overlap
 
 ---
 

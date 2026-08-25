@@ -55,8 +55,11 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **挂起-恢复（ask_user）** —— 工具返回 `Effect{WaitInput: 问题}` 即挂起：循环产出
   `EventState(StateWaiting)` + `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束**
   ——不阻塞、不占轮次、等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：
-  响应以 `[工具名] <response>` 工具反馈形态进入循环，先执行剩余工具，再从挂起轮继续。
+  响应以挂起工具的结构化结果进入循环（`Prompt.ToolResults` 条目，ID 保留），先执行剩余工具，再从挂起轮继续。
   超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
+- **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，
+  单一轨道；`call_xxx` ID 保留）；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记、纯文本）归宿主
+  Thinker —— 文本轨（`Context`）只保留宿主基底与 sandbox 裁决
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
@@ -203,7 +206,7 @@ func main() {
 ### 事件流是观察镜像
 
 `Stimulate` 运行循环的一个步骤并返回 `iter.Seq[Event]`。工具执行发生在循环**内部**
-（通过你的 `Effector`），结果自动追加到下一轮 `Prompt.Context`。宿主观察
+（通过你的 `Effector`），结果以结构化条目进入下一轮 `Prompt.ToolResults`。宿主观察
 （`EventToolCall` / `EventToolResult`），但绝不向打开的迭代器回灌数据。
 
 停止消费（yield 返回 false）**放弃本轮**：停止点及其后的工具**不会**执行，

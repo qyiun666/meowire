@@ -13,7 +13,7 @@ package nerve
 type Event struct {
 	Kind     EventKind
 	Text     string          // KindText: LLM text output
-	ToolCall *ToolCall       // KindToolCall: LLM decided to call a tool
+	ToolCall *ToolCall       // KindToolCall: the call; KindToolResult: echoes the call for ID association
 	Effect   *Effect         // KindToolResult: tool execution result
 	State    LoopState       // KindState: loop state change
 	Err      error           // KindError: unrecoverable error
@@ -51,14 +51,14 @@ type ReplaceAudit struct {
 type EventKind int
 
 const (
-	EventText        EventKind = iota // LLM text output
-	EventToolCall                     // LLM decided to call a tool
-	EventToolResult                   // Tool execution result
-	EventState                        // Loop state change
-	EventDone                         // Loop completed normally
-	EventError                        // Loop encountered unrecoverable error
-	EventUsage                        // Token usage of the last Think
-	EventSandbox                      // Sandbox decision (audit record)
-	EventWaitInput                    // Loop suspended waiting for external input
-	EventReplace                      // Runtime port swap (audit record)
+	EventText       EventKind = iota // LLM text output
+	EventToolCall                    // LLM decided to call a tool
+	EventToolResult                  // Tool execution result
+	EventState                       // Loop state change
+	EventDone                        // Loop completed normally
+	EventError                       // Loop encountered unrecoverable error
+	EventUsage                       // Token usage of the last Think
+	EventSandbox                     // Sandbox decision (audit record)
+	EventWaitInput                   // Loop suspended waiting for external input
+	EventReplace                     // Runtime port swap (audit record)
 )
