@@ -59,7 +59,8 @@ const DefaultMaxRounds = 8
 // provided). Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables Think retry;
 // ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
-// retry. UpdateConfig swaps it wholesale; the next Stimulate/Resume snapshots
+// retry; ParallelActs=false keeps strict serial tool execution (v1.3.2
+// behavior). UpdateConfig swaps it wholesale; the next Stimulate/Resume snapshots
 // the new values (an in-flight loop keeps the values it started with).
 type LoopConfig struct {
 	MaxRounds      int
@@ -67,6 +68,11 @@ type LoopConfig struct {
 	MaxRetries     int
 	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = none)
 	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
+	// ParallelActs executes a round's multiple tool calls concurrently
+	// (serial gating → parallel Act → serial feedback in call order); a
+	// single call always keeps the serial path. Opt-in prerequisite: the
+	// Effector implementation must be safe for concurrent Act calls.
+	ParallelActs bool
 }
 
 // PauseGate is the pause gate (optional; nil = pause unsupported).
@@ -104,6 +110,7 @@ type LoopContext struct {
 	MaxRetries     int           // Think retry count (<=0 = no retry)
 	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = no timeout)
 	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
+	ParallelActs   bool          // Parallel batch execution (requires a concurrency-safe Effector)
 
 	// Dynamic state
 	State   LoopState
@@ -382,6 +389,12 @@ func thinkRound(ctx context.Context, lc *LoopContext, out *strings.Builder, yiel
 // iterator normally (no Done, no error). ok=false means the loop must end
 // (an error was emitted or the consumer stopped).
 func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round int, out *strings.Builder, yield func(Event) bool) (waiting *WaitInput, ok bool) {
+	// Opt-in batch parallelism (v1.3.3): a round's multiple calls execute
+	// concurrently while events and hooks stay serial. A single call keeps
+	// the serial path — zero behavior difference.
+	if lc.ParallelActs && len(calls) > 1 {
+		return runToolCallsParallel(ctx, lc, calls, round, out, yield)
+	}
 	for i, tc := range calls {
 		if !yield(Event{Kind: EventToolCall, ToolCall: &tc}) {
 			return nil, false
@@ -423,23 +436,30 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 		// Compute feedback — structured track only: tool results no longer
 		// enter the Context text track (rendering is the host's decision;
 		// Context keeps host-injected base + sandbox denials).
-		lc.Hooks.AfterAct(ctx, &Action{CellID: lc.CellID, Call: tc}, eff, err)
-		tr := ToolResult{ID: tc.ID, Name: tc.Name}
-		switch {
-		case err != nil:
-			tr.Err = truncateText(err.Error(), lc.MaxToolOutput)
-		case eff.Err != "":
-			tr.Err = truncateText(eff.Err, lc.MaxToolOutput)
-		default:
-			tr.Result = truncateText(eff.Result, lc.MaxToolOutput)
-		}
-		lc.ToolResults = append(lc.ToolResults, tr)
-
-		if !yield(Event{Kind: EventToolResult, Effect: eff, ToolCall: &tc}) {
+		if !toolFeedback(ctx, lc, tc, eff, err, yield) {
 			return nil, false
 		}
 	}
 	return nil, true
+}
+
+// toolFeedback finalizes one executed tool call: the AfterAct hook, the
+// truncated ToolResult appended to the structured track, and the
+// EventToolResult yield. Shared by the serial and the parallel path. Returns
+// false when the consumer stopped.
+func toolFeedback(ctx context.Context, lc *LoopContext, tc ToolCall, eff *Effect, err error, yield func(Event) bool) bool {
+	lc.Hooks.AfterAct(ctx, &Action{CellID: lc.CellID, Call: tc}, eff, err)
+	tr := ToolResult{ID: tc.ID, Name: tc.Name}
+	switch {
+	case err != nil:
+		tr.Err = truncateText(err.Error(), lc.MaxToolOutput)
+	case eff.Err != "":
+		tr.Err = truncateText(eff.Err, lc.MaxToolOutput)
+	default:
+		tr.Result = truncateText(eff.Result, lc.MaxToolOutput)
+	}
+	lc.ToolResults = append(lc.ToolResults, tr)
+	return yield(Event{Kind: EventToolResult, Effect: eff, ToolCall: &tc})
 }
 
 // runOneTool gates and executes one tool call: the sandbox membrane (every

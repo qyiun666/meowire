@@ -223,6 +223,7 @@ type Config struct {
     MaxRetries     int
     ToolTimeout    time.Duration
     ToolMaxRetries int
+    ParallelActs   bool
 }
 ```
 
@@ -233,6 +234,7 @@ type Config struct {
 | `MaxRetries` | Think 重试次数（仅重试 Think；工具失败防护在宿主侧 Effector/AfterAct） | 不重试 |
 | `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，写入 `ToolResults.Err` 继续循环） | 无超时 |
 | `ToolMaxRetries` | 工具执行失败重试次数（**仅执行器 error**；`Effect.Err` 不重试，防重复副作用） | 不重试 |
+| `ParallelActs` | **同轮多工具批次并行（v1.3.3，opt-in）**：串行门控（逐条事件/沙箱裁决/BeforeAct）→ 并行 Act（含超时/重试）→ 串行反馈（按调用序，与完成顺序无关）。单调用恒走串行路径；**前提：Effector 实现并发安全** | 严格串行 |
 
 **运行期热更新（v1.3.0）**：
 
@@ -419,6 +421,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **挂起 = 迭代器正常结束**：yield `EventState(StateWaiting)` → `EventWaitInput` 后结束，无 `EventDone`/`EventError`；`OnCycleEnd`/`AfterStimulate` 照常恰好一次（宿主凭 `StateWaiting` 区分挂起收尾，**勿沉淀未完成轮次**）
 - **暂停（v1.3.2）= 同一挂起机制**：yield `EventState(StatePaused)` → `EventPaused`（Session 快照，Call 零值）后迭代器正常结束；`agent.Resume(sess, "")` 续跑，不注入任何结果（无 pending 工具）；暂停点在工具执行前时，当前工具记入 Session.remaining，Resume 先执行
 - **`Session` 是不透明值对象**（`round`/Context/剩余工具调用/累积输出快照）：宿主只保存、传回，不碰内部；**单次消费**——重复 Resume 会重复执行剩余工具（副作用重复，宿主责任）
+- **`sess.RemainingCalls()`（v1.3.3）**：唯一授权的只读探测——返回挂起点尚未执行的调用克隆（无则空）：暂停快照保留整批未执行调用（Resume 重放）；`ParallelActs` 批内 WaitInput 挂起则为空（整批已执行完，Resume 只注入响应，绝不重放）
 - **持久化（v1.3.2）**：`sess.Marshal()` 产出 JSON 字节（含版本号），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本不匹配拒绝还原（防止旧/新格式误重放）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
 - **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行

@@ -253,6 +253,7 @@ type Config struct {
     MaxRetries     int
     ToolTimeout    time.Duration
     ToolMaxRetries int
+    ParallelActs   bool
 }
 ```
 
@@ -263,6 +264,7 @@ type Config struct {
 | `MaxRetries` | Think retry count (retries Think only; tool-failure protection is host-side, in Effector/AfterAct) | no retry |
 | `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and are written to `ToolResults.Err`) | no timeout |
 | `ToolMaxRetries` | Tool retry count on effector errors (**executor err only**; `Effect.Err` is never retried — avoids duplicate side effects) | no retry |
+| `ParallelActs` | **Parallel execution of a round's multi-tool batch (v1.3.3, opt-in)**: serial gating (per-call events/sandbox verdicts/BeforeAct) → parallel Act (timeout/retry included) → serial feedback in call order (never completion order). A single call always keeps the serial path; **prerequisite: the Effector must be safe for concurrent Act calls** | strict serial |
 
 **Runtime hot update (v1.3.0):**
 
@@ -498,6 +500,11 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   accumulated output): the host only saves and returns it, never inspects it;
   **single-use** — resuming twice re-executes the remaining tool calls (duplicate side
   effects; host responsibility)
+- **`sess.RemainingCalls()` (v1.3.3)**: the sole sanctioned read-only probe — a clone of
+  the calls not yet executed at the suspension point (empty when nothing is left): a
+  pause snapshot keeps the whole unexecuted batch (Resume replays it); a WaitInput
+  suspension inside a `ParallelActs` batch is empty (the batch fully executed — Resume
+  only injects the response, never replays)
 - **Persistence (v1.3.2)**: `sess.Marshal()` produces versioned JSON bytes; the host
   persists them; after a restart `meowire.UnmarshalSession(data)` restores the handle
   and Resume continues — suspensions and pauses recover across processes; a version

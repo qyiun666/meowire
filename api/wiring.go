@@ -188,6 +188,9 @@ func Validate(o Organs, cfg Config) []Issue {
 	if cfg.MaxRounds <= 0 {
 		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "", Msg: "MaxRounds<=0 uses DefaultMaxRounds(8)"})
 	}
+	if cfg.ParallelActs {
+		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
+	}
 
 	return issues
 }

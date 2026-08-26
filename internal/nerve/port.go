@@ -214,6 +214,17 @@ func UnmarshalSession(data []byte) (Session, error) {
 // injects no base context) — Resume appends onto nil slices fine.
 func (s Session) valid() bool { return s.round >= 1 }
 
+// RemainingCalls returns a clone of the tool calls still pending at the
+// suspension point (empty when nothing is left to run). Hosts use it in the
+// suspension-resume protocol to tell whether Resume will replay tool calls:
+// a pause before or amid a round keeps the unexecuted calls, while a tool
+// suspension inside a parallel batch is empty (the batch fully executed —
+// replaying it would duplicate side effects). The returned clone is safe to
+// inspect; the Session itself stays opaque.
+func (s Session) RemainingCalls() []ToolCall {
+	return slices.Clone(s.remaining)
+}
+
 // snapshot returns a deep-enough copy of the session for later resumption.
 func (s Session) snapshot(round int, input, plan string, context []string, output string, pending ToolCall, remaining []ToolCall, toolResults []ToolResult) Session {
 	return Session{

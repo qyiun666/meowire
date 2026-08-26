@@ -184,6 +184,24 @@ func TestValidateInfoDefaults(t *testing.T) {
 	}
 }
 
+// TestValidateParallelActsInfo: ParallelActs surfaces an info finding that
+// reminds the host of the concurrency-safety prerequisite — never an error
+// (the switch is opt-in behavior, not a wiring defect).
+func TestValidateParallelActsInfo(t *testing.T) {
+	found := false
+	for _, is := range Validate(fullOrgans(), Config{ParallelActs: true}) {
+		if is.Level == LevelError {
+			t.Errorf("ParallelActs must never produce an error finding: %s", is.Msg)
+		}
+		if is.Level == LevelInfo && strings.Contains(is.Msg, "ParallelActs") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("ParallelActs should surface an info finding")
+	}
+}
+
 // TestRenderDiagram: the ASCII graph lists nodes first, then every slot
 // (edge) with a fill mark and its target node.
 func TestRenderDiagram(t *testing.T) {

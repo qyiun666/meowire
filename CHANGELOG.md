@@ -5,6 +5,55 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-08-27
+
+### Added
+
+- **`Config.ParallelActs` — same-round tool batch parallelism (opt-in)** — when
+  enabled and a round produces multiple tool calls, `runToolCalls` diverts to a
+  three-phase batch path (`internal/nerve/parallel.go`):
+  1. **Serial gating** — every call announced as `EventToolCall` in call order,
+     one pause gap point for the whole batch (a hit snapshots the whole batch
+     unexecuted; Resume replays it), per-call sandbox verdict (`EventSandbox`
+     audit unchanged) and `BeforeAct`; a denied call gets its `[denied: reason]`
+     feedback in place and is skipped without affecting its siblings.
+  2. **Parallel execution** — one goroutine per admitted call runs `actWithRetry`
+     (timeout/retry included); results land by call index. Hooks, events, and
+     loop state never enter this phase.
+  3. **Serial feedback** — `AfterAct` → `ToolResult` → `EventToolResult` in call
+     order, never completion order.
+  Zero value false keeps strict serial execution (v1.3.2 behavior; existing
+  hosts are unaffected). A single call always keeps the serial path. A
+  `WaitInput` result inside the batch suspends with an empty `remaining` — the
+  batch has fully executed, so Resume injects the response without replaying
+  anything (replaying would duplicate side effects); every sibling's feedback
+  is preserved in the snapshot's `ToolResults`. Prerequisite: the Effector
+  implementation must be safe for concurrent `Act` calls.
+- **`Session.RemainingCalls()`** — the sole sanctioned read-only probe of a
+  suspension handle: a clone of the tool calls not yet executed at the
+  suspension point (empty when nothing is left to run). Hosts use it in the
+  suspension-resume protocol to tell whether Resume will replay tool calls.
+  The Session wire shape and `sessionVersion` are unchanged.
+- **Validate info finding** — `Validate` reports a `LevelInfo` finding when
+  `ParallelActs` is enabled (reminder of the concurrency-safety prerequisite);
+  never an error, `New` is unaffected.
+
+### Fixed
+
+- Contract drift: repowiki 事件系统.md now enumerates the v1.3.x event kinds
+  (`EventSandbox`/`EventWaitInput`/`EventPaused`/`EventReplace`/`EventConfig`),
+  restoring `TestEventKindContractSynced` to green.
+
+### Docs
+
+- `README.md` — Features lists the parallel batch switch and
+  `Session.RemainingCalls()`.
+- `host-integration.md`/`.en.md` — §4 config table adds `ParallelActs`; §6.4
+  suspension notes add the `RemainingCalls()` probe semantics.
+- `internal/nerve/agent.md`, `internal/cell/agent.md`, `api/agent.md` —
+  contracts synced (LoopConfig/LoopContext/Session enumerations, three-phase
+  batch semantics, Validate info finding).
+
 ## [1.3.2] - 2026-08-26
 
 ### Added

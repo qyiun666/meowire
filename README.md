@@ -67,6 +67,11 @@ you can rely on.
   host Thinker's decision — the text track (`Context`) keeps host base + sandbox denials
 - **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
   `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
+- **Parallel tool batches (v1.3.3, opt-in)** — `Config.ParallelActs` executes a round's
+  multiple independent tool calls concurrently (serial gating → parallel Act → serial
+  feedback in call order); events and hooks stay serial. Off by default; requires a
+  concurrency-safe Effector. `Session.RemainingCalls()` exposes the pending calls of a
+  suspension (empty when nothing is left to replay)
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
 - **Flat multi-agent model** — sub-agents and inter-agent messaging are host tools
   (`spawn_agent` / `send_message`), never framework-level nesting

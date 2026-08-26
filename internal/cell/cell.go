@@ -126,6 +126,7 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 		MaxRetries:     cfg.MaxRetries,
 		ToolTimeout:    cfg.ToolTimeout,
 		ToolMaxRetries: cfg.ToolMaxRetries,
+		ParallelActs:   cfg.ParallelActs,
 		State:          nerve.StateIdle,
 		Input:          text,
 		System:         c.System,
