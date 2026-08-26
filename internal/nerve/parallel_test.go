@@ -67,7 +67,7 @@ func TestParallelActsPeakConcurrency(t *testing.T) {
 
 	// Both calls must be in flight before either can complete.
 	inFlight := map[string]bool{}
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case name := <-started:
 			inFlight[name] = true

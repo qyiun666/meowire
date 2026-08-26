@@ -7,7 +7,7 @@ Meowire is a minimal decision-loop kernel for building agent hosts. It wires the
 the security policy. No framework opinion about your stack — just a clean, dependency-free loop
 you can rely on.
 
-> Requires Go 1.26+ (uses `iter.Seq`).
+> Requires Go 1.27+ (uses `iter.Seq`).
 
 ## Why Meowire
 

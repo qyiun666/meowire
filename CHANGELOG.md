@@ -5,6 +5,27 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4] - 2026-08-27
+
+### Changed
+
+- **Go 1.27 baseline** — `go.mod` now requires Go 1.27. The upgrade is a
+  runtime/toolchain gain (faster small allocations, goroutine-leak profile,
+  smarter `go fix`/`go doc`); the zero-dependency promise and the whole
+  public surface are unchanged. `encoding/json` stays as-is for the Session
+  wire shape (`sessionVersion` untouched) — json/v2 is deliberately not
+  adopted (wire-format stability over novelty).
+- **Modernized idioms** (`go fix` 1.27 modernizers, reviewed):
+  integer-range `for range N` loops in tests, `slices.Contains` in
+  loop_test.go, `strings.SplitSeq` in contract_sync_test.go. The
+  retry-count clamp in `thinkWithRetry`/`actWithRetry` deliberately keeps
+  the explicit if-form (the `max()` rewrite buries the "negative = no
+  retry" contract comment).
+
+### Docs
+
+- `README.md`/`README.zh-CN.md` — requirement bumped to Go 1.27+.
+
 ## [1.3.3] - 2026-08-27
 
 ### Added

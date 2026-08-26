@@ -7,6 +7,7 @@ package nerve
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1103,13 +1104,7 @@ func TestDecisionLoopBeforeStimulateMutatesPrompt(t *testing.T) {
 	}
 	// Tool results no longer enter Context (structured track only); the
 	// injected entry must persist across rounds.
-	found := false
-	for _, c := range secondCtx {
-		if c == "injected-history" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(secondCtx, "injected-history")
 	if !found {
 		t.Fatalf("second round context = %v, want it to contain 'injected-history'", secondCtx)
 	}

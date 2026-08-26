@@ -138,7 +138,7 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 	defer a.Close()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(2)
 		go func() { defer wg.Done(); a.Pause() }()
 		go func() { defer wg.Done(); a.Unpause() }()

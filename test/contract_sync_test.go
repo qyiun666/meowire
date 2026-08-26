@@ -49,7 +49,7 @@ func iotaConstNames(t *testing.T, src string, marker string) []string {
 			continue
 		}
 		var names []string
-		for _, line := range strings.Split(m[1], "\n") {
+		for line := range strings.SplitSeq(m[1], "\n") {
 			if name := nameRe.FindStringSubmatch(line); len(name) == 2 {
 				names = append(names, name[1])
 			}

@@ -282,7 +282,7 @@ func TestFireIncrementsFired(t *testing.T) {
 		t.Fatalf("link: %v", err)
 	}
 	sig := nerve.Signal{ID: "s", From: "a", To: "b", Kind: nerve.KindNotice}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := d.Fire(ctx, sig); err != nil {
 			t.Fatalf("fire %d: %v", i, err)
 		}
@@ -382,12 +382,12 @@ func TestPlasticConcurrent(t *testing.T) {
 	inbox := make(chan nerve.Signal, 8)
 	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			from := fmt.Sprintf("a%d", i)
-			for j := 0; j < 50; j++ {
+			for j := range 50 {
 				_ = d.Link(ctx, from, "b", float64(j))
 				_ = d.Reinforce(ctx, from, "b", 0.5)
 				_, _ = d.Edges(ctx, from)
