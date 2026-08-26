@@ -23,7 +23,8 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **类型化事件流** —— `Stimulate` 返回 `iter.Seq[Event]`，宿主观察
   `EventText`、`EventToolCall`、`EventToolResult`、`EventState`、`EventDone`、`EventError`、`EventUsage`、
   `EventSandbox`（动作级审计记录）、`EventWaitInput`（循环挂起等待外部输入）、
-  `EventReplace`（端口替换审计记录）
+  `EventPaused`（暂停请求生效 —— 快照 + 恢复句柄）、`EventReplace`（端口替换审计记录）、
+  `EventConfig`（配置替换审计记录）
 - **动作级审计轨迹** —— 每个 Sandbox 决策（允许/拒绝）产出 `EventSandbox`
   判定（工具、原因、错误）；持久化事件流即得完整"谁/做了什么/为什么被允许"审计，
   符合 Authority 安全模型
@@ -49,13 +50,18 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   `ContextBudget`（上下文调节器 —— 必须有 Trimmer 与 MaxTokens）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
-  不在此列，走下面的挂起-恢复协议（唯一形式）
-- **Pause/Unpause** —— 间隙点（每轮 Think 前 / 每个工具执行前）的进程内暂停；
-  循环产出 `EventState(StatePaused)` 并保留循环内状态，直到恢复（v1.3.0 由 Resume 改名）
-- **挂起-恢复（ask_user）** —— 工具返回 `Effect{WaitInput: 问题}` 即挂起：循环产出
-  `EventState(StateWaiting)` + `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束**
-  ——不阻塞、不占轮次、等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：
-  响应以挂起工具的结构化结果进入循环（`Prompt.ToolResults` 条目，ID 保留），先执行剩余工具，再从挂起轮继续。
+  不在此列，走下面的统一挂起-恢复协议（唯一形式）
+- **统一挂起-恢复（v1.3.2）** —— 两种挂起共用同一条快照 + 恢复路径：
+  - **ask_user**：工具返回 `Effect{WaitInput: 问题}`，循环产出 `EventState(StateWaiting)` +
+    `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束** ——不阻塞、不占轮次、
+    等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：响应以挂起工具的结构化
+    结果进入循环（`Prompt.ToolResults` 条目，ID 保留），先执行剩余工具，再从挂起轮继续。
+  - **Pause**：`Agent.Pause()` 在间隙点（每轮 Think 前 / 每个工具执行前）生效，循环产出
+    `EventState(StatePaused)` + `EventPaused`（Session 快照）后迭代器正常结束 ——
+    `Agent.Resume(ctx, sess, "")` 续跑（无 pending 工具可注入）。暂停点在工具执行前时，
+    当前工具计入快照，Resume 先执行它。
+  - **可持久化**：`Session.Marshal()` / `UnmarshalSession` 提供带版本号的 JSON 持久化 ——
+    挂起或暂停的循环可跨进程存活（对齐主流 checkpoint/resume）。
   超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
 - **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，
   单一轨道；`call_xxx` ID 保留）；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记、纯文本）归宿主
@@ -217,9 +223,25 @@ func main() {
 停止迭代器，在宿主侧处理（异步工具、人工接管、外部服务），自行保存进度，然后再次
 `Stimulate`。每次 `Stimulate` 都是无状态步骤 —— 这是宿主主动接管、长任务和重试的实现方式。
 工具请求输入（ask_user）**不在此列**：工具返回 `Effect{WaitInput: 问题}`，循环携带不透明
-`Session` 挂起，宿主经 `Agent.Resume(ctx, sess, response)` 续跑（见上文“挂起-恢复”）。
+`Session` 挂起，宿主经 `Agent.Resume(ctx, sess, response)` 续跑（见下文“统一挂起-恢复”）。
 两条路径互斥；用 break + `Stimulate` 模拟 ask_user 会丢失挂起上下文（`Session` 不透明，
 无法手工重建）。
+
+### 统一挂起-恢复（v1.3.2）
+
+两种挂起 —— 工具请求输入（ask_user）与宿主请求暂停（Pause）—— 共用同一机制：
+循环产出携带不透明 `Session` 快照的挂起事件后**迭代器正常结束**；宿主保存 Session
+（可选经 `Session.Marshal()` / `UnmarshalSession` 跨进程持久化恢复），然后调用
+`Agent.Resume(ctx, sess, response)` 从挂起点继续 —— 不占轮次、等待期间不触发 budget。
+
+- **ask_user**：`Effect{WaitInput: 问题}` → `EventState(StateWaiting)` + `EventWaitInput`；
+  响应以挂起工具的结构化结果注入。
+- **Pause**：`Agent.Pause()` 在间隙点生效 → `EventState(StatePaused)` + `EventPaused`；
+  `Resume(sess, "")` 续跑，不注入任何内容（无 pending 工具）。暂停点在工具执行前时，
+  当前工具（及其后的调用）计入 `Session.remaining`，Resume 先执行它们。
+- `Agent.Resume` 自动清除失效的暂停请求；`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
+- Session 单次使用：重复恢复会重放剩余工具调用（宿主责任）。
+  该统一模型取代旧的阻塞式 PauseGate 等待（v1.3.2 breaking）。
 
 ### 轮数上限
 

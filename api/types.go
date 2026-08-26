@@ -45,10 +45,19 @@ type (
 	EventKind      = nerve.EventKind
 	LoopState      = nerve.LoopState
 	SandboxVerdict = nerve.SandboxVerdict
-	WaitInput      = nerve.WaitInput // EventWaitInput payload: tool + question + resume Session
-	Session        = nerve.Session   // opaque resume handle — save from EventWaitInput, pass to Resume
+	WaitInput      = nerve.WaitInput // EventWaitInput/EventPaused payload: tool (zero for pause) + question + resume Session
+	Session        = nerve.Session   // opaque resume handle — save from EventWaitInput/EventPaused, pass to Resume
 	ReplaceAudit   = nerve.ReplaceAudit
+	ConfigAudit    = nerve.ConfigAudit
 )
+
+// UnmarshalSession restores a Session from Marshal output — the persistence
+// round-trip (save the bytes, restore the handle, pass it to Resume). A
+// version mismatch returns an error: the wire format has evolved and the
+// saved handle must not be replayed against a different contract.
+func UnmarshalSession(data []byte) (Session, error) {
+	return nerve.UnmarshalSession(data)
+}
 
 // Memory contract for host-implemented memory backends.
 type (
@@ -117,7 +126,9 @@ const (
 	EventUsage      EventKind = nerve.EventUsage
 	EventSandbox    EventKind = nerve.EventSandbox
 	EventWaitInput  EventKind = nerve.EventWaitInput
+	EventPaused     EventKind = nerve.EventPaused
 	EventReplace    EventKind = nerve.EventReplace
+	EventConfig     EventKind = nerve.EventConfig
 )
 
 // SignalKind constants.

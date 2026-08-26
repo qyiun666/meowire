@@ -26,7 +26,8 @@ you can rely on.
 - **Typed event stream** — `Stimulate` returns `iter.Seq[Event]`; the host observes
   `EventText`, `EventToolCall`, `EventToolResult`, `EventState`, `EventDone`, `EventError`, `EventUsage`,
   `EventSandbox` (action-level audit record), `EventWaitInput` (loop suspended waiting for external input),
-  `EventReplace` (port-swap audit record)
+  `EventPaused` (pause request honored — snapshot + resume handle), `EventReplace` (port-swap audit record),
+  `EventConfig` (config-swap audit record)
 - **Action-level audit trail** — every sandbox decision (allowed or denied) yields an
   `EventSandbox` verdict (tool, reason, error); persist the event stream for a complete
   "who/what/why was permitted" audit, per the Authority security model
@@ -55,14 +56,10 @@ you can rely on.
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
-- **Pause/Unpause** — process-level suspension at gap points (before each Think / tool execution);
-  the loop yields `EventState(StatePaused)` and keeps its in-cycle state until unpaused
-- **Suspension-resume (ask_user)** — a tool returns `Effect{WaitInput: question}` and the loop
-  suspends: it yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`)
-  and ends the iterator normally — no blocking, no extra round, no budget during the wait.
-  `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the
-  pending tool's structured result (`Prompt.ToolResults` entry, ID preserved),
-  remaining tools run first, then the loop resumes from the suspended round.
+- **Unified suspension-resume (v1.3.2)** — one snapshot + resume path for both suspension kinds:
+  - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), remaining tools run first, then the loop resumes from the suspended round.
+  - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, "")` continues (no pending tool to inject). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
+  - **Persistent**: `Session.Marshal()` / `UnmarshalSession` give versioned JSON persistence — a suspended or paused loop survives process restarts (alignment with mainstream checkpoint/resume).
   Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
 - **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
   (`ToolResult{ID, Name, Result, Err}`, single track; `call_xxx` IDs preserved);
@@ -236,6 +233,24 @@ is **not** done this way: a tool returns `Effect{WaitInput: question}` and the l
 opaque `Session` — resume it via `Agent.Resume(ctx, sess, response)` (see Suspension-resume above).
 The two paths are mutually exclusive; a break-based `ask_user` would lose the suspended context
 (the `Session` is opaque and cannot be rebuilt by hand).
+
+### Unified suspension-resume (v1.3.2)
+
+Both suspension kinds — tool-requested input (ask_user) and host-requested pause — share one
+mechanism: the loop yields a suspension event carrying an opaque `Session` snapshot and ends the
+iterator normally; the host saves the Session (optionally persisting it via `Session.Marshal()` /
+`UnmarshalSession` for cross-process recovery), then calls `Agent.Resume(ctx, sess, response)` to
+continue from the suspended point — no extra round, no budget during the wait.
+
+- **ask_user**: `Effect{WaitInput: question}` → `EventState(StateWaiting)` + `EventWaitInput`;
+  the response is injected as the pending tool's structured result.
+- **Pause**: `Agent.Pause()` honored at gap points → `EventState(StatePaused)` + `EventPaused`;
+  `Resume(sess, "")` continues without injecting anything (no pending tool). A pause before a tool
+  keeps that tool (and the calls after it) in `Session.remaining`, so Resume runs them first.
+- `Agent.Resume` clears a stale pause request automatically; `Agent.Unpause()` only backs out a
+  pause request that has not taken effect yet.
+- The Session is single-use: resuming it twice re-executes the remaining tool calls (host
+  responsibility). This unified model replaces the old blocking PauseGate wait (v1.3.2 breaking).
 
 ### Round limits
 

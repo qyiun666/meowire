@@ -101,20 +101,20 @@ type Closer interface {
 
 释放 LLM 客户端、HTTP 连接等宿主资源。框架保证 Agent.Close 幂等（CAS），重复调用无副作用。
 
-### 2.4 Pause / Unpause —— 进程内暂停恢复（Agent 级控制，非端口）
+### 2.4 Pause / Unpause —— 快照挂起（v1.3.2 起与 ask_user 统一为单一挂起-恢复机制）
 
 ```go
-agent.Pause()     // 请求暂停：下一个间隙点生效
-agent.Unpause()   // 恢复：清除暂停标志（v1.2.1 名为 Resume，v1.3.0 改名——Resume 现指挂起会话续跑，见 §6.4）
+agent.Pause()     // 请求暂停：下一个间隙点生效（Think 前 / 工具执行前）
+agent.Unpause()   // 清除未生效的暂停请求（Pause 后、间隙点前反悔用）
 ```
 
 - **间隙生效**：暂停请求不打断正在执行的 Think/Act；循环在「每轮 Think 前」与「每个工具执行前」两个间隙点检查
-- 暂停时事件流产出 `EventState(StatePaused)`；恢复后继续，不额外发事件
-- 暂停状态是 **Agent 级、跨 Stimulate 保留**：暂停中再次 `Stimulate`，入口先暂停等待恢复
+- **快照挂起（v1.3.2 起不再阻塞）**：暂停生效时事件流产出 `EventState(StatePaused)` → `EventPaused`（携带 Session 快照），**迭代器正常结束**；宿主用 `agent.Resume(sess, "")` 续跑（response 传空，无 pending 工具可注入）——与 ask_user 共用同一条 Session/Resume 路径（LangGraph-interrupt 式单一挂起原语）
+- **工具间隙暂停**：暂停点在工具执行前，快照会把「当前工具及其后调用」记入 Session.remaining，Resume 先执行它们再回到 Think（当前工具未执行，不会丢失）
+- 暂停状态是 **Agent 级、跨 Stimulate 保留**：暂停中再次 `Stimulate`，入口处先挂起（StatePaused + EventPaused）
 - `Pause` / `Unpause` **幂等、并发安全**；`Close` 后调用为 no-op
-- **`Close` 会解除暂停阻塞**：暂停中的迭代器被唤醒后可正常收尾（或被 ctx 取消终止），不会永久挂起
-- 暂停阻塞中 ctx 取消 → 走正常错误路径（`EventState(StateError)` → `EventError`）
-- 与 Step-Resume 的区别：Step-Resume 放弃本轮、无状态重来；Pause/Unpause **保留循环内状态原地挂起**
+- **`Resume` 自动清除暂停请求**：Resume 即继续意图，恢复后的循环不会在首个间隙点再次挂起；`Unpause` 只用于「暂停尚未生效时反悔」
+- 与 Step-Resume 的区别：Step-Resume 放弃本轮、无状态重来；Pause **保留循环内状态（Session 快照）原地挂起**，恢复不占轮次
 
 ### 2.5 Hooks —— 拦截回调（全部八个必填；不需要行为时传显式 no-op，缺席即装配错误）
 
@@ -322,10 +322,11 @@ EventState(thinking) → EventText → [EventUsage] → EventState(acting)
   → (EventToolCall → [EventSandbox] → EventToolResult) × N → 回到 EventState(thinking) → …
 ```
 
-**暂停路径（间隙点插入，Unpause 后继续原序列）：**
+**暂停路径（间隙点生效，v1.3.2 起快照挂起：迭代器正常结束，Resume 续跑）：**
 
 ```
-… → EventState(paused) →（阻塞等待 Unpause / ctx 取消）→ 继续原序列
+… → EventState(paused) → EventPaused(Session 快照) → 迭代器正常结束（无 Done/Error）
+→ 宿主调 Resume(sess, "") → 剩余工具先执行 → 回到 EventState(thinking) → 继续原序列
 ```
 
 **挂起路径（工具返回 `Effect.WaitInput`，迭代器正常结束；见 §6.4）：**
@@ -362,7 +363,9 @@ EventState(error) → EventError(Err)
 | `EventError` | `Err` | 不可恢复错误（含 `ErrMaxRounds`、`ErrCellClosed`） |
 | `EventUsage` | `Usage *Usage` | 最近一次 Think 的 token 用量 |
 | `EventWaitInput` | `Wait *WaitInput` | 工具请求外部输入：`WaitInput{CellID, Call, Question, Session}`——宿主**保存 Session**、向用户展示问题，收集响应后调 `agent.Resume(sess, response)` |
+| `EventPaused` | `Wait *WaitInput` | 暂停请求生效：`WaitInput{CellID, Session}`（Call 零值、Question 空）——宿主保存 Session，调 `agent.Resume(sess, "")` 续跑（v1.3.2 起统一挂起-恢复） |
 | `EventReplace` | `Replace *ReplaceAudit` | 端口替换审计：`ReplaceAudit{CellID, Slot, Old, New}`；下一次 Stimulate/Resume 开头（生效时刻）按序产出，可持久化 |
+| `EventConfig` | `Config *ConfigAudit` | 配置整包替换审计：`ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`；下一次 Stimulate/Resume 开头在 EventReplace 之后按序产出（v1.3.2），可持久化 |
 
 `SandboxVerdict{CellID, Call, Allowed, Reason, Err}`：每个被配置的 Sandbox 决策（允许或拒绝）在工具执行前产出一条；宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
 
@@ -398,14 +401,14 @@ for ev := range agent.Stimulate(ctx, "整理桌面") {
         go func() {                       // 宿主自行控制超时（默认拒绝）
             select {
             case ans := <-ui.Answer():
-                resumeCh <- ans
+                answerCh <- ans
             case <-time.After(60 * time.Second):
-                resumeCh <- "[denied: timeout]"
+                answerCh <- "[denied: timeout]"
             }
         }()
     }
 }
-ans := <-resumeCh
+ans := <-answerCh
 for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
     ...
 }
@@ -414,7 +417,9 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 **语义：**
 
 - **挂起 = 迭代器正常结束**：yield `EventState(StateWaiting)` → `EventWaitInput` 后结束，无 `EventDone`/`EventError`；`OnCycleEnd`/`AfterStimulate` 照常恰好一次（宿主凭 `StateWaiting` 区分挂起收尾，**勿沉淀未完成轮次**）
+- **暂停（v1.3.2）= 同一挂起机制**：yield `EventState(StatePaused)` → `EventPaused`（Session 快照，Call 零值）后迭代器正常结束；`agent.Resume(sess, "")` 续跑，不注入任何结果（无 pending 工具）；暂停点在工具执行前时，当前工具记入 Session.remaining，Resume 先执行
 - **`Session` 是不透明值对象**（`round`/Context/剩余工具调用/累积输出快照）：宿主只保存、传回，不碰内部；**单次消费**——重复 Resume 会重复执行剩余工具（副作用重复，宿主责任）
+- **持久化（v1.3.2）**：`sess.Marshal()` 产出 JSON 字节（含版本号），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本不匹配拒绝还原（防止旧/新格式误重放）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
 - **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行
 - **响应形态**：作为挂起工具的结构化结果写入 `ToolResults`（`ID` 为挂起调用的 `call_xxx`），进入恢复后的第一次 Think；超时由宿主控制（默认拒绝，如上注入 `[denied: timeout]`）
@@ -687,7 +692,7 @@ func main() {
 6. **事件流是观察镜像**：宿主不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
 7. **流式 UX 在 Thinker 内做**：`EventText` 永远整段，token 增量不进事件流
 8. **错误处理**：宿主端口返回的错误会被框架包装（`nerve.hookBeforeThink: ...` 等）后经 `EventError` 透出；判断错误类型用 `errors.Is`（如 `meowire.ErrMaxRounds`）
-9. **暂停不打断执行中的工具**：Pause 在间隙点生效；如需中断正在执行的工具，用 ctx 取消（§2.4）
+9. **暂停不打断执行中的工具**：Pause 在间隙点生效（v1.3.2 起为快照挂起，`EventPaused` 后迭代器结束、`Resume(sess, "")` 续跑）；如需中断正在执行的工具，用 ctx 取消（§2.4）
 10. **hub 生命周期归宿主**（§7.3）：流式 channel 满会阻塞 agent 循环（Thinker 转发是同步的），宿主必须管理背压（buffer 大小）与回收（agent 结束后 close/删除 channel）；框架不参与
 11. **子 agent 必须注入与主 agent 同一个 hub 实例**（§7.3）：换实例即失联，统一状态视图靠共享实例实现
 

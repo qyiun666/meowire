@@ -16,8 +16,19 @@ import (
 	"github.com/qyiun666/meowire/internal/testutil"
 )
 
+// kinds returns the EventKind sequence of events (test assertion helper).
+func kinds(events []meowire.Event) []meowire.EventKind {
+	k := make([]meowire.EventKind, 0, len(events))
+	for _, e := range events {
+		k = append(k, e.Kind)
+	}
+	return k
+}
+
 // TestAgentPauseResumeMidLoop verifies Pause() takes effect at the next gap
-// point (before a tool execution) and Resume() lets the loop continue.
+// point (before a tool execution): the loop yields StatePaused + EventPaused
+// with a Session and ends the iterator; Resume(sess, "") continues the loop
+// (unified suspension-resume path, v1.4.0).
 func TestAgentPauseResumeMidLoop(t *testing.T) {
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{
@@ -37,16 +48,15 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 	}
 	defer a.Close()
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		a.Unpause()
-	}()
-
 	var events []meowire.Event
+	var sess meowire.Session
 	for ev := range a.Stimulate(context.Background(), "work") {
 		events = append(events, ev)
 		if ev.Kind == meowire.EventToolCall {
 			a.Pause() // request pause right after the tool call is announced
+		}
+		if ev.Kind == meowire.EventPaused {
+			sess = ev.Wait.Session
 		}
 	}
 
@@ -61,14 +71,26 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 		t.Fatalf("events = %+v, want an EventState(StatePaused) entry", events)
 	}
 	last := events[len(events)-1]
-	if last.Kind != meowire.EventDone {
-		t.Fatalf("last event = %+v, want EventDone after resume", last)
+	if last.Kind != meowire.EventPaused {
+		t.Fatalf("last event = %+v, want EventPaused (iterator ends on the pause); events: %v", last, kinds(events))
+	}
+
+	// The paused loop continues via Resume(sess, "") — no Unpause needed.
+	var gotDone bool
+	for ev := range a.Resume(context.Background(), sess, "") {
+		if ev.Kind == meowire.EventDone {
+			gotDone = true
+		}
+	}
+	if !gotDone {
+		t.Fatal("expected EventDone after Resume from pause")
 	}
 }
 
-// TestAgentPauseBlocksStimulateEntry verifies a pending pause suspends a new
-// Stimulate at its first gap point until Unpause is called.
-func TestAgentPauseBlocksStimulateEntry(t *testing.T) {
+// TestAgentPauseSuspendsNewStimulate verifies a pending pause suspends a new
+// Stimulate at its first gap point: StatePaused + EventPaused are yielded
+// and the iterator ends normally (no blocking, no Unpause needed to finish).
+func TestAgentPauseSuspendsNewStimulate(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "ok"}, nil
@@ -81,47 +103,33 @@ func TestAgentPauseBlocksStimulateEntry(t *testing.T) {
 
 	a.Pause()
 
-	var mu sync.Mutex
 	var events []meowire.Event
-	pausedSeen := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		for ev := range a.Stimulate(context.Background(), "work") {
-			mu.Lock()
-			events = append(events, ev)
-			mu.Unlock()
-			if ev.Kind == meowire.EventState && ev.State == meowire.StatePaused {
-				close(pausedSeen)
-			}
+	var sess meowire.Session
+	for ev := range a.Stimulate(context.Background(), "work") {
+		events = append(events, ev)
+		if ev.Kind == meowire.EventPaused {
+			sess = ev.Wait.Session
 		}
-		close(done)
-	}()
-
-	select {
-	case <-pausedSeen:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for EventState(StatePaused)")
 	}
-	a.Unpause()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Stimulate to finish after resume")
+	if len(events) != 2 || events[0].Kind != meowire.EventState || events[0].State != meowire.StatePaused || events[1].Kind != meowire.EventPaused {
+		t.Fatalf("events = %+v, want [StatePaused, EventPaused]", events)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if len(events) == 0 || events[0].Kind != meowire.EventState || events[0].State != meowire.StatePaused {
-		t.Fatalf("first event = %+v, want EventState(StatePaused)", events[0])
+	// Resume continues the suspended run (Resume clears the pause request).
+	var gotDone bool
+	for ev := range a.Resume(context.Background(), sess, "") {
+		if ev.Kind == meowire.EventDone {
+			gotDone = true
+		}
 	}
-	last := events[len(events)-1]
-	if last.Kind != meowire.EventDone {
-		t.Fatalf("last event = %+v, want EventDone", last)
+	if !gotDone {
+		t.Fatal("expected EventDone after Resume from entry pause")
 	}
 }
 
-// TestAgentPauseResumeIdempotent verifies Pause/Resume are idempotent and
-// safe under concurrent calls (no double-close panic, no lost resume).
+// TestAgentPauseResumeIdempotent verifies Pause/Unpause are idempotent and
+// safe under concurrent calls, and that a cleared request leaves the agent
+// usable.
 func TestAgentPauseResumeIdempotent(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{}), meowire.Config{})
 	if err != nil {
@@ -137,7 +145,8 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// After the storm the agent must still be usable: final Unpause then run.
+	// After the storm the agent must still be usable: clear the request then
+	// run (a leftover request would suspend the run at its first gap point).
 	a.Unpause()
 	var gotDone bool
 	for ev := range a.Stimulate(context.Background(), "work") {
@@ -150,10 +159,10 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 	}
 }
 
-// TestAgentCloseUnblocksPausedStimulate verifies Close() unblocks a
-// Stimulate blocked on a pending pause so its iterator finishes instead of
-// leaking the consuming goroutine.
-func TestAgentCloseUnblocksPausedStimulate(t *testing.T) {
+// TestAgentCloseAfterPauseVerifiesNoLeak verifies a paused Stimulate ends its
+// iterator on its own (the pause yields EventPaused and finishes — no
+// goroutine is left blocked, Close has nothing to unblock).
+func TestAgentCloseAfterPauseVerifiesNoLeak(t *testing.T) {
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
@@ -171,42 +180,24 @@ func TestAgentCloseUnblocksPausedStimulate(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	var mu sync.Mutex
-	var events []meowire.Event
-	pausedSeen := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for ev := range a.Stimulate(context.Background(), "work") {
-			mu.Lock()
-			events = append(events, ev)
-			mu.Unlock()
 			if ev.Kind == meowire.EventToolCall {
 				a.Pause() // request pause at the tool gap
 			}
-			if ev.Kind == meowire.EventState && ev.State == meowire.StatePaused {
-				close(pausedSeen)
-			}
 		}
-		close(done)
 	}()
 
 	select {
-	case <-pausedSeen:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for EventState(StatePaused)")
-	}
-	a.Close()
-	select {
 	case <-done:
+		// The paused iterator finished by itself — nothing is left blocked.
 	case <-time.After(2 * time.Second):
-		t.Fatal("timed out: Close() did not unblock the paused Stimulate")
+		t.Fatal("timed out: paused Stimulate must end its iterator without Close")
 	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	last := events[len(events)-1]
-	if last.Kind != meowire.EventDone {
-		t.Fatalf("last event = %+v, want EventDone after Close unblocks", last)
+	if err := a.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }
 

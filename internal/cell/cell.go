@@ -46,6 +46,10 @@ type Cell struct {
 	// LoopContext of the next Stimulate/Resume (the moment the swap takes
 	// effect) and emitted as EventReplace.
 	pendingReplace []nerve.ReplaceAudit
+	// pendingConfig: config swap audits recorded by UpdateConfig, drained
+	// into the LoopContext of the next Stimulate/Resume (the moment the swap
+	// takes effect) and emitted as EventConfig.
+	pendingConfig []nerve.ConfigAudit
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
@@ -102,6 +106,8 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 	cfg := c.Config
 	pendingReplace := c.pendingReplace
 	c.pendingReplace = nil
+	pendingConfig := c.pendingConfig
+	c.pendingConfig = nil
 	c.wireMu.Unlock()
 	if think == nil || act == nil {
 		return nil
@@ -126,6 +132,7 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 		Tools:          slices.Clone(c.Tools),
 		Context:        slices.Clone(c.Context),
 		PendingReplace: pendingReplace,
+		PendingConfig:  pendingConfig,
 	}
 	if pauseGate != nil {
 		lc.Pause = pauseGate()
@@ -136,15 +143,19 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 // UpdateConfig swaps the scalar loop configuration wholesale (zero-value
 // semantics identical to New). It takes effect at the next Stimulate/Resume
 // (each snapshots the config into a fresh LoopContext — an in-flight loop
-// keeps the values it started with). Safe for concurrent use; a no-op after
-// Close.
+// keeps the values it started with). Every call records a ConfigAudit,
+// emitted as EventConfig at the start of the next Stimulate/Resume (the
+// moment the swap takes effect) — the counterpart of Replace's EventReplace
+// audit. Safe for concurrent use; a no-op after Close.
 func (c *Cell) UpdateConfig(cfg nerve.LoopConfig) {
 	if c.closed.Load() {
 		return
 	}
 	c.wireMu.Lock()
 	defer c.wireMu.Unlock()
+	old := c.Config
 	c.Config = cfg
+	c.pendingConfig = append(c.pendingConfig, nerve.ConfigAudit{CellID: c.ID, Old: old, New: cfg})
 }
 
 // GetConfig returns the current scalar loop configuration.

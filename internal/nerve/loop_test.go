@@ -1147,11 +1147,13 @@ func TestDecisionLoopAfterActReceivesErr(t *testing.T) {
 	}
 }
 
-// TestDecisionLoopPauseResume verifies a pause requested at a gap point
-// yields EventState(StatePaused) and the loop resumes once ResumeCh closes.
-func TestDecisionLoopPauseResume(t *testing.T) {
+// TestDecisionLoopPauseSuspends verifies a pause requested at a gap point
+// yields EventState(StatePaused) + EventPaused with a Session snapshot and
+// ends the iterator normally (no Done, no Error) — the unified
+// suspension-resume path (v1.3.2): the host resumes via Resume(sess, "").
+func TestDecisionLoopPauseSuspends(t *testing.T) {
 	var paused atomic.Bool
-	resumeCh := make(chan struct{})
+	var executed []string
 	calls := 0
 	lc := &LoopContext{
 		CellID:    "c1",
@@ -1165,100 +1167,134 @@ func TestDecisionLoopPauseResume(t *testing.T) {
 			return &Decision{Text: "done"}, nil
 		}},
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			executed = append(executed, a.Call.Name)
 			return &Effect{Result: "ok"}, nil
 		}},
 		Pause: &PauseGate{
 			IsPaused: func() bool { return paused.Load() },
-			ResumeCh: func() <-chan struct{} { return resumeCh },
 		},
 	}
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		paused.Store(false) // resumed: clear the flag, like Agent.Resume does
-		close(resumeCh)
-	}()
-	fillRequired(lc)
 	var events []Event
+	var wait *WaitInput
+	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		events = append(events, e)
 		if e.Kind == EventToolCall {
 			paused.Store(true) // request pause right after the tool call is announced
 		}
+		if e.Kind == EventPaused {
+			wait = e.Wait
+		}
 		return true
 	})
 
-	// Expect: State(thinking), Text, State(acting), ToolCall,
-	//         State(paused), Sandbox(allowed), ToolResult, State(thinking), Text(done),
-	//         State(done), Done
-	kinds := make([]EventKind, len(events))
-	for i, e := range events {
-		kinds[i] = e.Kind
-	}
-	wantKinds := []EventKind{
-		EventState, EventText, EventState, EventToolCall,
-		EventState, EventSandbox, EventToolResult, EventState, EventText,
-		EventState, EventDone,
-	}
-	if len(kinds) != len(wantKinds) {
-		t.Fatalf("event kinds = %v, want %v", kinds, wantKinds)
-	}
-	for i, k := range kinds {
-		if k != wantKinds[i] {
-			t.Fatalf("event[%d] kind = %d, want %d", i, k, wantKinds[i])
-		}
+	// Expect: State(thinking), Text, State(acting), ToolCall, State(paused), EventPaused
+	want := []EventKind{EventState, EventText, EventState, EventToolCall, EventState, EventPaused}
+	if !slicesEqual(kindsOf(events), want) {
+		t.Fatalf("event kinds = %v, want %v", kindsOf(events), want)
 	}
 	if events[4].Kind != EventState || events[4].State != StatePaused {
 		t.Fatalf("events[4] = %+v, want EventState(StatePaused)", events[4])
 	}
+	if wait == nil {
+		t.Fatal("no EventPaused yielded")
+	}
+	sess := wait.Session
+	if !sess.valid() {
+		t.Fatal("pause session invalid")
+	}
+	// The pause point sits before the only tool, which has not run yet — the
+	// snapshot must keep it in remaining so Resume runs it first.
+	if len(sess.remaining) != 1 || sess.remaining[0].Name != "tool" {
+		t.Fatalf("pause session remaining = %+v, want [tool] (the tool has not run yet)", sess.remaining)
+	}
+	if sess.pending.ID != "" {
+		t.Fatalf("pause session pending = %+v, want zero value (pause has no pending tool)", sess.pending)
+	}
+
+	// The paused run continues via Resume(sess, ""): the tool runs first,
+	// then the loop re-enters Think and completes normally.
+	paused.Store(false)
+	resumeEvents := collectResume(context.Background(), lc, sess, "")
+	if len(executed) != 1 || executed[0] != "tool" {
+		t.Fatalf("executed after resume = %v, want [tool]", executed)
+	}
+	last := resumeEvents[len(resumeEvents)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last resume event = %+v, want EventDone; kinds: %v", last, kindsOf(resumeEvents))
+	}
+	if last.Output != "tdone" {
+		t.Fatalf("done output = %q, want %q (accumulated output preserved across the pause)", last.Output, "tdone")
+	}
 }
 
-// TestDecisionLoopPauseCtxCancel verifies a pause blocks until ctx cancels,
-// then follows the normal error path.
-func TestDecisionLoopPauseCtxCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// TestDecisionLoopPauseMidList verifies a pause between tool calls snapshots
+// the calls from the pause point on (the current tool has not run yet) into
+// the Session; Resume runs them first, then re-enters the Think phase.
+func TestDecisionLoopPauseMidList(t *testing.T) {
+	var executed []string
 	var paused atomic.Bool
-	paused.Store(true) // paused from the very first gap point
-	resumeCh := make(chan struct{})
+	calls := 0
 	lc := &LoopContext{
-		CellID: "c1",
-		Input:  "pause-cancel",
+		CellID:    "c1",
+		Input:     "work",
+		MaxRounds: 3,
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "unreachable"}, nil
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "multi", ToolCalls: []ToolCall{
+					{ID: "t1", Name: "tool1"}, {ID: "t2", Name: "tool2"}, {ID: "t3", Name: "tool3"},
+				}}, nil
+			}
+			return &Decision{Text: "done"}, nil
 		}},
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			executed = append(executed, a.Call.Name)
 			return &Effect{Result: "ok"}, nil
 		}},
 		Pause: &PauseGate{
 			IsPaused: func() bool { return paused.Load() },
-			ResumeCh: func() <-chan struct{} { return resumeCh },
 		},
 	}
 
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-	}()
-	events := collectEvents(ctx, lc)
+	var wait *WaitInput
+	fillRequired(lc)
+	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
+		if e.Kind == EventToolCall && e.ToolCall != nil && e.ToolCall.Name == "tool2" {
+			paused.Store(true) // pause between tool1 and tool2 (tool2 has not run yet)
+		}
+		if e.Kind == EventPaused {
+			wait = e.Wait
+		}
+		return true
+	})
+	if wait == nil {
+		t.Fatal("no EventPaused yielded")
+	}
+	if len(executed) != 1 || executed[0] != "tool1" {
+		t.Fatalf("executed = %v, want [tool1] (tool2/tool3 must wait for Resume)", executed)
+	}
+	rem := wait.Session.remaining
+	if len(rem) != 2 || rem[0].Name != "tool2" || rem[1].Name != "tool3" {
+		t.Fatalf("session remaining = %+v, want [tool2 tool3] (tool2 has not run yet)", rem)
+	}
 
-	// Expect: State(paused), State(error), EventError
-	if len(events) != 3 {
-		t.Fatalf("events count = %d, want 3; events: %+v", len(events), events)
+	// Resume runs the remaining tools, then the digesting Think completes.
+	paused.Store(false)
+	events := collectResume(context.Background(), lc, wait.Session, "")
+	if len(executed) != 3 || executed[0] != "tool1" || executed[1] != "tool2" || executed[2] != "tool3" {
+		t.Fatalf("executed after resume = %v, want [tool1 tool2 tool3]", executed)
 	}
-	if events[0].Kind != EventState || events[0].State != StatePaused {
-		t.Fatalf("events[0] = %+v, want EventState(StatePaused)", events[0])
-	}
-	if events[1].Kind != EventState || events[1].State != StateError {
-		t.Fatalf("events[1] = %+v, want EventState(StateError)", events[1])
-	}
-	if events[2].Kind != EventError {
-		t.Fatalf("events[2] = %+v, want EventError", events[2])
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone; kinds: %v", last, kindsOf(events))
 	}
 }
 
-// TestDecisionLoopPauseConsumerAbort verifies stopping consumption during a
-// pause exits the loop without blocking (no deadlock, no resume needed).
+// TestDecisionLoopPauseConsumerAbort verifies stopping consumption at the
+// StatePaused event aborts before the EventPaused snapshot is delivered —
+// no deadlock, no resume needed.
 func TestDecisionLoopPauseConsumerAbort(t *testing.T) {
 	var paused atomic.Bool
 	paused.Store(true)
@@ -1273,21 +1309,26 @@ func TestDecisionLoopPauseConsumerAbort(t *testing.T) {
 		}},
 		Pause: &PauseGate{
 			IsPaused: func() bool { return paused.Load() },
-			ResumeCh: func() <-chan struct{} { return make(chan struct{}) },
 		},
 	}
 
-	var gotPaused bool
+	var gotPaused, gotEventPaused bool
 	fillRequired(lc)
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		if e.Kind == EventState && e.State == StatePaused {
 			gotPaused = true
 			return false // consumer aborts during the pause
 		}
+		if e.Kind == EventPaused {
+			gotEventPaused = true
+		}
 		return true
 	})
 	if !gotPaused {
 		t.Fatal("expected EventState(StatePaused) before consumer abort")
+	}
+	if gotEventPaused {
+		t.Fatal("EventPaused must not be yielded after the consumer aborts")
 	}
 }
 

@@ -10,6 +10,85 @@ import (
 	"testing"
 )
 
+// TestSessionMarshalRoundTrip verifies Marshal → UnmarshalSession preserves
+// the full session (ask_user shape with a pending tool) — the persistence
+// primitive hosts use to save and restore a suspended loop.
+func TestSessionMarshalRoundTrip(t *testing.T) {
+	sess := Session{}.snapshot(3, "in", "plan", []string{"ctx1", "ctx2"}, "out",
+		ToolCall{ID: "t1", Name: "ask_user"},
+		[]ToolCall{{ID: "t2", Name: "tool2"}},
+		[]ToolResult{{ID: "t1", Name: "ask_user", Result: "yes"}})
+	b, err := sess.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := UnmarshalSession(b)
+	if err != nil {
+		t.Fatalf("UnmarshalSession: %v", err)
+	}
+	if got.round != 3 || got.input != "in" || got.plan != "plan" || got.output != "out" {
+		t.Fatalf("unmarshaled scalars = %d/%q/%q/%q, want 3/in/plan/out", got.round, got.input, got.plan, got.output)
+	}
+	if len(got.context) != 2 || got.context[0] != "ctx1" || got.context[1] != "ctx2" {
+		t.Fatalf("unmarshaled context = %v, want [ctx1 ctx2]", got.context)
+	}
+	if got.pending.ID != "t1" || got.pending.Name != "ask_user" {
+		t.Fatalf("unmarshaled pending = %+v, want t1/ask_user", got.pending)
+	}
+	if len(got.remaining) != 1 || got.remaining[0].Name != "tool2" {
+		t.Fatalf("unmarshaled remaining = %+v, want [tool2]", got.remaining)
+	}
+	if len(got.toolResults) != 1 || got.toolResults[0].ID != "t1" || got.toolResults[0].Result != "yes" {
+		t.Fatalf("unmarshaled toolResults = %+v, want one entry t1/yes", got.toolResults)
+	}
+	// The restored handle must be usable end to end: Resume completes.
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "in",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "final"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{Result: "ok"}, nil
+		}},
+	}
+	events := collectResume(context.Background(), lc, got, "yes")
+	if events[len(events)-1].Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone after resume from restored session; kinds: %v", events[len(events)-1], kindsOf(events))
+	}
+}
+
+// TestSessionMarshalZeroValue verifies a zero-value Session (round == 0) is
+// rejected by Marshal.
+func TestSessionMarshalZeroValue(t *testing.T) {
+	var s Session
+	if _, err := s.Marshal(); err == nil {
+		t.Fatal("Marshal of a zero-value Session must fail")
+	}
+}
+
+// TestUnmarshalSessionVersionMismatch verifies a tampered wire version is
+// rejected — a stale or future handle must not be replayed.
+func TestUnmarshalSessionVersionMismatch(t *testing.T) {
+	sess := Session{}.snapshot(1, "in", "", nil, "", ToolCall{}, nil, nil)
+	b, err := sess.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	tampered := strings.Replace(string(b), `"version":1`, `"version":2`, 1)
+	if _, err := UnmarshalSession([]byte(tampered)); err == nil {
+		t.Fatal("UnmarshalSession must reject a version mismatch")
+	}
+}
+
+// TestUnmarshalSessionInvalidPayload verifies a payload with round < 1 is
+// rejected even when the version matches.
+func TestUnmarshalSessionInvalidPayload(t *testing.T) {
+	if _, err := UnmarshalSession([]byte(`{"version":1,"round":0}`)); err == nil {
+		t.Fatal("UnmarshalSession must reject a round<1 payload")
+	}
+}
+
 // collectResume runs Resume and returns all yielded events.
 func collectResume(ctx context.Context, lc *LoopContext, sess Session, response string) []Event {
 	fillRequired(lc)

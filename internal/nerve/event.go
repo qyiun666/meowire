@@ -20,8 +20,9 @@ type Event struct {
 	Output   string          // KindDone: final accumulated output
 	Usage    *Usage          // KindUsage: token usage of the last Think
 	Verdict  *SandboxVerdict // EventSandbox: sandbox decision (audit record)
-	Wait     *WaitInput      // EventWaitInput: loop suspended waiting for external input
+	Wait     *WaitInput      // EventWaitInput / EventPaused: suspension snapshot + resume handle
 	Replace  *ReplaceAudit   // EventReplace: runtime port swap record (audit)
+	Config   *ConfigAudit    // EventConfig: runtime config swap record (audit)
 }
 
 // SandboxVerdict is the audit record of one sandbox decision: every tool
@@ -47,6 +48,18 @@ type ReplaceAudit struct {
 	New    any    // the swapped-in port value
 }
 
+// ConfigAudit is the audit record of one runtime config swap: every
+// successful UpdateConfig produces exactly one record, emitted as
+// EventConfig at the start of the next Stimulate/Resume (the moment the
+// swap takes effect). Hosts persist these to build the wiring audit trail
+// alongside EventSandbox and EventReplace — every "unique update" of the
+// loop is traceable.
+type ConfigAudit struct {
+	CellID string     // owning agent id
+	Old    LoopConfig // previous config (zero value if none was set)
+	New    LoopConfig // the swapped-in config
+}
+
 // EventKind categorizes the type of event.
 type EventKind int
 
@@ -60,5 +73,7 @@ const (
 	EventUsage                       // Token usage of the last Think
 	EventSandbox                     // Sandbox decision (audit record)
 	EventWaitInput                   // Loop suspended waiting for external input
+	EventPaused                      // Loop suspended by a pause request (Session + resume handle)
 	EventReplace                     // Runtime port swap (audit record)
+	EventConfig                      // Runtime config swap (audit record)
 )

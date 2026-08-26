@@ -5,6 +5,57 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-26
+
+### Added
+
+- **Unified suspension-resume** — Pause and ask_user now share one
+  snapshot + resume path (LangGraph-interrupt-style single suspension
+  primitive): a pause honored at a gap point yields `EventState(StatePaused)`
+  + `EventPaused` (opaque `Session` snapshot) and ends the iterator normally;
+  `Agent.Resume(ctx, sess, "")` continues (nothing is injected — no pending
+  tool). A pause before a tool keeps the current tool (and the calls after
+  it) in `Session.remaining`, so Resume runs them first. The old blocking
+  `PauseGate.ResumeCh` wait is gone — the loop never blocks on a pause.
+  **Breaking**: Pause no longer suspends the same iterator in place; hosts
+  resume via `Resume(sess, "")` (event content is equivalent, only the
+  iterator boundary changes). `Unpause()` now only clears a pause request
+  that has not taken effect yet; `Resume` clears a stale request
+  automatically.
+- **Session persistence** — `Session.Marshal() ([]byte, error)` /
+  `meowire.UnmarshalSession([]byte) (Session, error)`: versioned JSON wire
+  shape for both suspension kinds; a suspended or paused loop survives
+  process restarts (alignment with mainstream checkpoint/resume). Version
+  mismatch and zero-value handles are rejected (a stale or future handle
+  must not be replayed). Fields stay unexported — hosts only save and pass
+  the handle back (no inspection, no mutation).
+- **EventConfig audit** — `Agent.UpdateConfig` records a
+  `ConfigAudit{CellID, Old, New}` per call, emitted as `EventConfig` at the
+  start of the next Stimulate/Resume after `EventReplace` (the moment the
+  swap takes effect) — every "unique update" of the loop is traceable,
+  mirroring the `EventReplace` port-swap audit.
+
+### Breaking
+
+- `Pause` semantics (see above): snapshot suspension instead of the
+  in-iterator blocking wait; `PauseGate` drops the `ResumeCh` field
+  (internal wiring; hosts building their own gate only provide `IsPaused`).
+- `Unpause` semantics: clears a not-yet-effective pause request only.
+- New event kinds `EventPaused` / `EventConfig` are appended to the
+  `EventKind` enum (host switches must handle them).
+
+### Docs
+
+- `README.md` — Features and Core Concepts rewritten around the unified
+  suspension-resume model; event table lists `EventPaused`/`EventConfig`;
+  Session persistence usage.
+- `host-integration.md`/`.en.md` — §2.4 Pause/Unpause rewritten (snapshot
+  suspension, Resume-driven continuation, Unpause back-out); §6.4 adds the
+  pause branch and Session persistence; event tables list the two new kinds.
+- `internal/nerve/agent.md`, `api/agent.md`, `internal/cell/agent.md`,
+  repowiki 事件系统.md — contracts synced (PauseGate, Resume conditional
+  injection, ConfigAudit, persistence).
+
 ## [1.3.1] - 2026-08-25
 
 ### Added

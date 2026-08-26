@@ -71,15 +71,13 @@ type LoopConfig struct {
 
 // PauseGate is the pause gate (optional; nil = pause unsupported).
 // The loop checks it at gap points (before each Think and before each tool
-// execution); a pending pause yields EventState(StatePaused) and blocks
-// until ResumeCh is closed or ctx is canceled.
+// execution); a pending pause yields EventState(StatePaused) + EventPaused
+// with a Session snapshot and ends the iterator normally — the host resumes
+// via Resume(sess, "") (the unified suspension-resume path since v1.3.2;
+// the old in-iterator blocking wait is gone).
 type PauseGate struct {
 	// IsPaused reports whether a pause has been requested.
 	IsPaused func() bool
-	// ResumeCh returns the latest resume notification channel
-	// (closed = resumed); fetched at each pause so a pause request issued
-	// after the gate was built is still honored.
-	ResumeCh func() <-chan struct{}
 }
 
 // LoopContext carries all data needed for a single Cycle invocation.
@@ -123,6 +121,12 @@ type LoopContext struct {
 	// effect now — each Stimulate/Resume snapshots the ports it starts with).
 	PendingReplace []ReplaceAudit
 
+	// PendingConfig: config swap audits recorded since the last Stimulate/
+	// Resume, emitted as EventConfig after EventReplace (the swap takes
+	// effect now — each Stimulate/Resume snapshots the config it starts
+	// with). Every "unique update" of the loop is traceable.
+	PendingConfig []ConfigAudit
+
 	// Host injected fixed parts
 	System string
 	Tools  []ToolSpec
@@ -165,11 +169,18 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	lc.Input = sess.input
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
-	lc.ToolResults = append(slices.Clone(sess.toolResults), ToolResult{
-		ID:     sess.pending.ID,
-		Name:   sess.pending.Name,
-		Result: truncateText(response, lc.MaxToolOutput),
-	})
+	lc.ToolResults = slices.Clone(sess.toolResults)
+	// The response attaches to the pending tool's structured result — but
+	// only for a tool suspension (ask_user). A pause-suspended session has
+	// no pending tool (zero value) and resumes with an empty response:
+	// nothing is injected, the loop just continues from the suspended round.
+	if sess.pending.ID != "" {
+		lc.ToolResults = append(lc.ToolResults, ToolResult{
+			ID:     sess.pending.ID,
+			Name:   sess.pending.Name,
+			Result: truncateText(response, lc.MaxToolOutput),
+		})
+	}
 	var out strings.Builder
 	out.Grow(256)
 	out.WriteString(sess.output)
@@ -226,6 +237,11 @@ func cyclePrelude(ctx context.Context, lc *LoopContext, yield func(Event) bool) 
 			return false
 		}
 	}
+	for _, ca := range lc.PendingConfig {
+		if !yield(Event{Kind: EventConfig, Config: &ca}) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -247,7 +263,7 @@ func roundLoop(ctx context.Context, lc *LoopContext, startRound int, out *string
 		}
 
 		// Gap point: honor a pending pause before each Think
-		if !waitIfPaused(ctx, lc, yield) {
+		if !waitIfPaused(ctx, lc, round, out, nil, yield) {
 			return ""
 		}
 
@@ -371,8 +387,10 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 			return nil, false
 		}
 
-		// Gap point: honor a pending pause before each tool execution
-		if !waitIfPaused(ctx, lc, yield) {
+		// Gap point: honor a pending pause before each tool execution; a
+		// paused run snapshots the calls from this one on (the current tool
+		// has not run yet) into the Session, so Resume runs them first.
+		if !waitIfPaused(ctx, lc, round, out, calls[i:], yield) {
 			return nil, false
 		}
 
@@ -390,8 +408,8 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 		// WaitInput wins over err (explicit intent); a nil effect never
 		// suspends.
 		if eff != nil && eff.WaitInput != "" {
-			sess := Session{}.snapshot(round, lc.Input, lc.Plan, lc.Context, out.String(), tc, calls[i+1:], lc.ToolResults)
-			w := &WaitInput{CellID: lc.CellID, Call: tc, Question: eff.WaitInput, Session: sess}
+			w := snapshotWait(lc, round, out, tc, calls[i+1:])
+			w.Question = eff.WaitInput
 			lc.State = StateWaiting
 			if !yield(Event{Kind: EventState, State: StateWaiting}) {
 				return nil, false
@@ -549,31 +567,37 @@ func actWithRetry(ctx context.Context, lc *LoopContext, act Action) (*Effect, er
 	return eff, err
 }
 
-// waitIfPaused checks the pause gate at gap points. When a pause is pending it
-// yields EventState(StatePaused) and blocks until ResumeCh is closed, ctx is
-// canceled (error path), or the consumer stops the loop. Returns false when
-// the caller must return immediately.
-func waitIfPaused(ctx context.Context, lc *LoopContext, yield func(Event) bool) bool {
+// waitIfPaused checks the pause gate at gap points. When a pause is pending
+// it yields EventState(StatePaused) + EventPaused with a Session snapshot
+// and ends the iterator normally (no Done, no Error) — the host resumes via
+// Resume(sess, "") (the unified suspension-resume path since v1.3.2; the
+// old blocking wait is gone). remaining holds the tool calls after a
+// tool-gap pause point (nil at a Think-gap); a paused run snapshots it into
+// the Session so Resume finishes them first. Returns false when the caller
+// must return immediately (paused or the consumer stopped).
+func waitIfPaused(ctx context.Context, lc *LoopContext, round int, out *strings.Builder, remaining []ToolCall, yield func(Event) bool) bool {
 	if lc.Pause == nil || lc.Pause.IsPaused == nil || !lc.Pause.IsPaused() {
 		return true
 	}
+	lc.State = StatePaused
 	if !yield(Event{Kind: EventState, State: StatePaused}) {
 		return false
 	}
-	if lc.Pause.ResumeCh == nil {
-		return true
-	}
-	resume := lc.Pause.ResumeCh()
-	if resume == nil {
-		return true
-	}
-	select {
-	case <-resume:
-		return true
-	case <-ctx.Done():
-		emitError(ctx, lc, yield, fmt.Errorf("nerve: cycle: %w", ctx.Err()))
+	w := snapshotWait(lc, round, out, ToolCall{}, remaining)
+	if !yield(Event{Kind: EventPaused, Wait: w}) {
 		return false
 	}
+	return false // iterator ends normally; the host resumes via Resume(sess, "")
+}
+
+// snapshotWait snapshots the loop state into a WaitInput handle — the
+// unified suspension primitive shared by tool suspension (ask_user) and
+// pause requests (v1.3.2): same Session shape, same Resume path. pending is
+// the suspending tool (zero value for a pause), remaining the tool calls
+// after the suspension point.
+func snapshotWait(lc *LoopContext, round int, out *strings.Builder, pending ToolCall, remaining []ToolCall) *WaitInput {
+	sess := Session{}.snapshot(round, lc.Input, lc.Plan, lc.Context, out.String(), pending, remaining, lc.ToolResults)
+	return &WaitInput{CellID: lc.CellID, Call: pending, Session: sess}
 }
 
 // hookBeforeThink calls Hooks.BeforeThink (required).

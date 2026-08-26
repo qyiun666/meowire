@@ -115,25 +115,32 @@ type Closer interface {
 Releases host resources: LLM clients, HTTP connections, etc. The framework
 guarantees `Agent.Close` is idempotent (CAS); repeated calls have no side effects.
 
-### 2.4 Pause / Unpause — process-level suspension (Agent-level control, not a port)
+### 2.4 Pause / Unpause — snapshot suspension (unified with ask_user into a single suspend-resume mechanism since v1.3.2)
 
 ```go
-agent.Pause()     // request a pause: takes effect at the next gap point
-agent.Unpause()   // resume: clears the pause flag (named Resume in v1.2.1; renamed in v1.3.0 — Resume now continues a suspended loop, see §6.4)
+agent.Pause()     // request a pause: takes effect at the next gap point (before a Think / before a tool)
+agent.Unpause()   // clear a pause request that has not taken effect yet (back out after Pause)
 ```
 
 - **Gap-effective**: a pause request never interrupts an in-flight Think/Act;
   the loop checks it at two gap points (before each Think, before each tool execution)
-- A pending pause yields `EventState(StatePaused)`; resuming continues without an extra event
+- **Snapshot suspension (no longer blocking since v1.3.2)**: an honored pause yields
+  `EventState(StatePaused)` → `EventPaused` (carrying a Session snapshot) and **ends
+  the iterator normally**; the host resumes via `agent.Resume(sess, "")` (empty
+  response — there is no pending tool to inject into) — the same Session/Resume path
+  as ask_user (LangGraph-interrupt-style single suspension primitive)
+- **Tool-gap pause**: the pause point sits before the tool runs, so the snapshot records
+  the current tool and the calls after it into Session.remaining; Resume runs them
+  first, then re-enters Think (the current tool has not run yet — nothing is lost)
 - Pause state is **Agent-level and survives across Stimulate calls**: a Stimulate
-  started while paused first suspends at its entry gap point
+  started while paused first suspends at its entry gap point (StatePaused + EventPaused)
 - `Pause` / `Unpause` are **idempotent and concurrency-safe**; no-ops after `Close`
-- **`Close` unblocks a pending pause**: an iterator suspended in pause is woken up
-  and can finish normally (or be stopped by ctx cancellation) instead of hanging
-- A ctx cancellation while paused follows the normal error path
-  (`EventState(StateError)` → `EventError`)
+- **`Resume` clears the pause request automatically**: resuming is the intent to
+  continue, so the resumed loop does not suspend again at its first gap point;
+  `Unpause` is only for backing out before the pause takes effect
 - Difference from Step-Resume: Step-Resume abandons the round and restarts
-  statelessly; Pause/Unpause **keeps the in-cycle state and suspends in place**
+  statelessly; Pause **keeps the in-cycle state (Session snapshot) and suspends
+  in place**, resuming without consuming a round
 
 ### 2.5 Hooks — interception callbacks (all eight required; explicit no-op where no behavior is wanted — absence fails assembly)
 
@@ -361,10 +368,11 @@ EventState(thinking) → EventText → [EventUsage] → EventState(acting)
   → (EventToolCall → [EventSandbox] → EventToolResult) × N → back to EventState(thinking) → …
 ```
 
-**Pause path (inserted at gap points; the original sequence resumes after Unpause):**
+**Pause path (takes effect at gap points; snapshot suspension since v1.3.2 — the iterator ends normally, Resume continues):**
 
 ```
-… → EventState(paused) → (blocks until Unpause / ctx cancellation) → continue the original sequence
+… → EventState(paused) → EventPaused(Session snapshot) → iterator ends normally (no Done/Error)
+→ host calls Resume(sess, "") → remaining tools run first → back to EventState(thinking) → original sequence continues
 ```
 
 **Suspension path (tool returns `Effect.WaitInput`; the iterator ends normally; see §6.4):**
@@ -401,7 +409,9 @@ EventState(error) → EventError(Err)
 | `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
 | `EventWaitInput` | `Wait *WaitInput` | Tool requests external input: `WaitInput{CellID, Call, Question, Session}` — the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
+| `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (unified suspension-resume since v1.3.2) |
 | `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, Old, New}`; emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
+| `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace (v1.3.2), persistable |
 
 `SandboxVerdict{CellID, Call, Allowed, Reason, Err}`: one record per decision of a
 configured sandbox, emitted before the tool runs; persisting the event stream yields
@@ -460,14 +470,14 @@ for ev := range agent.Stimulate(ctx, "tidy the desktop") {
         go func() {                     // timeout is host-controlled (default deny)
             select {
             case ans := <-ui.Answer():
-                resumeCh <- ans
+                answerCh <- ans
             case <-time.After(60 * time.Second):
-                resumeCh <- "[denied: timeout]"
+                answerCh <- "[denied: timeout]"
             }
         }()
     }
 }
-ans := <-resumeCh
+ans := <-answerCh
 for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimulate
     ...
 }
@@ -479,10 +489,19 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   `EventWaitInput` and ends — no `EventDone`/`EventError`; `OnCycleEnd`/`AfterStimulate`
   still fire exactly once (the host distinguishes suspension by `StateWaiting` —
   **do not persist an unfinished round**)
+- **Pause (v1.3.2) = the same suspension mechanism**: yields `EventState(StatePaused)` →
+  `EventPaused` (Session snapshot, Call zero value) and ends the iterator normally;
+  `agent.Resume(sess, "")` continues without injecting anything (no pending tool); when
+  the pause point is before a tool, the current tool is recorded in Session.remaining
+  and Resume runs it first
 - **`Session` is an opaque value object** (snapshot of round/context/remaining tool calls/
   accumulated output): the host only saves and returns it, never inspects it;
   **single-use** — resuming twice re-executes the remaining tool calls (duplicate side
   effects; host responsibility)
+- **Persistence (v1.3.2)**: `sess.Marshal()` produces versioned JSON bytes; the host
+  persists them; after a restart `meowire.UnmarshalSession(data)` restores the handle
+  and Resume continues — suspensions and pauses recover across processes; a version
+  mismatch is rejected (a stale or future handle must not be replayed)
 - **No extra round**: Resume continues from the suspended round; the Think that digests
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;

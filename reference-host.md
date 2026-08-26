@@ -291,7 +291,7 @@ func toolSchemas(tools []meowire.ToolSpec) []funcSchema {
 `ToolSpec.Input` 约定就是 JSON Schema 字符串（如 `{"type":"object","properties":{...}}`），所以**宿主不需要转换**——直接透传。参考 Step 7 的 `ToolSpec` 写法。
 
 **Thinker 的四个铁律：**
-1. **必须监控 `ctx.Done`**——长请求可能被框架取消（Pause 阻塞中取消、Close、宿主取消）
+1. **必须监控 `ctx.Done`**——长请求可能被框架取消（Close、宿主取消）；注意 v1.3.2 起 Pause 不再阻塞迭代器（快照挂起，EventPaused 后正常结束），不会通过 ctx 取消来中断暂停
 2. **流式输出在 Thinker 内部消费**（如推 WebSocket/SSE）；事件流的 `EventText` 永远整段文本
 3. **`ToolCalls` 为空 = 循环结束**——如果 LLM 没调工具也没给文本，会得到空输出但正常结束
 4. **并发安全**：同一 Agent 并发 `Stimulate` 时 Thinker 被并发调用（`llmClient` 无共享可变状态，天然安全）
@@ -703,7 +703,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 7. **`ErrMaxRounds` 不是 bug**：最后一轮仍有工具调用时抛出；配合 Step-Resume（宿主保存进度 → 重新 `Stimulate` 传剩余任务）是预期用法
 8. **提前停止（宿主主动接管）**：`for range` 中 break 即放弃本轮，停止点之后的工具不执行——宿主主动接管（人工审批、异步任务）用此路径；工具请求输入（ask_user）的唯一形式是 `Effect.WaitInput` + `EventWaitInput`/`Resume`（上文 ②），不要用 break + `Stimulate` 模拟（`Session` 不透明，挂起上下文无法手工重建）
 9. **事件流是观察镜像**：不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
-10. **暂停 vs Step-Resume**：Pause 保留循环内状态原地挂起（间隙点生效）；Step-Resume 放弃本轮无状态重来
+10. **暂停 vs Step-Resume（v1.3.2）**：Pause 为快照挂起（EventPaused + Session，迭代器正常结束，`Resume(sess, "")` 续跑，不占轮次）；Step-Resume 放弃本轮无状态重来
 
 ### 记忆与上下文
 

@@ -18,8 +18,8 @@
   - `ID string`: unique identifier
   - `Identity string`: identity description text (host composed, injected into Prompt)
   - Required ports: `Think nerve.Thinker`, `Act nerve.Effector`
-  - Optional ports: `Hooks *nerve.Hooks`, `Sandbox nerve.Sandbox`, `Budget *nerve.ContextBudget`, `PauseGate func() *nerve.PauseGate` (nil = pause unsupported; factory called per Stimulate for a fresh gate)
-  - Config: `MaxRounds`, `MaxToolOutput`, `MaxRetries`, `ToolTimeout`, `ToolMaxRetries` (zero values use defaults / disabled)
+  - Optional ports: `Hooks *nerve.Hooks`, `Sandbox nerve.Sandbox`, `Budget *nerve.ContextBudget`, `PauseGate func() *nerve.PauseGate` (nil = pause unsupported; factory called per Stimulate for a fresh gate; since v1.3.2 PauseGate carries only IsPaused — an honored pause yields EventPaused + Session and ends the iterator, resumed via Resume(sess, ""))
+  - Config: `MaxRounds`, `MaxToolOutput`, `MaxRetries`, `ToolTimeout`, `ToolMaxRetries` (zero values use defaults / disabled); `UpdateConfig(cfg)` swaps wholesale at the next Stimulate/Resume and — since v1.3.2 — records a `ConfigAudit{CellID, Old, New}` drained into the next LoopContext and emitted as EventConfig after EventReplace (the config-update counterpart of the Replace audit)
   - Host-injected fixed parts: `System string`, `Methods []nerve.MethodSpec`, `Tools []nerve.ToolSpec`, `Context []string`
   - `Stimulate(ctx, text) iter.Seq[nerve.Event]`: runs DecisionLoop, yields events; snapshots ports under the wire lock, so a concurrent Replace takes effect at the next Stimulate
   - `Replace(slot string, port any) (any, error)`: dynamic wiring — swaps think/act/sandbox/budget/hooks at runtime; returns the previous port; takes effect at the next Stimulate; concurrency-safe (wireMu); no-op after Close; unknown slot / wrong port type errors; **rejects nil/incomplete ports** (Budget needs Trimmer+MaxTokens via completeHooks for Hooks); Closer/PauseGate not swappable
