@@ -407,13 +407,14 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 			return nil, false
 		}
 
-		eff, err, handled, ok := runOneTool(ctx, lc, tc, yield)
-		if !ok {
+		act, admitted, gOk := gateTool(ctx, lc, tc, yield)
+		if !gOk {
 			return nil, false
 		}
-		if handled {
-			continue // denied: feedback already appended and yielded
+		if !admitted {
+			continue // denied by the membrane: feedback already appended and yielded
 		}
+		eff, err := actWithRetry(ctx, lc, act)
 
 		// Suspension: the tool requests external input. Snapshot the loop
 		// state into a Session, yield the wait events, and end the iterator
@@ -421,13 +422,8 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 		// WaitInput wins over err (explicit intent); a nil effect never
 		// suspends.
 		if eff != nil && eff.WaitInput != "" {
-			w := snapshotWait(lc, round, out, tc, calls[i+1:])
-			w.Question = eff.WaitInput
-			lc.State = StateWaiting
-			if !yield(Event{Kind: EventState, State: StateWaiting}) {
-				return nil, false
-			}
-			if !yield(Event{Kind: EventWaitInput, Wait: w}) {
+			w, yOk := emitWait(lc, round, out, tc, calls[i+1:], eff.WaitInput, yield)
+			if !yOk {
 				return nil, false
 			}
 			return w, true
@@ -462,48 +458,55 @@ func toolFeedback(ctx context.Context, lc *LoopContext, tc ToolCall, eff *Effect
 	return yield(Event{Kind: EventToolResult, Effect: eff, ToolCall: &tc})
 }
 
-// runOneTool gates and executes one tool call: the sandbox membrane (every
-// decision yields an EventSandbox audit record), the BeforeAct hook, then
-// Act with timeout/retry. handled=true means the call was denied — the
-// denial was already appended to the Context text track and yielded as
-// EventToolResult, the caller must skip its own feedback. ok=false means the
+// gateTool runs the per-call serial gate shared by both execution paths:
+// the sandbox membrane (every decision yields an EventSandbox audit record)
+// and the BeforeAct hook. It returns the gated Action — BeforeAct may mutate
+// it, and the mutated form is what must execute — plus whether the call was
+// admitted. A denied call gets its [denied: reason] feedback appended and
+// yielded in place (admitted=false, the caller skips it). ok=false means the
 // loop must end (an error was emitted or the consumer stopped).
-func runOneTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) (eff *Effect, err error, handled bool, ok bool) {
-	// Sandbox check: every decision of the membrane produces an EventSandbox
-	// audit record (allowed or denied) before the tool runs.
+func gateTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) (act Action, admitted, ok bool) {
+	act = Action{CellID: lc.CellID, Call: tc}
 	if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
 		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
 			CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
 		}}) {
-			return nil, nil, false, false
+			return act, false, false
 		}
 		fb := fmt.Sprintf("[denied: %s]", reason)
 		lc.Context = append(lc.Context, fb)
 		if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {
-			return nil, nil, false, false
+			return act, false, false
 		}
-		return nil, nil, true, true
+		return act, false, true
 	}
 	if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
 		CellID: lc.CellID, Call: tc, Allowed: true,
 	}}) {
-		return nil, nil, false, false
+		return act, false, false
 	}
-
-	act := Action{CellID: lc.CellID, Call: tc}
-
-	// BeforeAct hook
 	if err := hookBeforeAct(ctx, lc, &act); err != nil {
 		emitError(ctx, lc, yield, err)
-		return nil, nil, false, false
+		return act, false, false
 	}
+	return act, true, true
+}
 
-	// Execute tool (with optional per-tool timeout and retry)
-	eff, err = actWithRetry(ctx, lc, act)
-	if eff == nil && err == nil {
-		eff = &Effect{Err: "nil effect from effector"}
+// emitWait suspends the loop for external input: snapshot into a Session,
+// set StateWaiting, yield the two wait events. Shared by the serial and the
+// parallel paths — the suspending call gets no AfterAct/EventToolResult (its
+// result arrives via Resume). Returns false when the consumer stopped.
+func emitWait(lc *LoopContext, round int, out *strings.Builder, pending ToolCall, remaining []ToolCall, question string, yield func(Event) bool) (*WaitInput, bool) {
+	w := snapshotWait(lc, round, out, pending, remaining)
+	w.Question = question
+	lc.State = StateWaiting
+	if !yield(Event{Kind: EventState, State: StateWaiting}) {
+		return w, false
 	}
-	return eff, err, false, true
+	if !yield(Event{Kind: EventWaitInput, Wait: w}) {
+		return w, false
+	}
+	return w, true
 }
 
 // effectiveMaxRounds returns DefaultMaxRounds if maxRounds <= 0.
@@ -578,6 +581,12 @@ func actWithRetry(ctx context.Context, lc *LoopContext, act Action) (*Effect, er
 		actErr := actCtx.Err() // capture BEFORE cancel: after cancel it is always non-nil
 		cancel()               // released immediately; never deferred inside a retry loop
 		if err == nil {
+			if eff == nil {
+				// Port-contract guard at the single Act chokepoint: success
+				// without an Effect is surfaced as tool feedback, never as a
+				// fabricated fallback result.
+				eff = &Effect{Err: "nil effect from effector"}
+			}
 			return eff, nil
 		}
 		if ctx.Err() != nil || (lc.ToolTimeout > 0 && actErr != nil) {

@@ -9,7 +9,6 @@ package nerve
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 )
@@ -17,10 +16,10 @@ import (
 // runToolCallsParallel executes one round's tool call batch in three phases:
 //
 //  1. Serial gating — announce every call (EventToolCall in call order),
-//     one pause gap point for the whole batch, then per-call sandbox
-//     verdict (EventSandbox audit) and BeforeAct. A denied call gets its
-//     [denied: reason] feedback in place and is skipped — it never affects
-//     its siblings.
+//     one pause gap point for the whole batch, then per-call gateTool
+//     (sandbox membrane audit + BeforeAct, shared with the serial path).
+//     A denied call gets its [denied: reason] feedback in place and is
+//     skipped — it never affects its siblings.
 //  2. Parallel execution — one goroutine per admitted call runs
 //     actWithRetry (timeout/retry included); results land by call index.
 //     Hooks, events, and loop state never enter this phase (the goroutines
@@ -50,34 +49,23 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 		return nil, false
 	}
 
-	// Phase 1: serial gating — sandbox verdict + BeforeAct per call.
-	admitted := make([]ToolCall, 0, len(calls))
-	for i := range calls {
-		tc := calls[i]
-		if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
-			if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-				CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
-			}}) {
-				return nil, false
-			}
-			fb := fmt.Sprintf("[denied: %s]", reason)
-			lc.Context = append(lc.Context, fb)
-			if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {
-				return nil, false
-			}
-			continue // denied in place; siblings proceed unaffected
-		}
-		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-			CellID: lc.CellID, Call: tc, Allowed: true,
-		}}) {
+	// Phase 1: serial gating — the shared membrane gate per call (sandbox
+	// audit + BeforeAct). Each batch entry keeps both identities: the
+	// original call (feedback/snapshot identity, same as the serial path)
+	// and the gated Action (BeforeAct mutations included — what executes).
+	type batchEntry struct {
+		call ToolCall // announced/original call — feedback identity
+		act  Action   // gated action — execution payload
+	}
+	batch := make([]batchEntry, 0, len(calls))
+	for _, tc := range calls {
+		act, admitted, gOk := gateTool(ctx, lc, tc, yield)
+		if !gOk {
 			return nil, false
 		}
-		act := Action{CellID: lc.CellID, Call: tc}
-		if err := hookBeforeAct(ctx, lc, &act); err != nil {
-			emitError(ctx, lc, yield, err)
-			return nil, false
+		if admitted {
+			batch = append(batch, batchEntry{call: tc, act: act})
 		}
-		admitted = append(admitted, tc)
 	}
 
 	// Phase 2: parallel execution — only actWithRetry runs concurrently;
@@ -88,18 +76,13 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 		eff *Effect
 		err error
 	}
-	results := make([]outcome, len(admitted))
+	results := make([]outcome, len(batch))
 	var wg sync.WaitGroup
-	for j := range admitted {
-		wg.Add(1)
-		go func(j int) {
-			defer wg.Done()
-			eff, err := actWithRetry(ctx, lc, Action{CellID: lc.CellID, Call: admitted[j]})
-			if eff == nil && err == nil {
-				eff = &Effect{Err: "nil effect from effector"}
-			}
-			results[j] = outcome{eff: eff, err: err}
-		}(j)
+	for i, e := range batch {
+		wg.Go(func() {
+			eff, err := actWithRetry(ctx, lc, e.act)
+			results[i] = outcome{eff: eff, err: err}
+		})
 	}
 	wg.Wait()
 
@@ -110,24 +93,19 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 	// Resume — but every sibling (before AND after it) is fed back first,
 	// because phase 2 already ran the whole batch.
 	suspendAt := -1
-	for j := range admitted {
+	for j := range batch {
 		if suspendAt < 0 && results[j].eff != nil && results[j].eff.WaitInput != "" {
 			suspendAt = j
 			continue
 		}
-		if !toolFeedback(ctx, lc, admitted[j], results[j].eff, results[j].err, yield) {
+		if !toolFeedback(ctx, lc, batch[j].call, results[j].eff, results[j].err, yield) {
 			return nil, false
 		}
 	}
 	if suspendAt >= 0 {
 		// remaining is nil: the batch fully executed, Resume must not replay.
-		w := snapshotWait(lc, round, out, admitted[suspendAt], nil)
-		w.Question = results[suspendAt].eff.WaitInput
-		lc.State = StateWaiting
-		if !yield(Event{Kind: EventState, State: StateWaiting}) {
-			return nil, false
-		}
-		if !yield(Event{Kind: EventWaitInput, Wait: w}) {
+		w, yOk := emitWait(lc, round, out, batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, yield)
+		if !yOk {
 			return nil, false
 		}
 		return w, true

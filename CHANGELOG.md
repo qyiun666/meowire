@@ -5,6 +5,33 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.5] - 2026-08-27
+
+### Fixed
+
+- **ParallelActs: BeforeAct mutations now apply on the parallel path** —
+  phase 2 previously reconstructed the Action from the raw ToolCall,
+  silently discarding any rewrite the `BeforeAct` hook made (the serial
+  path executes the mutated Action). The batch now carries both identities:
+  the gated Action is executed, the original ToolCall stays the
+  feedback/snapshot identity — byte-identical hook semantics across paths
+  (regression test `TestParallelActsBeforeActMutationApplies`).
+
+### Changed
+
+- **Shared execution primitives (dedup)** — the sandbox-membrane gate
+  (EventSandbox audit + denial feedback + BeforeAct) and the wait
+  suspension (Session snapshot + StateWaiting + EventWaitInput) are
+  extracted into `gateTool`/`emitWait`, now used by both the serial and the
+  parallel path (previously ~90%/~85% duplicated blocks); `runOneTool`'s
+  four-value return maze is gone. The nil-effect port-contract guard moves
+  into `actWithRetry` — the single Act chokepoint both paths run through.
+- **Go 1.25+ idioms** — the parallel batch join uses `sync.WaitGroup.Go`
+  with per-iteration loop-variable capture (Go 1.22+ semantics) instead of
+  `Add`/`Done` + explicit parameter passing.
+
+No public surface change; event ordering and wire formats are untouched.
+
 ## [1.3.4] - 2026-08-27
 
 ### Changed

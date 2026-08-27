@@ -414,6 +414,53 @@ func TestParallelActsSingleCallKeepsSerialPath(t *testing.T) {
 	}
 }
 
+// TestParallelActsBeforeActMutationApplies: regression (v1.3.5 review) — a
+// BeforeAct hook that rewrites the Action must reach the Effector on the
+// parallel path exactly as on the serial path; the gated Action, not the
+// raw ToolCall, is what executes.
+func TestParallelActsBeforeActMutationApplies(t *testing.T) {
+	var mu sync.Mutex
+	seenArgs := map[string]string{}
+	calls := 0
+	lc := &LoopContext{
+		CellID:       "c1",
+		Input:        "mutate",
+		MaxRounds:    2,
+		ParallelActs: true,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "run", ToolCalls: []ToolCall{
+					{ID: "t1", Name: "tool1", Args: "raw"}, {ID: "t2", Name: "tool2", Args: "raw"},
+				}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			mu.Lock()
+			seenArgs[a.Call.ID] = a.Call.Args
+			mu.Unlock()
+			return &Effect{Result: "ok"}, nil
+		}},
+		Hooks: &Hooks{
+			BeforeAct: func(ctx context.Context, a *Action) error {
+				a.Call.Args = "rewritten"
+				return nil
+			},
+		},
+	}
+	events := collectEvents(context.Background(), lc)
+	last := events[len(events)-1]
+	if last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone; kinds: %v", last, kindsOf(events))
+	}
+	for _, id := range []string{"t1", "t2"} {
+		if got := seenArgs[id]; got != "rewritten" {
+			t.Fatalf("Act(%s) saw args=%q, want \"rewritten\" (BeforeAct mutation must apply on the parallel path)", id, got)
+		}
+	}
+}
+
 // TestParallelActsAbortBeforeExecutionSkipsBatch: stopping consumption at
 // the first EventToolCall prevents the entire batch from executing.
 func TestParallelActsAbortBeforeExecutionSkipsBatch(t *testing.T) {
