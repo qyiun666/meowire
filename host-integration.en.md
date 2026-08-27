@@ -153,7 +153,7 @@ type Hooks struct {
     BeforeAct       func(ctx context.Context, a *Action) error
     AfterAct        func(ctx context.Context, a *Action, e *Effect, err error) // err non-nil = effector failure
     OnError         func(ctx context.Context, err error)
-    OnCycleEnd      func(ctx context.Context, output string)
+    OnCycleEnd      func(ctx context.Context, output string, outcome CycleOutcome)
 }
 ```
 
@@ -166,7 +166,7 @@ type Hooks struct {
 | `BeforeAct` | Before each tool execution | Approval, rewrite tool arguments |
 | `AfterAct` | After tool execution | Tool logging, failure degradation (`err` non-nil = effector failure) |
 | `OnError` | On unrecoverable error | Alerting |
-| `OnCycleEnd` | **Exactly once per cycle** (normal, error, and early-consumer-stop paths) | Settlement, persist final output |
+| `OnCycleEnd` | **Exactly once per cycle** (normal, error, and early-consumer-stop paths) | Settlement, persist final output; `outcome` classifies how the cycle ended (Done/Suspended/MaxRounds/Error/Aborted; zero reserved = iterator abandoned early → Aborted) |
 
 **⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context. The same applies to `p.ToolResults` (shared with the loop's structured track): replace wholesale, never append in place.**
 
@@ -174,19 +174,23 @@ type Hooks struct {
 
 ```go
 type Sandbox interface {
-    Allow(ctx context.Context, a Action) (allowed bool, reason string, err error)
+    Allow(ctx context.Context, a Action) (verdict Verdict, reason string, err error)
     Bounds() string // execution boundary description (host defined), snapshotted once per Stimulate
 }
 ```
 
-- Invoked before each tool execution; when `allowed=false` the framework
-  appends `[denied: reason]` feedback to Context and **the loop continues** (no halt)
-- An error from `Allow` denies as `[sandbox error: ...]`
+- Tri-state ruling (`Verdict`): `VerdictAllow` proceeds to execution; on `VerdictDeny`
+  (the zero value — fail-closed) the framework appends `[denied: reason]` feedback to
+  Context and **the loop continues** (no halt); `VerdictAsk` **suspends for external
+  confirmation** — the reason becomes the question text shown externally, the loop
+  suspends through the §6.4 protocol, and execution happens only after the host approves
+- An error from `Allow` denies as `[sandbox error: ...]` (fail-closed)
 - `Bounds()` returns the execution boundary description; the framework
   snapshots it once per Stimulate and surfaces it to the LLM via `Prompt.Bounds`
   (so the brain perceives its limits, e.g. "only files under /workspace")
-- The host implements security policy: tool allowlist/denylist, human
-  confirmation, sensitive-operation interception
+- The host implements security policy: tool allowlist/denylist, human confirmation
+  (returning `VerdictAsk` is all it takes — suspension and resume are the framework's job),
+  sensitive-operation interception
 
 ### 2.7 ContextBudget — the context trimmer
 
@@ -405,7 +409,7 @@ EventState(error) → EventError(Err)
 | `EventText` | `Text` | Whole-segment LLM text output |
 | `EventToolCall` | `ToolCall *ToolCall` | Tool the LLM decided to call |
 | `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | Tool execution result (includes Sandbox denials: `Effect.Err = "[denied: reason]"`); `ToolCall` echoes the call for ID association |
-| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (allowed/denied, tool, policy reason, evaluation error); not emitted when no sandbox is wired |
+| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (ruling Ruling: allow/deny/**ask**, tool, policy reason, ask question, evaluation error); an ask chain closes with its terminal second record; not emitted when no sandbox is wired |
 | `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
 | `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
@@ -415,8 +419,11 @@ EventState(error) → EventError(Err)
 | `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, Old, New}`; emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
 | `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace (v1.3.2), persistable |
 
-`SandboxVerdict{CellID, Call, Allowed, Reason, Err}`: one record per decision of a
-configured sandbox, emitted before the tool runs; persisting the event stream yields
+`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`: one record per decision of a
+configured sandbox, emitted before the tool runs (`Ruling` is tri-state; Deny is the zero value —
+fail-closed); an ask ruling produces two records on one chain (ask → resolve — the terminal record
+carries the final ruling: deny keeps its text, approval shows allow with an empty Reason).
+Persisting the event stream yields
 the action-level audit log (who, on whose behalf, when, what, why permitted). See
 [protocols.md](protocols.md) §4 Authority.
 
@@ -445,9 +452,10 @@ is just the standard Go iterator consumption semantics (tools after the stop
 point never run), not a second implementation — simulating ask_user with
 break loses the suspended context.
 
-### 6.4 Suspension-resume protocol (ask_user, v1.3.0)
+### 6.4 Suspension-resume protocol (ask_user and sandbox asks)
 
-The framework-level protocol for tools that need external input — **no blocking,
+The framework-level protocol for tools that need external input — or for a
+`Sandbox.Allow` returning `VerdictAsk` — **no blocking,
 no lost rounds**, replacing the old host-side synchronous block inside Effector:
 
 ```go
@@ -489,8 +497,16 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
 
 - **Suspension = the iterator ends normally**: yields `EventState(StateWaiting)` →
   `EventWaitInput` and ends — no `EventDone`/`EventError`; `OnCycleEnd`/`AfterStimulate`
-  still fire exactly once (the host distinguishes suspension by `StateWaiting` —
-  **do not persist an unfinished round**)
+  still fire exactly once with `outcome = OutcomeSuspended` (distinguish the suspension
+  via `StateWaiting`/outcome — **do not persist an unfinished round**)
+- **Sandbox ask = the same suspension mechanism (tri-state ruling)**: when
+  `Sandbox.Allow` returns `VerdictAsk`, the loop yields the identical
+  `EventState(StateWaiting)` + `EventWaitInput` pair (the question text comes from the
+  ruling's reason), preceded by an ask-kind `EventSandbox` audit record; the host saves
+  the Session, shows the question, and resolves via Resume exactly like ask_user;
+  **an approved call is never re-gated** (a stateless membrane would re-ask forever),
+  while sibling calls of the same round pass the normal gate on replay; the terminal
+  resolve record closes the audit chain
 - **Pause (v1.3.2) = the same suspension mechanism**: yields `EventState(StatePaused)` →
   `EventPaused` (Session snapshot, Call zero value) and ends the iterator normally;
   `agent.Resume(sess, "")` continues without injecting anything (no pending tool); when
@@ -513,9 +529,14 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;
   it runs before the next Think after resume
-- **Response shape**: appended as the pending tool's structured result in `ToolResults`
-  (`ID` = the suspended call's `call_xxx`), visible to the first Think after resume;
-  timeouts are host-controlled (default deny, inject `[denied: timeout]`)
+- **Response grammar (shared by ask_user and sandbox asks)**: written as the suspended
+  call's structured result in `ToolResults`
+  (`ID` = the call's `call_xxx`), visible to the first Think after resume. Three rules,
+  identical for both suspension kinds: an **empty string** = deny (injects
+  `[denied: declined]`); a **`[denied:` prefix** = deny with that text (timeout recipe
+  `[denied: timeout]` as shown above); **any other response** = approve — under ask_user
+  it is injected as the tool's result; under a sandbox ask the pending call executes.
+  Timeouts are host-controlled (default deny)
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think
 - **Resume hooks are identical to Stimulate** (`BeforeStimulate` fires as usual; with
@@ -661,8 +682,15 @@ hooksFor := func(id string) *meowire.Hooks {
 		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
 			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
 		},
-		OnCycleEnd: func(ctx context.Context, output string) {
-			hub.updateTask(id, TaskStatus{State: "done", Output: output})
+		OnCycleEnd: func(ctx context.Context, output string, outcome meowire.CycleOutcome) {
+			switch outcome {
+			case meowire.OutcomeDone:
+				hub.updateTask(id, TaskStatus{State: "done", Output: output})
+			case meowire.OutcomeSuspended:
+				hub.updateTask(id, TaskStatus{State: "needs-input"})
+			default:
+				hub.updateTask(id, TaskStatus{State: "failed"})
+			}
 		},
 	}
 }

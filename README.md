@@ -56,9 +56,10 @@ you can rely on.
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
-- **Unified suspension-resume (v1.3.2)** — one snapshot + resume path for both suspension kinds:
+- **Unified suspension-resume (v1.3.2 onward)** — one snapshot + resume path for all suspension kinds:
   - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), remaining tools run first, then the loop resumes from the suspended round.
   - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, "")` continues (no pending tool to inject). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
+  - **Sandbox ask**: a tri-state ruling (`Sandbox.Allow` returning `VerdictAsk`) yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason); resolution follows one shared response grammar — "" denies (`[denied: declined]`), a `[denied:` prefix denies with that text, any other response approves and runs the pending call without re-gating.
   - **Persistent**: `Session.Marshal()` / `UnmarshalSession` give versioned JSON persistence — a suspended or paused loop survives process restarts (alignment with mainstream checkpoint/resume).
   Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
 - **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
@@ -72,6 +73,13 @@ you can rely on.
   feedback in call order); events and hooks stay serial. Off by default; requires a
   concurrency-safe Effector. `Session.RemainingCalls()` exposes the pending calls of a
   suspension (empty when nothing is left to replay)
+- **Tri-state sandbox rulings & reflection primitives** — `Sandbox.Allow` returns a
+  `Verdict`: Deny (zero value, fail-closed), Allow, or Ask; an ask suspends via the same
+  suspension-resume protocol as ask_user and executes only after the host approves
+  (one audit chain closes with a terminal resolve record). `Hooks.OnCycleEnd(ctx, output,
+  outcome)` classifies how every cycle ended (`CycleOutcome`: Done/Suspended/MaxRounds/
+  Error/Aborted); `BeforeStimulate` may write a turn-scoped self-review note onto
+  `Prompt.Reflection`, carried onto every Thinker prompt of the cycle
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
 - **Flat multi-agent model** — sub-agents and inter-agent messaging are host tools
   (`spawn_agent` / `send_message`), never framework-level nesting
@@ -173,8 +181,8 @@ func (closer) Close() error { return nil }
 // sandbox implements meowire.Sandbox — the tool permission gate.
 type sandbox struct{}
 
-func (sandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
-	return true, "", nil
+func (sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
+	return meowire.VerdictAllow, "", nil
 }
 
 func (sandbox) Bounds() string { return "read-only /workspace" }
@@ -227,7 +235,7 @@ into an open iterator.
 
 Stopping consumption (yield returns false) **abandons the round**: tools at or after the stop
 point do **not** execute, and all state accumulated in this round is discarded.
-`OnCycleEnd` is guaranteed to run exactly once per `Cycle` — on success, on error, and on abort.
+`OnCycleEnd` is guaranteed to run exactly once per `Cycle` — on success, on error, and on abort — and reports how it ended via its `outcome CycleOutcome` parameter (Done / Suspended / MaxRounds / Error / Aborted; zero reserved for an iterator abandoned mid-cycle → Aborted).
 
 ### Step-Resume (host-driven takeover)
 
@@ -241,7 +249,7 @@ The two paths are mutually exclusive; a break-based `ask_user` would lose the su
 
 ### Unified suspension-resume (v1.3.2)
 
-Both suspension kinds — tool-requested input (ask_user) and host-requested pause — share one
+All three suspension kinds — tool-requested input (ask_user), a sandbox ask (`VerdictAsk`), and host-requested pause — share one
 mechanism: the loop yields a suspension event carrying an opaque `Session` snapshot and ends the
 iterator normally; the host saves the Session (optionally persisting it via `Session.Marshal()` /
 `UnmarshalSession` for cross-process recovery), then calls `Agent.Resume(ctx, sess, response)` to
@@ -252,6 +260,8 @@ continue from the suspended point — no extra round, no budget during the wait.
 - **Pause**: `Agent.Pause()` honored at gap points → `EventState(StatePaused)` + `EventPaused`;
   `Resume(sess, "")` continues without injecting anything (no pending tool). A pause before a tool
   keeps that tool (and the calls after it) in `Session.remaining`, so Resume runs them first.
+- **Sandbox ask**: `Sandbox.Allow` returning `VerdictAsk` → the same `EventState(StateWaiting)` +
+  `EventWaitInput` pair (question from the ruling's reason); the response grammar matches ask_user.
 - `Agent.Resume` clears a stale pause request automatically; `Agent.Unpause()` only backs out a
   pause request that has not taken effect yet.
 - The Session is single-use: resuming it twice re-executes the remaining tool calls (host

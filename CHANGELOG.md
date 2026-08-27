@@ -5,6 +5,53 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Sandbox ask rulings (tri-state sandbox)** — `Sandbox.Allow` returns
+  `(Verdict, reason string, err error)`; `Verdict` is tri-state: `VerdictAllow`
+  proceeds as before, `VerdictDeny` (the zero value — fail-closed) appends the
+  `[denied: reason]` feedback, and a non-nil error still coerces to a deny
+  (`[sandbox error: ...]`). The new `VerdictAsk` suspends the loop through the same
+  snapshot-resume machinery as ask_user: one ask-kind `EventSandbox` audit record,
+  then `EventState(StateWaiting)` + `EventWaitInput` with the ruling's reason as the
+  question. Resolve via `Agent.Resume(ctx, sess, response)` under a shared response
+  grammar — an empty string denies as `[denied: declined]`, a `[denied:` prefix
+  denies with that text (timeout recipe `[denied: timeout]`), any other response
+  approves. An approved call executes **without consulting the sandbox again**
+  (a stateless membrane would re-ask forever); sibling calls replay through the
+  normal gate. Every ask chain closes with a terminal second `EventSandbox` record
+  carrying the final ruling (approval shows allow with an empty Reason).
+- **Cycle outcome classification** — `Hooks.OnCycleEnd` receives
+  `(ctx, output string, outcome CycleOutcome)`: OutcomeDone / OutcomeSuspended /
+  OutcomeMaxRounds / OutcomeError / OutcomeAborted. Zero is reserved — an iterator
+  abandoned mid-cycle by the consumer leaves the cycle unmarked until the guarantee
+  defer stamps `OutcomeAborted` right before the hook fires. Event ordering and
+  hook guarantees unchanged.
+- **Reflection primitive (lite)** — `Prompt.Reflection`: a turn-scoped self-review
+  note written on the `BeforeStimulate` prototype (content-field write-back) and
+  carried verbatim onto every Thinker prompt of that cycle. The framework owns no
+  reflection logic of its own — wiring only.
+
+### Breaking changes
+
+- **`SandboxVerdict` audit model** — `Allowed bool` replaced by `Ruling Verdict`
+  (tri-state), plus a new `Question` field populated for asks; hosts switching on
+  `Allowed` must switch on `Ruling`.
+- **`Sandbox.Allow` signature change** — `(bool, string, error)` becomes
+  `(Verdict, string, error)`; returning `true` becomes returning `VerdictAllow`.
+- **`OnCycleEnd` signature change** — add the trailing `outcome CycleOutcome`
+  parameter to host hook literals.
+- **Session wire v2** — the persisted handle carries the `sandboxAsk` discriminator;
+  the version guard rejects v1 handles (a stale handle must never be replayed).
+
+### Docs
+
+- README (en/zh-CN), `host-integration.md`/`.en.md` (Hooks table, §2.6 Sandbox,
+  §6.2 event tables, §6.4 protocol), `reference-host.md`, `protocols.md` §4,
+  `api/agent.md`, `internal/nerve/agent.md` — contracts synced.
+
 ## [1.3.5] - 2026-08-27
 
 ### Fixed

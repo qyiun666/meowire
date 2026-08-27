@@ -351,23 +351,28 @@ import (
 	meowire "github.com/qyiun666/meowire/api"
 )
 
-// ---- Sandbox：每次工具执行前调用；拒绝 = 反馈，不终止循环 ----
+// ---- Sandbox：每次工具执行前三态裁决；拒绝 = 反馈，不终止循环 ----
 
 type sandbox struct {
-	allowed map[string]bool // 工具名白名单（白名单验证，非黑名单）
-	bounds  string          // 执行边界描述（透传给 LLM）
+	allowed   map[string]bool // 工具名白名单（白名单验证，非黑名单）
+	dangerous map[string]bool // 敏感工具 → VerdictAsk 挂起征询
+	bounds    string          // 执行边界描述（透传给 LLM）
 }
 
-func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
+func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
 	select {
 	case <-ctx.Done():
-		return false, "", ctx.Err()
+		return meowire.VerdictDeny, "", ctx.Err()
 	default:
 	}
 	if s.allowed[a.Call.Name] {
-		return true, "", nil
+		return meowire.VerdictAllow, "", nil
 	}
-	return false, "tool not in whitelist: " + a.Call.Name, nil
+	if s.dangerous[a.Call.Name] {
+		// 挂起征询：reason 即问题文本，宿主经 Resume(sess, resp) 批准或拒绝
+		return meowire.VerdictAsk, "允许执行 " + a.Call.Name + " 吗？", nil
+	}
+	return meowire.VerdictDeny, "tool not in whitelist: "+a.Call.Name, nil
 }
 
 func (s *sandbox) Bounds() string { return s.bounds }
@@ -385,7 +390,8 @@ func trimContext(ctx []string, max int) []string {
 ```
 
 **细节：**
-- `Allow` 返回 `(false, reason, nil)` → 框架生成 `[denied: reason]` 反馈，**循环继续**——阻力是反馈不是失败
+- `Allow` 返回 `(VerdictAllow, _, nil)` 放行执行；返回 `(VerdictDeny, reason, nil)` → 框架生成 `[denied: reason]` 反馈，**循环继续**——阻力是反馈不是失败（Deny 是零值，fail-closed）
+- `Allow` 返回 `(VerdictAsk, 问题, nil)` → **挂起征询**：走与 ask_user 相同的挂起-恢复协议，批准后才执行且不再重新过门禁
 - `Allow` 返回 error → 按 `[sandbox error: ...]` 拒绝
 - `Bounds()` 每次 `Stimulate` 开始时快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
 - 裁剪器不想裁时返回入参原切片即可；`ContextBudget{MaxTokens: 0}` 也是合法装配（配了 Trimmer）
@@ -519,7 +525,7 @@ func main() {
 		case meowire.EventToolResult:
 			fmt.Println("📦", ev.Effect.Result, ev.Effect.Err)
 		case meowire.EventSandbox:
-			fmt.Printf("🛡 %s %s allowed=%v reason=%s\n", ev.Verdict.CellID, ev.Verdict.Call.Name, ev.Verdict.Allowed, ev.Verdict.Reason)
+			fmt.Printf("🛡 %s %s ruling=%v reason=%q ask=%q\n", ev.Verdict.CellID, ev.Verdict.Call.Name, ev.Verdict.Ruling, ev.Verdict.Reason, ev.Verdict.Question)
 		case meowire.EventWaitInput: // 挂起：保存 Session，向用户展示问题；响应到达后 Resume(ctx, sess, ans) 续跑
 			fmt.Println("❓", ev.Wait.Call.Name, ev.Wait.Question)
 			pendingSession = ev.Wait.Session

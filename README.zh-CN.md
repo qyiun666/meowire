@@ -51,7 +51,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
-- **统一挂起-恢复（v1.3.2）** —— 两种挂起共用同一条快照 + 恢复路径：
+- **统一挂起-恢复（v1.3.2 起）** —— 三种挂起共用同一条快照 + 恢复路径：
   - **ask_user**：工具返回 `Effect{WaitInput: 问题}`，循环产出 `EventState(StateWaiting)` +
     `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束** ——不阻塞、不占轮次、
     等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：响应以挂起工具的结构化
@@ -63,6 +63,11 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   - **可持久化**：`Session.Marshal()` / `UnmarshalSession` 提供带版本号的 JSON 持久化 ——
     挂起或暂停的循环可跨进程存活（对齐主流 checkpoint/resume）。
   超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
+- **三态 Sandbox 裁决与反思原语** —— `Sandbox.Allow` 返回 `Verdict`：
+  `VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`——ask 经与
+  ask_user 相同的挂起-恢复协议征询确认，批准后才执行。`OnCycleEnd(ctx, output,
+  outcome)` 以 `CycleOutcome`（Done/Suspended/MaxRounds/Error/Aborted）分类每轮结束方式；
+  `BeforeStimulate` 可写轮级反思便签到 `Prompt.Reflection`，全轮 Thinker 可见
 - **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，
   单一轨道；`call_xxx` ID 保留）；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记、纯文本）归宿主
   Thinker —— 文本轨（`Context`）只保留宿主基底与 sandbox 裁决
@@ -164,8 +169,8 @@ func (closer) Close() error { return nil }
 // sandbox 实现 meowire.Sandbox —— 工具权限门。
 type sandbox struct{}
 
-func (sandbox) Allow(ctx context.Context, a meowire.Action) (bool, string, error) {
-	return true, "", nil
+func (sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
+	return meowire.VerdictAllow, "", nil
 }
 
 func (sandbox) Bounds() string { return "read-only /workspace" }
@@ -216,7 +221,7 @@ func main() {
 （`EventToolCall` / `EventToolResult`），但绝不向打开的迭代器回灌数据。
 
 停止消费（yield 返回 false）**放弃本轮**：停止点及其后的工具**不会**执行，
-本轮累积的所有状态被丢弃。`OnCycleEnd` 保证每次 `Cycle` 恰好执行一次 —— 正常、错误、中止三条路径都覆盖。
+本轮累积的所有状态被丢弃。`OnCycleEnd` 保证每次 `Cycle` 恰好执行一次 —— 正常、错误、中止三条路径都覆盖，并以 outcome 参数报告结束方式（`CycleOutcome`：Done/Suspended/MaxRounds/Error/Aborted）。
 
 ### Step-Resume（宿主主动接管）
 
@@ -229,7 +234,7 @@ func main() {
 
 ### 统一挂起-恢复（v1.3.2）
 
-两种挂起 —— 工具请求输入（ask_user）与宿主请求暂停（Pause）—— 共用同一机制：
+三种挂起 —— 工具请求输入（ask_user）、Sandbox 征询（`VerdictAsk`）与宿主请求暂停（Pause）—— 共用同一机制：
 循环产出携带不透明 `Session` 快照的挂起事件后**迭代器正常结束**；宿主保存 Session
 （可选经 `Session.Marshal()` / `UnmarshalSession` 跨进程持久化恢复），然后调用
 `Agent.Resume(ctx, sess, response)` 从挂起点继续 —— 不占轮次、等待期间不触发 budget。
@@ -239,6 +244,10 @@ func main() {
 - **Pause**：`Agent.Pause()` 在间隙点生效 → `EventState(StatePaused)` + `EventPaused`；
   `Resume(sess, "")` 续跑，不注入任何内容（无 pending 工具）。暂停点在工具执行前时，
   当前工具（及其后的调用）计入 `Session.remaining`，Resume 先执行它们。
+- **Sandbox 征询**：`Sandbox.Allow` 返回 `VerdictAsk` → 同样的 `EventState(StateWaiting)` +
+  `EventWaitInput`（问题来自裁决 reason）；响应语法与 ask_user 一致 —— 空串拒绝
+  （`[denied: declined]`）、`[denied:` 前缀按文本拒绝、其余任何响应批准并放行 pending
+  调用（不再重新过门禁）。
 - `Agent.Resume` 自动清除失效的暂停请求；`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
 - Session 单次使用：重复恢复会重放剩余工具调用（宿主责任）。
   该统一模型取代旧的阻塞式 PauseGate 等待（v1.3.2 breaking）。

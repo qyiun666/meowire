@@ -86,9 +86,13 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，agent 间通�
   动作级授权点（对比"登录后一路放行"的会话级授权）。宿主在此结合
   身份、被委托的 authority、组织策略、声明的 intent 与实时上下文
   做决策。
-- **审计**：每次决策（允许或拒绝）产出 `EventSandbox` 事件，携带
-  CellID、工具调用、Allowed、策略原因与评估错误。宿主持久化事件流
-  即得到完整审计日志（谁、代表谁、何时、做了什么、为什么被允许）。
+- **裁决**：`Sandbox.Allow` 返回三态 `Verdict`——`VerdictAllow` 放行、
+  `VerdictDeny`（零值，fail-closed）拒绝、`VerdictAsk` 挂起征询外部确认
+  （复用统一的挂起-恢复协议，批准才执行）。
+- **审计**：每次决策产出 `EventSandbox` 事件，携带 CellID、工具调用、裁决
+  （Ruling）、策略原因/征询问题与评估错误；ask 裁决以终结的第二条记录闭合
+  审计链。宿主持久化事件流即得到完整审计日志（谁、代表谁、何时、做了什么、
+  为什么被允许）。
 - `Sandbox.Bounds()` 在每次 `Stimulate` 开始时快照进 `Prompt.Bounds`，
   把执行边界告知 LLM——边界既是拦截也是提示。
 

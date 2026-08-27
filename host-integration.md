@@ -127,7 +127,7 @@ type Hooks struct {
     BeforeAct       func(ctx context.Context, a *Action) error
     AfterAct        func(ctx context.Context, a *Action, e *Effect, err error) // err 非 nil = 执行器失败
     OnError         func(ctx context.Context, err error)
-    OnCycleEnd      func(ctx context.Context, output string)
+    OnCycleEnd      func(ctx context.Context, output string, outcome CycleOutcome)
 }
 ```
 
@@ -140,7 +140,7 @@ type Hooks struct {
 | `BeforeAct` | 每个工具执行前 | 审批、改写工具参数 |
 | `AfterAct` | 工具执行后 | 工具日志、失败降级（`err` 非 nil 即执行器失败） |
 | `OnError` | 不可恢复错误时 | 告警上报 |
-| `OnCycleEnd` | **每轮恰好一次**（正常/错误/消费者提前停止三条路径都触发） | 结算、持久化最终输出 |
+| `OnCycleEnd` | **每轮恰好一次**（正常/错误/消费者提前停止三条路径都触发） | 结算、持久化最终输出；`outcome` 分类本轮结束方式（Done/Suspended/MaxRounds/Error/Aborted，零值保留 = 提前弃用迭代器 → Aborted） |
 
 **⚠️ `BeforeThink` 必须整体替换 `p.Context`（`p.Context = append(p.Context[:0], newCtx...)` 或直接赋新切片）——它与循环上下文共享底层数组，直接 append 会污染 循环内上下文；`p.ToolResults` 同理（与循环结构化轨共享底层数组），整体替换、禁止原地 append。**
 
@@ -148,15 +148,15 @@ type Hooks struct {
 
 ```go
 type Sandbox interface {
-    Allow(ctx context.Context, a Action) (allowed bool, reason string, err error)
+    Allow(ctx context.Context, a Action) (verdict Verdict, reason string, err error)
     Bounds() string // 执行边界描述（宿主定义），每次 Stimulate 快照一次
 }
 ```
 
-- 每次工具执行前调用；`allowed=false` 时框架生成 `[denied: reason]` 反馈进 Context，**循环继续**（不终止）
-- `Allow` 返回 err 时按 `[sandbox error: ...]` 拒绝
+- 三态裁决（`Verdict`）：`VerdictAllow` 放行执行；`VerdictDeny`（零值，fail-closed）时框架生成 `[denied: reason]` 反馈进 Context，**循环继续**（不终止）；`VerdictAsk` **挂起征询**——reason 即展示给外部的问题文本，循环按 §6.4 的挂起-恢复协议挂起，宿主解决后批准才执行
+- `Allow` 返回 err 时按 `[sandbox error: ...]` 拒绝（fail-closed）
 - `Bounds()` 返回执行边界描述，每次 Stimulate 快照一次、经 `Prompt.Bounds` 透传给 LLM（让大脑感知限制，如"只能访问 /workspace 下文件"）
-- 宿主实现安全策略：工具白名单/黑名单、人工确认、敏感操作拦截
+- 宿主实现安全策略：工具白名单/黑名单、人工确认（返回 `VerdictAsk` 即可，挂起与恢复由框架表达）、敏感操作拦截
 
 ### 2.7 ContextBudget —— 上下文裁剪器
 
@@ -359,7 +359,7 @@ EventState(error) → EventError(Err)
 | `EventText` | `Text` | LLM 整段文本输出 |
 | `EventToolCall` | `ToolCall *ToolCall` | LLM 决定调用的工具 |
 | `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[denied: reason]"`）；`ToolCall` 回显调用，用于 ID 关联 |
-| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox 决策审计记录（允许/拒绝、工具、策略原因、评估错误）；未配置 Sandbox 时不产出 |
+| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox 决策审计记录（裁决 Ruling：allow/deny/**ask**、工具、策略原因、征询问题、评估错误）；ask 链以终结的第二条记录闭合；未配置 Sandbox 时不产出 |
 | `EventState` | `State LoopState` | 循环状态（idle/thinking/acting/paused/**waiting**/done/error） |
 | `EventDone` | `Output` | 整轮累计文本输出 |
 | `EventError` | `Err` | 不可恢复错误（含 `ErrMaxRounds`、`ErrCellClosed`） |
@@ -369,7 +369,7 @@ EventState(error) → EventError(Err)
 | `EventReplace` | `Replace *ReplaceAudit` | 端口替换审计：`ReplaceAudit{CellID, Slot, Old, New}`；下一次 Stimulate/Resume 开头（生效时刻）按序产出，可持久化 |
 | `EventConfig` | `Config *ConfigAudit` | 配置整包替换审计：`ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`；下一次 Stimulate/Resume 开头在 EventReplace 之后按序产出（v1.3.2），可持久化 |
 
-`SandboxVerdict{CellID, Call, Allowed, Reason, Err}`：每个被配置的 Sandbox 决策（允许或拒绝）在工具执行前产出一条；宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
+`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`：每个被配置的 Sandbox 决策在工具执行前产出一条（`Ruling` 三态：Deny 为零值，fail-closed）；ask 裁决产出两条记录（ask → resolve）闭合审计链——resolve 记录携带最终裁决（拒绝含拒绝文本，批准 Ruling=allow 且 Reason 空）。宿主持久化事件流即得到动作级审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
 
 ### 6.3 宿主必须掌握的两个语义
 
@@ -378,9 +378,9 @@ EventState(error) → EventError(Err)
 
 **两条路径的边界**：工具请求输入（ask_user）只能走 §6.4 的挂起-恢复——框架保留 `Session`、不占轮次，宿主保存会话、展示问题，响应到达后 `Resume` 即可；宿主主动接管（人工审批、异步任务、`ErrMaxRounds` 续跑）才用 break + `Stimulate`——本轮状态丢弃，进度由宿主自行保存并重新注入。两者不可互相替代：break 只是 Go 迭代器的标准消费语义（停止点之后的工具不会执行），不是另一套实现，用 break 模拟 ask_user 会丢失挂起上下文。
 
-### 6.4 挂起-恢复协议（ask_user，v1.3.0）
+### 6.4 挂起-恢复协议（ask_user 与 Sandbox 征询）
 
-工具请求外部输入时的框架级协议——**不阻塞、不丢轮**，替代宿主在 Effector 内同步阻塞的旧做法：
+工具请求外部输入、或 `Sandbox.Allow` 返回 `VerdictAsk` 征询确认时的框架级协议——**不阻塞、不丢轮**，替代宿主在 Effector 内同步阻塞的旧做法：
 
 ```go
 // ① 工具侧（Effector）：声明挂起，绝不阻塞
@@ -418,14 +418,15 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 
 **语义：**
 
-- **挂起 = 迭代器正常结束**：yield `EventState(StateWaiting)` → `EventWaitInput` 后结束，无 `EventDone`/`EventError`；`OnCycleEnd`/`AfterStimulate` 照常恰好一次（宿主凭 `StateWaiting` 区分挂起收尾，**勿沉淀未完成轮次**）
+- **挂起 = 迭代器正常结束**：yield `EventState(StateWaiting)` → `EventWaitInput` 后结束，无 `EventDone`/`EventError`；`OnCycleEnd`/`AfterStimulate` 照常恰好一次，outcome 为 `OutcomeSuspended`（宿主凭 StateWaiting/outcome 区分挂起收尾，**勿沉淀未完成轮次**）
+- **Sandbox 征询 = 同一挂起机制（三态裁决）**：`Sandbox.Allow` 返回 `VerdictAsk` 时，循环产出相同的 `EventState(StateWaiting)` + `EventWaitInput`（问题文本来自裁决 reason），且事先产出一条 ask 型 `EventSandbox` 审计记录；宿主用与 ask_user 完全相同的方式保存 Session、展示问题、Resume 解决；**批准的调用不再重新过门禁**（无状态膜会无限重问），同轮其余调用重放时照常过门禁；终结的 resolve 记录闭合审计链
 - **暂停（v1.3.2）= 同一挂起机制**：yield `EventState(StatePaused)` → `EventPaused`（Session 快照，Call 零值）后迭代器正常结束；`agent.Resume(sess, "")` 续跑，不注入任何结果（无 pending 工具）；暂停点在工具执行前时，当前工具记入 Session.remaining，Resume 先执行
 - **`Session` 是不透明值对象**（`round`/Context/剩余工具调用/累积输出快照）：宿主只保存、传回，不碰内部；**单次消费**——重复 Resume 会重复执行剩余工具（副作用重复，宿主责任）
 - **`sess.RemainingCalls()`（v1.3.3）**：唯一授权的只读探测——返回挂起点尚未执行的调用克隆（无则空）：暂停快照保留整批未执行调用（Resume 重放）；`ParallelActs` 批内 WaitInput 挂起则为空（整批已执行完，Resume 只注入响应，绝不重放）
 - **持久化（v1.3.2）**：`sess.Marshal()` 产出 JSON 字节（含版本号），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本不匹配拒绝还原（防止旧/新格式误重放）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
 - **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行
-- **响应形态**：作为挂起工具的结构化结果写入 `ToolResults`（`ID` 为挂起调用的 `call_xxx`），进入恢复后的第一次 Think；超时由宿主控制（默认拒绝，如上注入 `[denied: timeout]`）
+- **响应语法（ask_user 与 Sandbox 征询统一）**：作为挂起调用的结构化结果写入 `ToolResults`（`ID` 为该调用的 `call_xxx`），进入恢复后的第一次 Think。三条规则对两类挂起一致生效：**空串** = 拒绝（注入 `[denied: declined]`）；**`[denied:` 前缀** = 以该文本拒绝（超时配方如上 `[denied: timeout]`）；**其余任何响应** = 批准——ask_user 下作为工具结果注入；Sandbox 征询下放行 pending 调用执行。超时由宿主控制（默认拒绝）
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
 - **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠
@@ -542,8 +543,15 @@ hooksFor := func(id string) *meowire.Hooks {
 		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
 			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
 		},
-		OnCycleEnd: func(ctx context.Context, output string) {
-			hub.updateTask(id, TaskStatus{State: "done", Output: output})
+		OnCycleEnd: func(ctx context.Context, output string, outcome meowire.CycleOutcome) {
+			switch outcome {
+			case meowire.OutcomeDone:
+				hub.updateTask(id, TaskStatus{State: "done", Output: output})
+			case meowire.OutcomeSuspended:
+				hub.updateTask(id, TaskStatus{State: "needs-input"})
+			default:
+				hub.updateTask(id, TaskStatus{State: "failed"})
+			}
 		},
 	}
 }
