@@ -24,7 +24,7 @@ func fullHooks() *meowire.Hooks {
 		BeforeAct:       func(ctx context.Context, a *meowire.Action) error { return nil },
 		AfterAct:        func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {},
 		OnError:         func(ctx context.Context, err error) {},
-		OnCycleEnd:      func(ctx context.Context, output string) {},
+		OnCycleEnd:      func(ctx context.Context, output string, _ meowire.CycleOutcome) {},
 	}
 }
 

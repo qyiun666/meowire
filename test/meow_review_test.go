@@ -17,7 +17,7 @@ func TestPortWiring(t *testing.T) {
 	var hookCalled bool
 	a, err := testNew(testOrgans(meowire.Organs{
 		Hooks: &meowire.Hooks{
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ meowire.CycleOutcome) {
 				hookCalled = true
 			},
 		},

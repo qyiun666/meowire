@@ -43,7 +43,7 @@ func testHooks() *Hooks {
 		BeforeAct:       func(ctx context.Context, a *Action) error { return nil },
 		AfterAct:        func(ctx context.Context, a *Action, e *Effect, err error) {},
 		OnError:         func(ctx context.Context, err error) {},
-		OnCycleEnd:      func(ctx context.Context, output string) {},
+		OnCycleEnd:      func(ctx context.Context, output string, _ CycleOutcome) {},
 	}
 }
 
@@ -267,7 +267,7 @@ func TestDecisionLoopHooks(t *testing.T) {
 			AfterAct: func(ctx context.Context, a *Action, e *Effect, err error) {
 				hookCalls = append(hookCalls, "AfterAct")
 			},
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				hookCalls = append(hookCalls, "OnCycleEnd")
 			},
 		},
@@ -506,7 +506,7 @@ func TestDecisionLoopOnCycleEndOnAbort(t *testing.T) {
 			return &Effect{Result: "ok"}, nil
 		}},
 		Hooks: &Hooks{
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				cycleEndCalls++
 				cycleEndOutput = output
 			},
@@ -623,7 +623,7 @@ func TestDecisionLoopOnCycleEndOnError(t *testing.T) {
 			return &Effect{Result: "ok"}, nil
 		}},
 		Hooks: &Hooks{
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				cycleEndCalled = true
 			},
 		},
@@ -775,7 +775,7 @@ func TestCtxCancelOnCycleEndOnce(t *testing.T) {
 			return &Effect{Result: "ok"}, nil
 		}},
 		Hooks: &Hooks{
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				calls++
 			},
 		},
@@ -870,7 +870,7 @@ func TestDecisionLoopStimulateHooks(t *testing.T) {
 				hookCalls = append(hookCalls, "BeforeThink")
 				return nil
 			},
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				hookCalls = append(hookCalls, "OnCycleEnd")
 			},
 			AfterStimulate: func(ctx context.Context, output string) {

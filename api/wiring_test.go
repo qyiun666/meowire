@@ -25,7 +25,7 @@ func fullHooks() *Hooks {
 		BeforeAct:       func(ctx context.Context, a *Action) error { return nil },
 		AfterAct:        func(ctx context.Context, a *Action, e *Effect, err error) {},
 		OnError:         func(ctx context.Context, err error) {},
-		OnCycleEnd:      func(ctx context.Context, output string) {},
+		OnCycleEnd:      func(ctx context.Context, output string, _ CycleOutcome) {},
 	}
 }
 

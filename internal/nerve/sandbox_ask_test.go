@@ -66,7 +66,7 @@ func runAskCycle(t *testing.T, calls []ToolCall, parallel bool) *askFixture {
 			},
 			AfterAct: func(ctx context.Context, a *Action, e *Effect, err error) {},
 			OnError:  func(ctx context.Context, err error) {},
-			OnCycleEnd: func(ctx context.Context, output string) {
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				f.cycles++
 			},
 		},
@@ -234,7 +234,7 @@ func TestSandboxAskResumeApprove(t *testing.T) {
 			},
 			AfterAct:   func(ctx context.Context, a *Action, e *Effect, err error) {},
 			OnError:    func(ctx context.Context, err error) {},
-			OnCycleEnd: func(ctx context.Context, output string) {},
+			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {},
 		},
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
 			f.actLog = append(f.actLog, a.Call.Name)

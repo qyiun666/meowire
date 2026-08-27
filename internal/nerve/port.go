@@ -34,6 +34,11 @@ type Prompt struct {
 	Input string // Current stimulus text
 	State string // Current loop state (framework auto-updated)
 	Plan  string // Task plan/progress (host injected, brain can update)
+	// Reflection carries the host's reflexion note (e.g. a failure
+	// post-mortem from the previous attempt). Injected via BeforeStimulate /
+	// base assembly, passed through verbatim every round — the Reflexion
+	// loop's standard slot, so hosts never invent private prompt channels.
+	Reflection string
 
 	// Structured tool feedback accumulated within this cycle (single track:
 	// tool results no longer enter Context; rendering is the host's call).

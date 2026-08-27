@@ -31,7 +31,7 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 			BeforeAct:       func(ctx context.Context, a *nerve.Action) error { return nil },
 			AfterAct:        func(ctx context.Context, a *nerve.Action, e *nerve.Effect, err error) {},
 			OnError:         func(ctx context.Context, err error) {},
-			OnCycleEnd:      func(ctx context.Context, output string) {},
+			OnCycleEnd:      func(ctx context.Context, output string, _ nerve.CycleOutcome) {},
 		},
 		Sandbox: testutil.Sandbox{Bound: "test"},
 		Budget: &nerve.ContextBudget{

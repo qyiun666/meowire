@@ -368,7 +368,7 @@ func TestDecisionLoopResumeInvalidSession(t *testing.T) {
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
 			return &Effect{Result: "ok"}, nil
 		}},
-		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string) { cycleEnd++ }},
+		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) { cycleEnd++ }},
 	}
 	events := collectResume(context.Background(), lc, Session{}, "x")
 	if events[len(events)-1].Kind != EventError {
@@ -447,7 +447,7 @@ func TestDecisionLoopResumeCycleEndGuarantee(t *testing.T) {
 		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
 			return &Effect{WaitInput: "q?"}, nil
 		}},
-		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string) { cycleEnd++ }},
+		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) { cycleEnd++ }},
 	}
 	_, wait := runSuspendingCycle(t, lc)
 	if cycleEnd != 1 {

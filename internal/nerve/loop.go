@@ -137,6 +137,23 @@ type LoopContext struct {
 	// Host injected fixed parts
 	System string
 	Tools  []ToolSpec
+
+	// Reflection slot (host injected via BeforeStimulate write-back /
+	// base assembly): the Reflexion note passed through to every Think.
+	Reflection string
+
+	// outcome records how this invocation ended (first mark wins; zero =
+	// nothing terminal reached = consumer abort). Delivered by OnCycleEnd.
+	outcome CycleOutcome
+}
+
+// endWith records how the invocation ends; the first mark wins so a later
+// generic error can never overwrite a more specific terminal (e.g. the
+// MaxRounds classification of an ErrMaxRounds emission).
+func (lc *LoopContext) endWith(o CycleOutcome) {
+	if lc.outcome == 0 {
+		lc.outcome = o
+	}
 }
 
 // DecisionLoop is the pure orchestration engine.
@@ -259,7 +276,8 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 func cycleGuarantees(ctx context.Context, lc *LoopContext, finalOutput *string) func() {
 	return func() {
 		defer func() { lc.Hooks.AfterStimulate(ctx, *finalOutput) }()
-		lc.Hooks.OnCycleEnd(ctx, *finalOutput)
+		lc.endWith(OutcomeAborted) // no terminal reached: consumer stopped early
+		lc.Hooks.OnCycleEnd(ctx, *finalOutput, lc.outcome)
 	}
 }
 
@@ -345,12 +363,14 @@ func roundLoop(ctx context.Context, lc *LoopContext, startRound int, out *string
 	// loop ended only because the hard cap was hit (a round without tool
 	// calls breaks out below the cap).
 	if round > maxRounds {
+		lc.endWith(OutcomeMaxRounds)
 		emitError(ctx, lc, yield, ErrMaxRounds)
 		return ""
 	}
 
 	// Done — the output is finalized before StateDone so OnCycleEnd still
 	// receives it when the consumer stops at the done event.
+	lc.endWith(OutcomeDone)
 	final := out.String()
 	lc.State = StateDone
 	if !yield(Event{Kind: EventState, State: StateDone}) {
@@ -386,6 +406,7 @@ func thinkRound(ctx context.Context, lc *LoopContext, out *strings.Builder, yiel
 		Input:       lc.Input,
 		State:       lc.State.String(),
 		Plan:        lc.Plan,
+		Reflection:  lc.Reflection,
 		ToolResults: lc.ToolResults,
 	}
 
@@ -581,6 +602,7 @@ func emitWait(lc *LoopContext, round int, out *strings.Builder, pending ToolCall
 	w := snapshotWait(lc, round, out, pending, remaining)
 	w.Question = question
 	w.Session.sandboxAsk = sandboxAsk
+	lc.endWith(OutcomeSuspended) // wait: a Resume will continue this cycle
 	lc.State = StateWaiting
 	if !yield(Event{Kind: EventState, State: StateWaiting}) {
 		return w, false
@@ -695,6 +717,7 @@ func waitIfPaused(ctx context.Context, lc *LoopContext, round int, out *strings.
 		return false
 	}
 	w := snapshotWait(lc, round, out, ToolCall{}, remaining)
+	lc.endWith(OutcomeSuspended) // pause: a Resume will continue this cycle
 	if !yield(Event{Kind: EventPaused, Wait: w}) {
 		return false
 	}
@@ -756,6 +779,7 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 		Bounds:      lc.Bounds,
 		Input:       lc.Input,
 		Plan:        lc.Plan,
+		Reflection:  lc.Reflection,
 		State:       lc.State.String(),
 	}
 	if err := lc.Hooks.BeforeStimulate(ctx, proto); err != nil {
@@ -769,6 +793,7 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 	lc.Context = proto.Context
 	lc.Input = proto.Input
 	lc.Plan = proto.Plan
+	lc.Reflection = proto.Reflection
 	return nil
 }
 
@@ -778,6 +803,7 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 // OnCycleEnd is guaranteed by Cycle's defer.
 // NOTE: callers always return immediately after calling emitError.
 func emitError(ctx context.Context, lc *LoopContext, yield func(Event) bool, err error) {
+	lc.endWith(OutcomeError) // first-wins: keeps a prior MaxRounds mark
 	lc.State = StateError
 	if !yield(Event{Kind: EventState, State: StateError}) {
 		return

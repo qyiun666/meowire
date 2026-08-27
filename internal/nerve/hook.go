@@ -6,6 +6,20 @@ package nerve
 
 import "context"
 
+// CycleOutcome classifies how a Cycle/Resume invocation ended, delivered by
+// OnCycleEnd so hosts never reverse-engineer the outcome from the event
+// stream. The zero value is not a valid outcome — the loop always records
+// exactly one before settlement.
+type CycleOutcome int
+
+const (
+	OutcomeDone      CycleOutcome = iota + 1 // completed normally with final output
+	OutcomeSuspended                         // suspended for external input; a Resume will continue it
+	OutcomeMaxRounds                         // round budget exhausted with pending tool calls (ErrMaxRounds)
+	OutcomeError                             // unrecoverable error (EventError)
+	OutcomeAborted                           // consumer stopped early (yield returned false) before any terminal
+)
+
 // Hooks are the wiring interception points (all eight required — the
 // sensory/decision/action regulation loop). Hosts that want no behavior at
 // a point pass an explicit no-op; a nil callback fails assembly. An
@@ -19,7 +33,9 @@ import "context"
 // the whole Stimulate. AfterStimulate runs after the cycle ends — guaranteed
 // on normal completion, error path, and early consumer stop (yield=false).
 // AfterAct receives the tool execution error (err non-nil = effector failure).
-// OnCycleEnd is guaranteed to run exactly once per Cycle on all three paths.
+// OnCycleEnd is guaranteed to run exactly once per Cycle on all paths,
+// carrying the CycleOutcome classification (Done / Suspended / MaxRounds /
+// Error / Aborted).
 type Hooks struct {
 	BeforeStimulate func(ctx context.Context, p *Prompt) error
 	AfterStimulate  func(ctx context.Context, output string)
@@ -28,5 +44,5 @@ type Hooks struct {
 	BeforeAct       func(ctx context.Context, a *Action) error
 	AfterAct        func(ctx context.Context, a *Action, e *Effect, err error)
 	OnError         func(ctx context.Context, err error)
-	OnCycleEnd      func(ctx context.Context, output string)
+	OnCycleEnd      func(ctx context.Context, output string, outcome CycleOutcome)
 }

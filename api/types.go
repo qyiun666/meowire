@@ -139,6 +139,20 @@ const (
 	VerdictAsk   Verdict = nerve.VerdictAsk   // suspend and confirm externally
 )
 
+// CycleOutcome classifies how the Stimulate/Resume cycle ended, delivered by
+// Hooks.OnCycleEnd. Zero is deliberately not a valid outcome.
+type CycleOutcome = nerve.CycleOutcome
+
+// CycleOutcome constants (zero value reserved — unmarked means the consumer
+// abandoned the iterator early).
+const (
+	OutcomeDone      CycleOutcome = nerve.OutcomeDone      // cycle completed normally
+	OutcomeSuspended CycleOutcome = nerve.OutcomeSuspended // yielded Session via EventWaitInput/EventPaused
+	OutcomeMaxRounds CycleOutcome = nerve.OutcomeMaxRounds // round budget exhausted with pending tool calls
+	OutcomeError     CycleOutcome = nerve.OutcomeError     // ended through EventError
+	OutcomeAborted   CycleOutcome = nerve.OutcomeAborted   // consumer stopped consuming mid-cycle
+)
+
 // SignalKind constants.
 const (
 	KindStimulus SignalKind = nerve.KindStimulus

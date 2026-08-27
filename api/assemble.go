@@ -63,7 +63,7 @@ func FullHooks(h Hooks) *Hooks {
 		h.OnError = func(context.Context, error) {}
 	}
 	if h.OnCycleEnd == nil {
-		h.OnCycleEnd = func(context.Context, string) {}
+		h.OnCycleEnd = func(context.Context, string, nerve.CycleOutcome) {}
 	}
 	return &h
 }
