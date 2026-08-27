@@ -140,11 +140,11 @@ func TestParallelActsFeedbackOrderIsCallOrder(t *testing.T) {
 // denyOddSandbox denies calls whose name starts with "odd".
 type denyOddSandbox struct{}
 
-func (denyOddSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+func (denyOddSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
 	if len(a.Call.Name) >= 3 && a.Call.Name[:3] == "odd" {
-		return false, "odd calls are forbidden", nil
+		return VerdictDeny, "odd calls are forbidden", nil
 	}
-	return true, "", nil
+	return VerdictAllow, "", nil
 }
 
 func (denyOddSandbox) Bounds() string { return "deny-odd" }
@@ -185,10 +185,13 @@ func TestParallelActsBatchDenialIsolation(t *testing.T) {
 	var denied, allowed int
 	for _, e := range events {
 		if e.Kind == EventSandbox && e.Verdict != nil {
-			if e.Verdict.Allowed {
+			switch e.Verdict.Ruling {
+			case VerdictAllow:
 				allowed++
-			} else if e.Verdict.Reason == "odd calls are forbidden" {
-				denied++
+			case VerdictDeny:
+				if e.Verdict.Reason == "odd calls are forbidden" {
+					denied++
+				}
 			}
 		}
 	}

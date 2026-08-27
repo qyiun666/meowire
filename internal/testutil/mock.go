@@ -33,14 +33,14 @@ func (m Effector) Act(ctx context.Context, a nerve.Action) (*nerve.Effect, error
 // Sandbox is a test-only Sandbox stub: Fn drives Allow (nil = allow all);
 // Bound is returned by Bounds ("" = no boundary declared).
 type Sandbox struct {
-	Fn    func(ctx context.Context, a nerve.Action) (bool, string, error)
+	Fn    func(ctx context.Context, a nerve.Action) (nerve.Verdict, string, error)
 	Bound string
 }
 
 // Allow implements nerve.Sandbox.
-func (m Sandbox) Allow(ctx context.Context, a nerve.Action) (bool, string, error) {
+func (m Sandbox) Allow(ctx context.Context, a nerve.Action) (nerve.Verdict, string, error) {
 	if m.Fn == nil {
-		return true, "", nil
+		return nerve.VerdictAllow, "", nil
 	}
 	return m.Fn(ctx, a)
 }

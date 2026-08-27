@@ -26,15 +26,17 @@ type Event struct {
 }
 
 // SandboxVerdict is the audit record of one sandbox decision: every tool
-// execution attempt produces exactly one verdict (allowed or denied) before
-// the tool runs. Hosts persist these to build the action-level audit trail
-// (who/what/why was permitted) required by the Authority model.
+// execution attempt produces exactly one verdict before the tool runs,
+// and an Ask resolution adds a second terminal record (ask → allow/deny),
+// closing the chain. Hosts persist these to build the action-level audit
+// trail (who/what/why was permitted) required by the Authority model.
 type SandboxVerdict struct {
-	CellID  string   // owning agent id
-	Call    ToolCall // the tool action being gated
-	Allowed bool     // true = permitted to execute
-	Reason  string   // policy reason ("" when allowed)
-	Err     error    // sandbox evaluation error (nil = clean decision)
+	CellID   string   // owning agent id
+	Call     ToolCall // the tool action being gated
+	Ruling   Verdict  // tri-state decision: Deny / Allow / Ask
+	Reason   string   // policy reason ("" when allowed; the denial text when resolved-as-denied)
+	Question string   // confirmation prompt carried by an Ask ruling ("" otherwise)
+	Err      error    // sandbox evaluation error (nil = clean decision)
 }
 
 // ReplaceAudit is the audit record of one runtime port swap: every

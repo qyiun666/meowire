@@ -170,18 +170,19 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		emitError(ctx, lc, yield, fmt.Errorf("nerve: resume: invalid session"))
 		return
 	}
-	// Load the session: stimulus, plan, accumulated context and the
-	// suspension response as the pending tool's structured result (single
-	// track — rendering is the host's call), plus the accumulated output.
+	// Load the session: stimulus, plan, accumulated context, plus the
+	// accumulated output.
 	lc.Input = sess.input
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
-	// The response attaches to the pending tool's structured result — but
-	// only for a tool suspension (ask_user). A pause-suspended session has
-	// no pending tool (zero value) and resumes with an empty response:
-	// nothing is injected, the loop just continues from the suspended round.
-	if sess.pending.ID != "" {
+	// The response attaches to the pending tool — the meaning depends on the
+	// suspension flavor. Legacy ask_user: the response IS the tool's
+	// structured result (single track — rendering is the host's call). A
+	// pause-suspended session has no pending tool (zero value) and resumes
+	// with an empty response: nothing is injected, the loop just continues.
+	// Sandbox ask: the response resolves the confirmation below.
+	if sess.pending.ID != "" && !sess.sandboxAsk {
 		lc.ToolResults = append(lc.ToolResults, ToolResult{
 			ID:     sess.pending.ID,
 			Name:   sess.pending.Name,
@@ -194,13 +195,53 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	if !cyclePrelude(ctx, lc, yield) {
 		return
 	}
+
+	// Sandbox-ask flavor: resolve the tri-state confirmation. An empty
+	// response denies ("[denied: declined]"); a "[denied: ...]" payload
+	// denies with that text (the host's timeout recipe is Resume(sess,
+	// "[denied: timeout]")); any other non-empty response approves execution
+	// of the pending call through the standard admitted pipeline. Either arm
+	// emits the terminal EventSandbox that closes the ask chain. A denial
+	// feeds back in place; approval runs the call first, then the untouched
+	// remainder below. Neither arm consumes a round.
+	if sess.pending.ID != "" && sess.sandboxAsk {
+		resp := strings.TrimSpace(response)
+		ruling, fb := VerdictDeny, "[denied: declined]"
+		switch {
+		case resp == "":
+		case strings.HasPrefix(resp, "[denied"):
+			fb = resp
+		default:
+			ruling, fb = VerdictAllow, resp
+		}
+		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
+			CellID: lc.CellID, Call: sess.pending, Ruling: ruling, Reason: fb,
+		}}) {
+			return
+		}
+		if ruling == VerdictAllow {
+			lc.State = StateActing
+			if !yield(Event{Kind: EventState, State: StateActing}) {
+				return
+			}
+			waiting, ok := executeAdmitted(ctx, lc, sess.pending, sess.round, &out, slices.Clone(sess.remaining), yield)
+			if !ok || waiting != nil {
+				return
+			}
+		} else if !appendDenied(ctx, lc, sess.pending, fb, yield) {
+			return
+		}
+	}
+
 	// Finish the suspended round's remaining tool calls (same round, no new
 	// Think) before re-entering the round loop. A tool that suspends again
 	// yields a fresh EventWaitInput and ends the iterator normally.
 	if len(sess.remaining) > 0 {
-		lc.State = StateActing
-		if !yield(Event{Kind: EventState, State: StateActing}) {
-			return
+		if lc.State != StateActing { // the approval arm already announced Acting
+			lc.State = StateActing
+			if !yield(Event{Kind: EventState, State: StateActing}) {
+				return
+			}
 		}
 		waiting, ok := runToolCalls(ctx, lc, sess.remaining, sess.round, &out, yield)
 		if !ok || waiting != nil {
@@ -407,34 +448,65 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 			return nil, false
 		}
 
-		act, admitted, gOk := gateTool(ctx, lc, tc, yield)
-		if !gOk {
+		g := gateTool(ctx, lc, tc, yield)
+		if !g.ok {
 			return nil, false
 		}
-		if !admitted {
-			continue // denied by the membrane: feedback already appended and yielded
-		}
-		eff, err := actWithRetry(ctx, lc, act)
-
-		// Suspension: the tool requests external input. Snapshot the loop
-		// state into a Session, yield the wait events, and end the iterator
-		// normally — the host resumes later via Resume(sess, response).
-		// WaitInput wins over err (explicit intent); a nil effect never
-		// suspends.
-		if eff != nil && eff.WaitInput != "" {
-			w, yOk := emitWait(lc, round, out, tc, calls[i+1:], eff.WaitInput, yield)
+		switch g.ruling {
+		case VerdictAsk:
+			w, yOk := emitWait(lc, round, out, tc, calls[i+1:], g.question, true, yield)
 			if !yOk {
 				return nil, false
 			}
 			return w, true
+		case VerdictDeny:
+			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[denied: %s]", g.reason), yield) {
+				return nil, false
+			}
+			continue // denied by the membrane: feedback appended and yielded in place
 		}
-
-		// Compute feedback — structured track only: tool results no longer
-		// enter the Context text track (rendering is the host's decision;
-		// Context keeps host-injected base + sandbox denials).
-		if !toolFeedback(ctx, lc, tc, eff, err, yield) {
+		waiting, ok := executeAdmitted(ctx, lc, tc, round, out, calls[i+1:], yield)
+		if !ok {
 			return nil, false
 		}
+		if waiting != nil {
+			return waiting, true
+		}
+	}
+	return nil, true
+}
+
+// executeAdmitted runs one admitted call through the standard pipeline:
+// the BeforeAct hook (may mutate the Action — the mutated form executes),
+// actWithRetry, WaitInput suspension snapshot (tail rides the Session,
+// tool-requested flavor), then structured feedback. Shared by the serial
+// path and the Resume approval arm. Returns wait non-nil when the call
+// itself requested external input; ok=false means the loop must end.
+func executeAdmitted(ctx context.Context, lc *LoopContext, tc ToolCall, round int, out *strings.Builder, tail []ToolCall, yield func(Event) bool) (*WaitInput, bool) {
+	act := Action{CellID: lc.CellID, Call: tc}
+	if err := hookBeforeAct(ctx, lc, &act); err != nil {
+		emitError(ctx, lc, yield, err)
+		return nil, false
+	}
+	eff, err := actWithRetry(ctx, lc, act)
+
+	// Suspension: the tool requests external input. Snapshot the loop state
+	// into a Session, yield the wait events, and end the iterator normally —
+	// the host resumes later via Resume(sess, response). WaitInput wins over
+	// err (explicit intent); a nil effect never suspends.
+	if eff != nil && eff.WaitInput != "" {
+		w, yOk := emitWait(lc, round, out, tc, tail, eff.WaitInput, false, yield)
+		if !yOk {
+			return nil, false
+		}
+		return w, true
+	}
+
+	// Structured track only: tool results no longer enter the Context text
+	// track (rendering is the host's decision; Context keeps host-injected
+	// base + sandbox denials).
+	if !toolFeedback(ctx, lc, tc, eff, err, yield) {
+		return nil, false
 	}
 	return nil, true
 }
@@ -458,47 +530,57 @@ func toolFeedback(ctx context.Context, lc *LoopContext, tc ToolCall, eff *Effect
 	return yield(Event{Kind: EventToolResult, Effect: eff, ToolCall: &tc})
 }
 
+// gateResult is one call's membrane outcome: the audit record was already
+// yielded by the membrane; the caller acts on the ruling.
+type gateResult struct {
+	act      Action  // pre-built action (BeforeAct still pending)
+	ruling   Verdict // Deny / Allow / Ask
+	reason   string  // deny policy reason
+	question string  // ask confirmation prompt (Ruling == Ask)
+	ok       bool    // false = consumer stopped (yield refused); end everything
+}
+
 // gateTool runs the per-call serial gate shared by both execution paths:
-// the sandbox membrane (every decision yields an EventSandbox audit record)
-// and the BeforeAct hook. It returns the gated Action — BeforeAct may mutate
-// it, and the mutated form is what must execute — plus whether the call was
-// admitted. A denied call gets its [denied: reason] feedback appended and
-// yielded in place (admitted=false, the caller skips it). ok=false means the
-// loop must end (an error was emitted or the consumer stopped).
-func gateTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) (act Action, admitted, ok bool) {
-	act = Action{CellID: lc.CellID, Call: tc}
-	if reason, denied, sbErr := checkSandbox(ctx, lc, tc); denied {
-		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-			CellID: lc.CellID, Call: tc, Allowed: false, Reason: reason, Err: sbErr,
-		}}) {
-			return act, false, false
-		}
-		fb := fmt.Sprintf("[denied: %s]", reason)
-		lc.Context = append(lc.Context, fb)
-		if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {
-			return act, false, false
-		}
-		return act, false, true
+// it consults the sandbox membrane and yields exactly one EventSandbox
+// audit record for every ruling (Allow, Deny, Ask — a sandbox error
+// coerces to a fail-closed Deny). It reports the ruling; the callers own
+// what happens next (denial feedback, ask suspension, or BeforeAct +
+// execution), because the suspension tail differs per path.
+func gateTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Event) bool) gateResult {
+	g := gateResult{act: Action{CellID: lc.CellID, Call: tc}, ok: true}
+	ruling, reason, question, sbErr := consultSandbox(ctx, lc, tc)
+	v := &SandboxVerdict{CellID: lc.CellID, Call: tc, Ruling: ruling, Reason: reason, Question: question, Err: sbErr}
+	if !yield(Event{Kind: EventSandbox, Verdict: v}) {
+		g.ok = false
+		return g
 	}
-	if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-		CellID: lc.CellID, Call: tc, Allowed: true,
-	}}) {
-		return act, false, false
+	g.ruling, g.reason, g.question = ruling, reason, question
+	return g
+}
+
+// appendDenied records a final denial: the [denied: ...] text goes to the
+// Context track (verdicts, not tool results) and is yielded as structured
+// feedback in place. Shared by both execution paths and the Resume denial
+// arm. Returns false when the consumer stopped.
+func appendDenied(ctx context.Context, lc *LoopContext, tc ToolCall, fb string, yield func(Event) bool) bool {
+	lc.Context = append(lc.Context, fb)
+	if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {
+		return false
 	}
-	if err := hookBeforeAct(ctx, lc, &act); err != nil {
-		emitError(ctx, lc, yield, err)
-		return act, false, false
-	}
-	return act, true, true
+	return true
 }
 
 // emitWait suspends the loop for external input: snapshot into a Session,
 // set StateWaiting, yield the two wait events. Shared by the serial and the
 // parallel paths — the suspending call gets no AfterAct/EventToolResult (its
-// result arrives via Resume). Returns false when the consumer stopped.
-func emitWait(lc *LoopContext, round int, out *strings.Builder, pending ToolCall, remaining []ToolCall, question string, yield func(Event) bool) (*WaitInput, bool) {
+// result arrives via Resume). sandboxAsk flavors the Session as a
+// sandbox-ask suspension (resolved through the tri-state protocol on
+// Resume) rather than a tool-requested wait. Returns false when the
+// consumer stopped.
+func emitWait(lc *LoopContext, round int, out *strings.Builder, pending ToolCall, remaining []ToolCall, question string, sandboxAsk bool, yield func(Event) bool) (*WaitInput, bool) {
 	w := snapshotWait(lc, round, out, pending, remaining)
 	w.Question = question
+	w.Session.sandboxAsk = sandboxAsk
 	lc.State = StateWaiting
 	if !yield(Event{Kind: EventState, State: StateWaiting}) {
 		return w, false
@@ -708,18 +790,20 @@ func emitError(ctx context.Context, lc *LoopContext, yield func(Event) bool, err
 	}
 }
 
-// checkSandbox evaluates the membrane policy for one tool call; returns the
-// policy reason, whether the action is denied, and the evaluation error
-// (nil = clean decision). The membrane is required — every decision is
-// audited via EventSandbox.
-func checkSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (reason string, denied bool, sbErr error) {
+// consultSandbox evaluates the membrane policy for one tool call and maps
+// it onto the tri-state ruling: a sandbox evaluation error coerces to a
+// fail-closed Deny (reason carries the error text, sbErr preserves the raw
+// failure for the audit record). The question is non-empty only for an Ask
+// ruling — the host's second return value doubles as the confirmation
+// prompt then.
+func consultSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (ruling Verdict, reason string, question string, sbErr error) {
 	act := Action{CellID: lc.CellID, Call: tc}
-	allowed, reason, err := lc.Sandbox.Allow(ctx, act)
+	ruling, reason, err := lc.Sandbox.Allow(ctx, act)
 	if err != nil {
-		return fmt.Sprintf("sandbox error: %v", err), true, err
+		return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), "", err
 	}
-	if !allowed {
-		return reason, true, nil
+	if ruling == VerdictAsk {
+		return VerdictAsk, "", reason, nil
 	}
-	return "", false, nil
+	return ruling, reason, "", nil
 }

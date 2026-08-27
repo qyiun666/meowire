@@ -9,6 +9,7 @@ package nerve
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -50,21 +51,52 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 	}
 
 	// Phase 1: serial gating — the shared membrane gate per call (sandbox
-	// audit + BeforeAct). Each batch entry keeps both identities: the
+	// audit + ruling). Each admitted entry keeps both identities: the
 	// original call (feedback/snapshot identity, same as the serial path)
-	// and the gated Action (BeforeAct mutations included — what executes).
+	// and the gated Action (execution payload; BeforeAct mutations apply at
+	// execution time). A denied call gets its [denied: reason] feedback in
+	// place and is skipped — it never affects its siblings. The FIRST Ask
+	// ruling stops everything: no further gating, no phase 2. Already-
+	// admitted-but-unexecuted siblings and the not-yet-gated tail are all
+	// still pending — they ride the snapshot so Resume replays them after
+	// resolution (finalized denials stay out).
 	type batchEntry struct {
 		call ToolCall // announced/original call — feedback identity
 		act  Action   // gated action — execution payload
 	}
 	batch := make([]batchEntry, 0, len(calls))
-	for _, tc := range calls {
-		act, admitted, gOk := gateTool(ctx, lc, tc, yield)
-		if !gOk {
+	denied := make([]bool, len(calls))
+	for i, tc := range calls {
+		g := gateTool(ctx, lc, tc, yield)
+		if !g.ok {
 			return nil, false
 		}
-		if admitted {
-			batch = append(batch, batchEntry{call: tc, act: act})
+		switch g.ruling {
+		case VerdictAsk:
+			tail := make([]ToolCall, 0, len(calls)-1)
+			for j, other := range calls {
+				if j != i && !denied[j] {
+					tail = append(tail, other)
+				}
+			}
+			w, yOk := emitWait(lc, round, out, tc, tail, g.question, true, yield)
+			if !yOk {
+				return nil, false
+			}
+			return w, true
+		case VerdictDeny:
+			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[denied: %s]", g.reason), yield) {
+				return nil, false
+			}
+			denied[i] = true
+		default:
+			// BeforeAct fires here (serial, outside the concurrent phase) so
+			// its mutations are part of what phase 2 executes.
+			if err := hookBeforeAct(ctx, lc, &g.act); err != nil {
+				emitError(ctx, lc, yield, err)
+				return nil, false
+			}
+			batch = append(batch, batchEntry{call: tc, act: g.act})
 		}
 	}
 
@@ -104,7 +136,7 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 	}
 	if suspendAt >= 0 {
 		// remaining is nil: the batch fully executed, Resume must not replay.
-		w, yOk := emitWait(lc, round, out, batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, yield)
+		w, yOk := emitWait(lc, round, out, batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, false, yield)
 		if !yOk {
 			return nil, false
 		}

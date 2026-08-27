@@ -6,6 +6,7 @@ package nerve
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -75,7 +76,9 @@ func TestUnmarshalSessionVersionMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	tampered := strings.Replace(string(b), `"version":1`, `"version":2`, 1)
+	tampered := strings.Replace(string(b),
+		fmt.Sprintf(`"version":%d`, sessionVersion),
+		fmt.Sprintf(`"version":%d`, sessionVersion+1), 1)
 	if _, err := UnmarshalSession([]byte(tampered)); err == nil {
 		t.Fatal("UnmarshalSession must reject a version mismatch")
 	}
@@ -84,7 +87,8 @@ func TestUnmarshalSessionVersionMismatch(t *testing.T) {
 // TestUnmarshalSessionInvalidPayload verifies a payload with round < 1 is
 // rejected even when the version matches.
 func TestUnmarshalSessionInvalidPayload(t *testing.T) {
-	if _, err := UnmarshalSession([]byte(`{"version":1,"round":0}`)); err == nil {
+	payload := fmt.Sprintf(`{"version":%d,"round":0}`, sessionVersion)
+	if _, err := UnmarshalSession([]byte(payload)); err == nil {
 		t.Fatal("UnmarshalSession must reject a round<1 payload")
 	}
 }

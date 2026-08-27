@@ -245,11 +245,11 @@ type denyToolSandbox struct {
 	name string
 }
 
-func (d denyToolSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+func (d denyToolSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
 	if a.Call.Name == d.name {
-		return false, "not allowed", nil
+		return VerdictDeny, "not allowed", nil
 	}
-	return true, "", nil
+	return VerdictAllow, "", nil
 }
 
 func (d denyToolSandbox) Bounds() string { return "test" }

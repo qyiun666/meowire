@@ -133,12 +133,13 @@ type Session struct {
 	pending     ToolCall     // the tool that requested input (zero value for pause suspensions)
 	remaining   []ToolCall   // tool calls after the suspending one
 	toolResults []ToolResult // accumulated structured tool feedback at suspension
+	sandboxAsk  bool         // sandbox-ask flavor: the pending call awaits a tri-state confirmation, not a tool result
 }
 
 // sessionVersion is the Session serialization format version. Bump it on
 // any incompatible change to the marshaled shape; UnmarshalSession rejects
 // mismatched versions so a stale or future handle is never replayed.
-const sessionVersion = 1
+const sessionVersion = 2
 
 // sessionJSON is the wire shape of a Session. Session fields stay
 // unexported (hosts only save the handle and pass it back — no inspection,
@@ -153,6 +154,7 @@ type sessionJSON struct {
 	Pending     ToolCall     `json:"pending"`
 	Remaining   []ToolCall   `json:"remaining"`
 	ToolResults []ToolResult `json:"toolResults"`
+	SandboxAsk  bool         `json:"sandboxAsk"` // v1.3.x: sandbox-ask suspension flavor
 }
 
 // Marshal serializes the session to its wire shape (JSON) — the persistence
@@ -174,6 +176,7 @@ func (s Session) Marshal() ([]byte, error) {
 		Pending:     s.pending,
 		Remaining:   s.remaining,
 		ToolResults: s.toolResults,
+		SandboxAsk:  s.sandboxAsk,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nerve.Session.Marshal: %w", err)
@@ -201,6 +204,7 @@ func UnmarshalSession(data []byte) (Session, error) {
 		pending:     sj.Pending,
 		remaining:   sj.Remaining,
 		toolResults: sj.ToolResults,
+		sandboxAsk:  sj.SandboxAsk,
 	}
 	if !s.valid() {
 		return Session{}, fmt.Errorf("nerve.UnmarshalSession: invalid session payload (round < 1)")

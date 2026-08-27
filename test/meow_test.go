@@ -254,9 +254,9 @@ func TestFullOrgansWiring(t *testing.T) {
 		}},
 		Closer: &testutil.Closer{},
 		Hooks:  fullHooks(),
-		Sandbox: testutil.Sandbox{Fn: func(ctx context.Context, a meowire.Action) (bool, string, error) {
+		Sandbox: testutil.Sandbox{Fn: func(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
 			sandboxCalled = true
-			return true, "", nil
+			return meowire.VerdictAllow, "", nil
 		}},
 		Budget: &meowire.ContextBudget{
 			MaxTokens: 10,

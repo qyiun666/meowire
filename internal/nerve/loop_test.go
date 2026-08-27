@@ -50,8 +50,8 @@ func testHooks() *Hooks {
 // testSandbox allows every action.
 type testSandbox struct{}
 
-func (testSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
-	return true, "", nil
+func (testSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
+	return VerdictAllow, "", nil
 }
 
 func (testSandbox) Bounds() string { return "test" }
@@ -365,8 +365,8 @@ func TestDecisionLoopSandboxDeny(t *testing.T) {
 // denySandbox always denies.
 type denySandbox struct{}
 
-func (denySandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
-	return false, "not allowed", nil
+func (denySandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
+	return VerdictDeny, "not allowed", nil
 }
 
 func (denySandbox) Bounds() string { return "deny-all" }
@@ -374,11 +374,11 @@ func (denySandbox) Bounds() string { return "deny-all" }
 // auditSandbox denies "rm" with a policy reason and allows everything else.
 type auditSandbox struct{}
 
-func (auditSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
+func (auditSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
 	if a.Call.Name == "rm" {
-		return false, "destructive", nil
+		return VerdictDeny, "destructive", nil
 	}
-	return true, "", nil
+	return VerdictAllow, "", nil
 }
 
 func (auditSandbox) Bounds() string { return "audit-all" }
@@ -417,7 +417,7 @@ func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
 		t.Fatalf("sandbox verdicts = %d, want 1", len(verdicts))
 	}
 	v := verdicts[0]
-	if !v.Allowed || v.Reason != "" || v.Err != nil {
+	if v.Ruling != VerdictAllow || v.Reason != "" || v.Err != nil {
 		t.Fatalf("verdict = %+v, want allowed with no reason/error", v)
 	}
 	if v.CellID != "c1" || v.Call.Name != "calc" {
@@ -457,7 +457,7 @@ func TestDecisionLoopSandboxAuditDeny(t *testing.T) {
 			if v == nil {
 				t.Fatal("EventSandbox without a verdict")
 			}
-			if v.Allowed || v.Reason != "destructive" || v.Call.Name != "rm" {
+			if v.Ruling != VerdictDeny || v.Reason != "destructive" || v.Call.Name != "rm" {
 				t.Fatalf("verdict = %+v, want denied with reason 'destructive' for rm", v)
 			}
 			return
@@ -1547,8 +1547,8 @@ func TestDecisionLoopBeforeStimulateSeesBounds(t *testing.T) {
 // boundsSandbox permits everything and declares a fixed boundary.
 type boundsSandbox struct{}
 
-func (boundsSandbox) Allow(ctx context.Context, a Action) (bool, string, error) {
-	return true, "", nil
+func (boundsSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
+	return VerdictAllow, "", nil
 }
 
 func (boundsSandbox) Bounds() string { return "only /workspace" }

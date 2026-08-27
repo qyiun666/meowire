@@ -37,6 +37,7 @@ type (
 	Action     = nerve.Action
 	Effect     = nerve.Effect
 	Usage      = nerve.Usage
+	Verdict    = nerve.Verdict // tri-state sandbox ruling (Deny / Allow / Ask)
 )
 
 // Events yielded by the Stimulate iterator.
@@ -129,6 +130,13 @@ const (
 	EventPaused     EventKind = nerve.EventPaused
 	EventReplace    EventKind = nerve.EventReplace
 	EventConfig     EventKind = nerve.EventConfig
+)
+
+// Sandbox ruling constants (tri-state; the zero value is Deny — fail-closed).
+const (
+	VerdictDeny  Verdict = nerve.VerdictDeny  // execution refused
+	VerdictAllow Verdict = nerve.VerdictAllow // permitted: proceed to execution
+	VerdictAsk   Verdict = nerve.VerdictAsk   // suspend and confirm externally
 )
 
 // SignalKind constants.
