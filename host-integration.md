@@ -45,7 +45,7 @@ type Thinker interface {
 | `Identity` | 身份描述文本（宿主自拼，如“你叫 meow，角色 assistant，语气温暖”） | 宿主，构造时固定 |
 | `Methods` | 内置能力描述（基因投影，仅描述不执行；`MethodSpec{Name, Desc, Input, Output}`） | 宿主，构造时固定 |
 | `Tools` | 可用工具清单（function schema） | 宿主，构造时固定 |
-| `Context` | 上下文切片：宿主常驻基底 + 框架追加的 sandbox 裁决（`[denied: ...]`）；工具结果不再进文本轨 | 宿主基底 + 框架追加 |
+| `Context` | 上下文切片：宿主常驻基底 + 框架追加的 sandbox 裁决（`[sandbox-denied: ...]`，产出即最终形式）；工具结果不再进文本轨 | 宿主基底 + 框架追加 |
 | `ToolResults` | 结构化工具结果（`ToolResult{ID, Name, Result, Err}`）：循环内累积，ID 为 LLM 返回的 `call_xxx`，Result/Err 为截断后的原始输出；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记等）归宿主 Thinker | 框架，循环内追加 |
 | `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
@@ -65,6 +65,25 @@ type Thinker interface {
 - 流式输出在 Thinker 内部自行消费（如推给 WebSocket channel）；事件流只承载整段 Text
 - **必须监控 `ctx.Done`**（长请求可被框架取消）
 - 同一 Agent 并发 Stimulate 时 Thinker 必须并发安全
+
+> **不想自己写 Thinker？** 本仓内置参考实现 `github.com/qyiun666/meowire/openai`
+> （零三方依赖、OpenAI 兼容、chat/responses 双 wire 自动探测）：
+>
+> ```go
+> import meowopenai "github.com/qyiun666/meowire/openai"
+>
+> thinker, err := meowopenai.New(meowopenai.Config{
+>     BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
+>     Sampling: meowopenai.Sampling{Temperature: 0.7, MaxTokens: 8192},
+> },
+>     meowopenai.WithStreamGate(func() bool { return uiSubscribed() }),  // 每轮判定流式
+>     meowopenai.WithChunkSink(func(ctx context.Context, c meowopenai.Chunk) { /* 推 UI */ }),
+> )
+> ```
+>
+> Prompt 渲染（槽位文案、工具 schema、采样下发）与传输（SSE/重试/超时）全部由参考
+> 实现承担，宿主填 Prompt 即用。端口契约不变：需要自定义提示词渲染或传输的宿主
+> 仍自行实现 `Thinker`（§2.1 其余内容即其契约）。
 
 ### 2.2 Effector —— 工具执行器（手）
 
@@ -153,8 +172,8 @@ type Sandbox interface {
 }
 ```
 
-- 三态裁决（`Verdict`）：`VerdictAllow` 放行执行；`VerdictDeny`（零值，fail-closed）时框架生成 `[denied: reason]` 反馈进 Context，**循环继续**（不终止）；`VerdictAsk` **挂起征询**——reason 即展示给外部的问题文本，循环按 §6.4 的挂起-恢复协议挂起，宿主解决后批准才执行
-- `Allow` 返回 err 时按 `[sandbox error: ...]` 拒绝（fail-closed）
+- 三态裁决（`Verdict`）：`VerdictAllow` 放行执行；`VerdictDeny`（零值，fail-closed）时框架生成 `[sandbox-denied: reason]` 反馈进 Context，**循环继续**（不终止）；`VerdictAsk` **挂起征询**——reason 即展示给外部的问题文本，循环按 §6.4 的挂起-恢复协议挂起，宿主解决后批准才执行
+- `Allow` 返回 err 时按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`（审计记录 Reason 保留 `sandbox error: ...` 内层形态）
 - `Bounds()` 返回执行边界描述，每次 Stimulate 快照一次、经 `Prompt.Bounds` 透传给 LLM（让大脑感知限制，如"只能访问 /workspace 下文件"）
 - 宿主实现安全策略：工具白名单/黑名单、人工确认（返回 `VerdictAsk` 即可，挂起与恢复由框架表达）、敏感操作拦截
 
@@ -358,7 +377,7 @@ EventState(error) → EventError(Err)
 |------|---------|------|
 | `EventText` | `Text` | LLM 整段文本输出 |
 | `EventToolCall` | `ToolCall *ToolCall` | LLM 决定调用的工具 |
-| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[denied: reason]"`）；`ToolCall` 回显调用，用于 ID 关联 |
+| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | 工具执行结果（含被 Sandbox 拒绝：`Effect.Err = "[sandbox-denied: reason]"`）；`ToolCall` 回显调用，用于 ID 关联 |
 | `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox 决策审计记录（裁决 Ruling：allow/deny/**ask**、工具、策略原因、征询问题、评估错误）；ask 链以终结的第二条记录闭合；未配置 Sandbox 时不产出 |
 | `EventState` | `State LoopState` | 循环状态（idle/thinking/acting/paused/**waiting**/done/error） |
 | `EventDone` | `Output` | 整轮累计文本输出 |
@@ -426,7 +445,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **持久化（v1.3.2）**：`sess.Marshal()` 产出 JSON 字节（含版本号），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本不匹配拒绝还原（防止旧/新格式误重放）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
 - **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行
-- **响应语法（ask_user 与 Sandbox 征询统一）**：作为挂起调用的结构化结果写入 `ToolResults`（`ID` 为该调用的 `call_xxx`），进入恢复后的第一次 Think。三条规则对两类挂起一致生效：**空串** = 拒绝（注入 `[denied: declined]`）；**`[denied:` 前缀** = 以该文本拒绝（超时配方如上 `[denied: timeout]`）；**其余任何响应** = 批准——ask_user 下作为工具结果注入；Sandbox 征询下放行 pending 调用执行。超时由宿主控制（默认拒绝）
+- **响应语法（Sandbox 征询按三态裁决，ask_user 原样注入）**：响应写入恢复后的 `ToolResults`（`ID` 为该调用的 `call_xxx`），进入恢复后的第一次 Think。**Sandbox 征询**三态裁决：**空串** = 拒绝（反馈 `[sandbox-denied: declined]`）；**`[denied:` 前缀** = 以该文本拒绝（超时配方如上 `[denied: timeout]`，反馈落库为 `[sandbox-denied: ...]` 规范形式）；**其余任何响应** = 批准，放行 pending 调用执行（不再过门禁）。**ask_user** 的响应原样作为挂起工具的结构化结果注入（空串即空结果；拒绝语义由宿主在响应文本中表达，超时配方 `[denied: timeout]` 作为工具反馈被模型读到）。超时由宿主控制（默认拒绝）
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
 - **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠

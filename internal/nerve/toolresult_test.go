@@ -70,8 +70,8 @@ func TestDecisionLoopToolResultsAccumulate(t *testing.T) {
 }
 
 // TestDecisionLoopToolResultsDeniedExcluded verifies a sandbox denial stays
-// on the text track only ([denied: ...] in Context) and never appears in
-// ToolResults — a verdict, not a tool result.
+// on the text track only ([sandbox-denied: ...] in Context) and never
+// appears in ToolResults — a verdict, not a tool result.
 func TestDecisionLoopToolResultsDeniedExcluded(t *testing.T) {
 	var seen []ToolResult
 	lc := &LoopContext{
@@ -102,7 +102,7 @@ func TestDecisionLoopToolResultsDeniedExcluded(t *testing.T) {
 	}
 	found := false
 	for _, c := range lc.Context {
-		if strings.HasPrefix(c, "[denied:") {
+		if strings.HasPrefix(c, "[sandbox-denied:") {
 			found = true
 		}
 	}
@@ -121,8 +121,8 @@ func TestDecisionLoopToolResultsDeniedExcluded(t *testing.T) {
 	if denied == nil {
 		t.Fatal("denied EventToolResult must echo the ToolCall (ID association)")
 	}
-	if denied.Effect == nil || !strings.HasPrefix(denied.Effect.Err, "[denied:") {
-		t.Fatalf("denied EventToolResult Effect = %+v, want [denied: ...] Err", denied.Effect)
+	if denied.Effect == nil || !strings.HasPrefix(denied.Effect.Err, "[sandbox-denied:") {
+		t.Fatalf("denied EventToolResult Effect = %+v, want [sandbox-denied: ...] Err", denied.Effect)
 	}
 	if denied.ToolCall.ID != "call_001" {
 		t.Fatalf("denied EventToolResult ToolCall.ID = %q, want call_001", denied.ToolCall.ID)

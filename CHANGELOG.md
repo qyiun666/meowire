@@ -5,6 +5,39 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Built-in reference Thinker (`openai` package)** —
+  `github.com/qyiun666/meowire/openai` ships the reference `Thinker`
+  implementation: a zero-dependency OpenAI-compatible client covering both
+  OpenAI-family wires (Chat Completions + Responses API, detected via
+  `WireFromURL` or pinned by `Config.Wire`), with hand-rolled transport
+  (120s timeout, 3 transient-failure retries honoring `Retry-After`;
+  streaming bounded by time-to-headers so live SSE bodies are never
+  body-capped), SSE decoding for both wires (chat `[DONE]`/usage chunks/
+  deepseek-reasoner reasoning deltas; responses semantic events including
+  the done-payload arguments override and abnormal-termination errors that
+  carry the usage seen so far), and
+  the canonical Prompt rendering for both request shapes (slot texts,
+  `[tool-result name]` feedback lines, tool schemas, sampling with
+  zero-not-sent semantics). Streaming flows through `WithStreamGate` +
+  `WithChunkSink` (text/reasoning chunks; a blocking sink is backpressure,
+  ctx cancellation short-circuits it); `WithNoTools` is the lightweight
+  plain-conversation flavor. The `Thinker` port itself is unchanged — hosts
+  that need custom prompting or transports keep implementing it themselves.
+
+### Changed
+
+- **Sandbox denial feedback renamed at the source** — the framework-produced
+  denial feedback text (Context track + the denial's `Effect.Err`) is now
+  `[sandbox-denied: reason]` (was `[denied: reason]`), emitted in final form
+  by the loop itself; renderers no longer pattern-rewrite it. The `[denied:`
+  prefix survives in exactly one role: the Resume response grammar's input
+  encoding (the deny arm, including the `[denied: timeout]` recipe) — input
+  protocol and output feedback are now deliberately distinct formats.
+
 ## [1.3.6] - 2026-08-27
 
 ### Added

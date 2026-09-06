@@ -322,7 +322,7 @@ func TestDecisionLoopToolErrorBackfill(t *testing.T) {
 	}
 }
 
-// TestDecisionLoopSandboxDeny: Sandbox returns denied → feedback contains "[denied: ...]".
+// TestDecisionLoopSandboxDeny: Sandbox returns denied → feedback contains "[sandbox-denied: ...]".
 func TestDecisionLoopSandboxDeny(t *testing.T) {
 	var capturedCtx []string
 	calls := 0
@@ -352,13 +352,13 @@ func TestDecisionLoopSandboxDeny(t *testing.T) {
 
 	found := false
 	for _, c := range capturedCtx {
-		if strings.Contains(c, "[denied:") {
+		if strings.Contains(c, "[sandbox-denied:") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("context = %v, want entry containing '[denied:'", capturedCtx)
+		t.Fatalf("context = %v, want entry containing '[sandbox-denied:'", capturedCtx)
 	}
 }
 

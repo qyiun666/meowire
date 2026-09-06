@@ -147,15 +147,16 @@ func TestSandboxAskSuspendsLoop(t *testing.T) {
 
 // TestSandboxAskResumeDeny verifies the denial arm: empty response (or a
 // "[denied: ...]" payload — the host's timeout recipe) resolves the ask as
-// a denial, the pending call gets a [denied: ...] structured feedback, the
+// a denial, the pending call gets a [sandbox-denied: ...] structured
+// feedback (input protocol and output feedback are distinct formats), the
 // tool never executes, and the loop digests to Done on the same round quota.
 func TestSandboxAskResumeDeny(t *testing.T) {
 	cases := []struct {
 		resp   string
 		wantFb string
 	}{
-		{"", "[denied: declined]"},
-		{"[denied: timeout]", "[denied: timeout]"},
+		{"", "[sandbox-denied: declined]"},
+		{"[denied: timeout]", "[sandbox-denied: timeout]"},
 	}
 	for _, c := range cases {
 		calls := []ToolCall{{ID: "t1", Name: "alpha"}, {ID: "t2", Name: "dangerous"}}

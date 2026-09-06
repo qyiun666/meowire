@@ -28,7 +28,7 @@ func kinds(events []meowire.Event) []meowire.EventKind {
 // TestAgentPauseResumeMidLoop verifies Pause() takes effect at the next gap
 // point (before a tool execution): the loop yields StatePaused + EventPaused
 // with a Session and ends the iterator; Resume(sess, "") continues the loop
-// (unified suspension-resume path, v1.4.0).
+// (unified suspension-resume path, v1.3.2).
 func TestAgentPauseResumeMidLoop(t *testing.T) {
 	calls := 0
 	a, err := testNew(testOrgans(meowire.Organs{

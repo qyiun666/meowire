@@ -54,6 +54,8 @@ myhost/
 
 用标准库 `net/http` 实现，零第三方依赖（宿主想用官方 SDK 也可以，接口一样）。任何 OpenAI 兼容端点都可用：`https://api.openai.com/v1`、DeepSeek、Ollama（`http://localhost:11434/v1`）、Qwen 等，换 `baseURL` + `apiKey` 即可。
 
+> 生产用途可省掉本节：内置参考 Thinker（`openai.New(Config) → api.Thinker`，双 wire + 重试 + 流式）开箱即用——手写实现保留在此用于展示端口形状。
+
 ```go
 // llm.go
 package main
@@ -390,9 +392,9 @@ func trimContext(ctx []string, max int) []string {
 ```
 
 **细节：**
-- `Allow` 返回 `(VerdictAllow, _, nil)` 放行执行；返回 `(VerdictDeny, reason, nil)` → 框架生成 `[denied: reason]` 反馈，**循环继续**——阻力是反馈不是失败（Deny 是零值，fail-closed）
+- `Allow` 返回 `(VerdictAllow, _, nil)` 放行执行；返回 `(VerdictDeny, reason, nil)` → 框架生成 `[sandbox-denied: reason]` 反馈，**循环继续**——阻力是反馈不是失败（Deny 是零值，fail-closed）
 - `Allow` 返回 `(VerdictAsk, 问题, nil)` → **挂起征询**：走与 ask_user 相同的挂起-恢复协议，批准后才执行且不再重新过门禁
-- `Allow` 返回 error → 按 `[sandbox error: ...]` 拒绝
+- `Allow` 返回 error → 按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`
 - `Bounds()` 每次 `Stimulate` 开始时快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
 - 裁剪器不想裁时返回入参原切片即可；`ContextBudget{MaxTokens: 0}` 也是合法装配（配了 Trimmer）
 

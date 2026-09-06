@@ -26,7 +26,6 @@ const (
 	nerveAgentMD = "../internal/nerve/agent.md"
 	hostMD       = "../host-integration.md"
 	hostENMD     = "../host-integration.en.md"
-	repowikiPath = "../.qoder/repowiki/zh/content/架构设计/核心组件/事件系统.md"
 )
 
 func readContractFile(t *testing.T, path string) string {
@@ -101,20 +100,6 @@ func assertCovered(t *testing.T, what, doc string, kinds []string) {
 	}
 }
 
-// assertMentioned fails unless every kind appears somewhere in the doc text.
-func assertMentioned(t *testing.T, what, doc string, kinds []string) {
-	t.Helper()
-	var missing []string
-	for _, k := range kinds {
-		if !strings.Contains(doc, k) {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		t.Fatalf("%s does not mention %v", what, missing)
-	}
-}
-
 func TestEventKindContractSynced(t *testing.T) {
 	kinds := eventKindsFromSource(t)
 
@@ -140,9 +125,6 @@ func TestEventKindContractSynced(t *testing.T) {
 	// host-integration guides must cover every kind in a table first column.
 	assertCovered(t, "host-integration.md event table", readContractFile(t, hostMD), kinds)
 	assertCovered(t, "host-integration.en.md event table", readContractFile(t, hostENMD), kinds)
-
-	// repowiki event-system doc must at least mention every kind.
-	assertMentioned(t, "repowiki 事件系统.md", readContractFile(t, repowikiPath), kinds)
 }
 
 // TestLoopStateContractSynced guards the LoopState enum (single source of

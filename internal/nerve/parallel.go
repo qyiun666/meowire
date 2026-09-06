@@ -19,7 +19,7 @@ import (
 //  1. Serial gating — announce every call (EventToolCall in call order),
 //     one pause gap point for the whole batch, then per-call gateTool
 //     (sandbox membrane audit + BeforeAct, shared with the serial path).
-//     A denied call gets its [denied: reason] feedback in place and is
+//     A denied call gets its [sandbox-denied: reason] feedback in place and is
 //     skipped — it never affects its siblings.
 //  2. Parallel execution — one goroutine per admitted call runs
 //     actWithRetry (timeout/retry included); results land by call index.
@@ -54,7 +54,7 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 	// audit + ruling). Each admitted entry keeps both identities: the
 	// original call (feedback/snapshot identity, same as the serial path)
 	// and the gated Action (execution payload; BeforeAct mutations apply at
-	// execution time). A denied call gets its [denied: reason] feedback in
+	// execution time). A denied call gets its [sandbox-denied: reason] feedback in
 	// place and is skipped — it never affects its siblings. The FIRST Ask
 	// ruling stops everything: no further gating, no phase 2. Already-
 	// admitted-but-unexecuted siblings and the not-yet-gated tail are all
@@ -85,7 +85,7 @@ func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall
 			}
 			return w, true
 		case VerdictDeny:
-			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[denied: %s]", g.reason), yield) {
+			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason), yield) {
 				return nil, false
 			}
 			denied[i] = true

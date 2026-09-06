@@ -205,12 +205,12 @@ func TestParallelActsBatchDenialIsolation(t *testing.T) {
 	// Denial went to the Context text track, sibling result to ToolResults.
 	foundDenied := false
 	for _, c := range capturedCtx {
-		if c == "[denied: odd calls are forbidden]" {
+		if c == "[sandbox-denied: odd calls are forbidden]" {
 			foundDenied = true
 		}
 	}
 	if !foundDenied {
-		t.Fatalf("context = %v, want '[denied: odd calls are forbidden]'", capturedCtx)
+		t.Fatalf("context = %v, want '[sandbox-denied: odd calls are forbidden]'", capturedCtx)
 	}
 	last := events[len(events)-1]
 	if last.Kind != EventDone {

@@ -194,8 +194,8 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
 	// The response attaches to the pending tool — the meaning depends on the
-	// suspension flavor. Legacy ask_user: the response IS the tool's
-	// structured result (single track — rendering is the host's call). A
+	// suspension flavor. ask_user: the response IS the tool's structured
+	// result (single track — rendering is the host's call). A
 	// pause-suspended session has no pending tool (zero value) and resumes
 	// with an empty response: nothing is injected, the loop just continues.
 	// Sandbox ask: the response resolves the confirmation below.
@@ -213,21 +213,24 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		return
 	}
 
-	// Sandbox-ask flavor: resolve the tri-state confirmation. An empty
-	// response denies ("[denied: declined]"); a "[denied: ...]" payload
-	// denies with that text (the host's timeout recipe is Resume(sess,
-	// "[denied: timeout]")); any other non-empty response approves execution
-	// of the pending call through the standard admitted pipeline. Either arm
-	// emits the terminal EventSandbox that closes the ask chain. A denial
-	// feeds back in place; approval runs the call first, then the untouched
-	// remainder below. Neither arm consumes a round.
+	// Sandbox-ask flavor: resolve the tri-state confirmation. The response
+	// grammar is the input protocol: an empty response denies, a "[denied:
+	// ...]" payload denies with that text (the host's timeout recipe is
+	// Resume(sess, "[denied: timeout]")), any other non-empty response
+	// approves execution of the pending call through the standard admitted
+	// pipeline. The denial feedback lands in its canonical output form
+	// ("[sandbox-denied: ...]") — the input encoding and the feedback text
+	// are deliberately distinct formats. Either arm emits the terminal
+	// EventSandbox that closes the ask chain. A denial feeds back in place;
+	// approval runs the call first, then the untouched remainder below.
+	// Neither arm consumes a round.
 	if sess.pending.ID != "" && sess.sandboxAsk {
 		resp := strings.TrimSpace(response)
-		ruling, fb := VerdictDeny, "[denied: declined]"
+		ruling, fb := VerdictDeny, "[sandbox-denied: declined]"
 		switch {
 		case resp == "":
-		case strings.HasPrefix(resp, "[denied"):
-			fb = resp
+		case strings.HasPrefix(resp, "[denied:"):
+			fb = "[sandbox-denied" + strings.TrimPrefix(resp, "[denied")
 		default:
 			ruling, fb = VerdictAllow, resp
 		}
@@ -481,7 +484,7 @@ func runToolCalls(ctx context.Context, lc *LoopContext, calls []ToolCall, round 
 			}
 			return w, true
 		case VerdictDeny:
-			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[denied: %s]", g.reason), yield) {
+			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason), yield) {
 				return nil, false
 			}
 			continue // denied by the membrane: feedback appended and yielded in place
@@ -579,10 +582,10 @@ func gateTool(ctx context.Context, lc *LoopContext, tc ToolCall, yield func(Even
 	return g
 }
 
-// appendDenied records a final denial: the [denied: ...] text goes to the
-// Context track (verdicts, not tool results) and is yielded as structured
-// feedback in place. Shared by both execution paths and the Resume denial
-// arm. Returns false when the consumer stopped.
+// appendDenied records a final denial: the [sandbox-denied: ...] text goes
+// to the Context track (verdicts, not tool results) and is yielded as
+// structured feedback in place. Shared by both execution paths and the
+// Resume denial arm. Returns false when the consumer stopped.
 func appendDenied(ctx context.Context, lc *LoopContext, tc ToolCall, fb string, yield func(Event) bool) bool {
 	lc.Context = append(lc.Context, fb)
 	if !yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc}) {

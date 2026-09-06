@@ -52,7 +52,7 @@ type Thinker interface {
 | `Identity` | Identity description text (host composed, e.g. "You are meow, role assistant, warm tone") | Host, fixed at construction |
 | `Methods` | Built-in capability description (gene projection, describes only; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
 | `Tools` | Available tool list (function schemas) | Host, fixed at construction |
-| `Context` | Context slice: host base + framework-appended sandbox denials (`[denied: ...]`); tool results no longer enter the text track | Host base + framework appends |
+| `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results no longer enter the text track | Host base + framework appends |
 | `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
@@ -73,6 +73,27 @@ type Thinker interface {
   the event stream only carries whole-segment Text
 - **Must respect `ctx.Done`** (long requests may be cancelled by the framework)
 - Must be concurrency-safe if the same Agent is stimulated concurrently
+
+> **Don't want to write a Thinker?** The repo ships a reference implementation at
+> `github.com/qyiun666/meowire/openai` (zero third-party dependencies,
+> OpenAI-compatible, chat/responses dual wire with automatic detection):
+>
+> ```go
+> import meowopenai "github.com/qyiun666/meowire/openai"
+>
+> thinker, err := meowopenai.New(meowopenai.Config{
+>     BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
+>     Sampling: meowopenai.Sampling{Temperature: 0.7, MaxTokens: 8192},
+> },
+>     meowopenai.WithStreamGate(func() bool { return uiSubscribed() }), // re-evaluated per Think
+>     meowopenai.WithChunkSink(func(ctx context.Context, c meowopenai.Chunk) { /* push to UI */ }),
+> )
+> ```
+>
+> Prompt rendering (slot texts, tool schemas, sampling) and transport (SSE /
+> retries / timeouts) are fully covered — fill the Prompt and go. The port
+> contract is unchanged: hosts that need custom prompting or transports keep
+> implementing `Thinker` themselves (the rest of §2.1 is that contract).
 
 ### 2.2 Effector — the tool executor (the hands)
 
@@ -180,11 +201,13 @@ type Sandbox interface {
 ```
 
 - Tri-state ruling (`Verdict`): `VerdictAllow` proceeds to execution; on `VerdictDeny`
-  (the zero value — fail-closed) the framework appends `[denied: reason]` feedback to
+  (the zero value — fail-closed) the framework appends `[sandbox-denied: reason]` feedback to
   Context and **the loop continues** (no halt); `VerdictAsk` **suspends for external
   confirmation** — the reason becomes the question text shown externally, the loop
   suspends through the §6.4 protocol, and execution happens only after the host approves
-- An error from `Allow` denies as `[sandbox error: ...]` (fail-closed)
+- An error from `Allow` denies (fail-closed); the feedback lands as
+  `[sandbox-denied: sandbox error: ...]` (the audit record keeps the inner
+  `sandbox error: ...` reason)
 - `Bounds()` returns the execution boundary description; the framework
   snapshots it once per Stimulate and surfaces it to the LLM via `Prompt.Bounds`
   (so the brain perceives its limits, e.g. "only files under /workspace")
@@ -408,7 +431,7 @@ EventState(error) → EventError(Err)
 |------|--------------|---------|
 | `EventText` | `Text` | Whole-segment LLM text output |
 | `EventToolCall` | `ToolCall *ToolCall` | Tool the LLM decided to call |
-| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | Tool execution result (includes Sandbox denials: `Effect.Err = "[denied: reason]"`); `ToolCall` echoes the call for ID association |
+| `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | Tool execution result (includes Sandbox denials: `Effect.Err = "[sandbox-denied: reason]"`); `ToolCall` echoes the call for ID association |
 | `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (ruling Ruling: allow/deny/**ask**, tool, policy reason, ask question, evaluation error); an ask chain closes with its terminal second record; not emitted when no sandbox is wired |
 | `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
@@ -529,13 +552,16 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;
   it runs before the next Think after resume
-- **Response grammar (shared by ask_user and sandbox asks)**: written as the suspended
-  call's structured result in `ToolResults`
-  (`ID` = the call's `call_xxx`), visible to the first Think after resume. Three rules,
-  identical for both suspension kinds: an **empty string** = deny (injects
-  `[denied: declined]`); a **`[denied:` prefix** = deny with that text (timeout recipe
-  `[denied: timeout]` as shown above); **any other response** = approve — under ask_user
-  it is injected as the tool's result; under a sandbox ask the pending call executes.
+- **Response grammar (three-state ruling for sandbox asks, verbatim injection for ask_user)**:
+  written as the suspended call's structured result in `ToolResults`
+  (`ID` = the call's `call_xxx`), visible to the first Think after resume. **Sandbox asks**
+  resolve by the three-state ruling: an **empty string** = deny (feedback
+  `[sandbox-denied: declined]`); a **`[denied:` prefix** = deny with that text (timeout recipe
+  `[denied: timeout]` as shown above; the feedback lands in the canonical `[sandbox-denied: ...]`
+  form); **any other response** = approve — the pending call executes without re-gating.
+  **ask_user** responses are injected verbatim as the tool's structured result (an empty
+  string is an empty result; a denial is expressed in the response text itself — the
+  `[denied: timeout]` recipe lands as tool feedback the model reads).
   Timeouts are host-controlled (default deny)
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think

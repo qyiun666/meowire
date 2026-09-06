@@ -53,13 +53,17 @@ you can rely on.
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (context
   regulator — needs a Trimmer and MaxTokens)
+- **Built-in reference Thinker (`openai` package)** — `openai.New(Config)` yields a
+  zero-dependency OpenAI-compatible `api.Thinker` (Chat Completions + Responses API,
+  wire auto-detected or pinned; streaming gate + chunk sink; retry with backoff).
+  Hosts fill the Prompt and go — the port stays open for custom prompting/transports
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
 - **Unified suspension-resume (v1.3.2 onward)** — one snapshot + resume path for all suspension kinds:
   - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), remaining tools run first, then the loop resumes from the suspended round.
   - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, "")` continues (no pending tool to inject). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
-  - **Sandbox ask**: a tri-state ruling (`Sandbox.Allow` returning `VerdictAsk`) yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason); resolution follows one shared response grammar — "" denies (`[denied: declined]`), a `[denied:` prefix denies with that text, any other response approves and runs the pending call without re-gating.
+  - **Sandbox ask**: a tri-state ruling (`Sandbox.Allow` returning `VerdictAsk`) yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason); resolution follows one shared response grammar — "" denies (`[sandbox-denied: declined]`), a `[denied:` prefix denies with that text (the feedback lands in the canonical `[sandbox-denied: ...]` form), any other response approves and runs the pending call without re-gating.
   - **Persistent**: `Session.Marshal()` / `UnmarshalSession` give versioned JSON persistence — a suspended or paused loop survives process restarts (alignment with mainstream checkpoint/resume).
   Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
 - **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
