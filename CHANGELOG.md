@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-09-06
+
 ### Added
 
 - **Built-in reference Thinker (`openai` package)** —
@@ -37,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prefix survives in exactly one role: the Resume response grammar's input
   encoding (the deny arm, including the `[denied: timeout]` recipe) — input
   protocol and output feedback are now deliberately distinct formats.
+
+### Breaking changes
+
+- Sandbox denial feedback text renamed at the source: `[denied: reason]` →
+  `[sandbox-denied: reason]`. Hosts pattern-matching the output text must
+  follow; the `[denied:` prefix survives only as the Resume response input
+  encoding (deny arm, including the `[denied: timeout]` recipe).
 
 ## [1.3.6] - 2026-08-27
 
