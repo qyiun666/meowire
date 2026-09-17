@@ -25,6 +25,10 @@ import (
 // non-empty boundary: one description per agent, the strictest author wins.
 //
 // An empty stack denies (a membrane with no layers guards nothing).
+//
+// A combinator never forwards Boot: the framework asserts the lifecycle on the
+// port value it is handed, so a member that must come up first is booted before
+// it is composed.
 func GuardStack(layers ...Sandbox) Sandbox { return guardStack(layers) }
 
 type guardStack []Sandbox
@@ -49,6 +53,7 @@ func (g guardStack) rule(ask func(Sandbox) (Verdict, string, error)) (Verdict, s
 		if err != nil {
 			return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), nil
 		}
+		verdict, reason = knownRuling(verdict, reason)
 		switch verdict {
 		case VerdictDeny:
 			return VerdictDeny, reason, nil

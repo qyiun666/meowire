@@ -74,8 +74,9 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
     挂起或暂停的循环可跨进程存活（对齐主流 checkpoint/resume）。
   超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
 - **两侧三态裁决与反思原语** —— `Sandbox.Allow`（工具执行前）与 `Sandbox.Emit`（该轮文本
-  被听到前）各返回 `Verdict`：`VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`
-  ——ask 经与 ask_user 相同的挂起-恢复协议征询确认，批准后才生效。`OnCycleEnd(ctx, output,
+  被听到前）各返回 `Verdict`：`VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`，
+  三态之外的值同样按 Deny 处置——本构建叫不出名字的值不可能"允许"什么；ask 经与 ask_user
+  相同的挂起-恢复协议征询确认，批准后才生效。`OnCycleEnd(ctx, output,
   outcome)` 以 `CycleOutcome`（Done/Suspended/MaxRounds/Error/Aborted）分类每轮结束方式；
   `BeforeStimulate` 可写轮级反思便签到 `Prompt.Reflection`，全轮 Thinker 可见
 - **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，

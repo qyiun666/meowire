@@ -46,7 +46,9 @@ func verdictOfName(name string) (Verdict, bool) {
 // the loop: every tool execution passes Allow before it runs, and every
 // utterance passes Emit before it reaches the consumer. The host implements
 // security policies; the framework provides the interception point and audits
-// each decision via EventSandbox. A VerdictAsk suspends the loop — the host
+// each decision via EventSandbox. A ruling outside the three named states is a
+// Deny as well — a value this build cannot name has not permitted anything.
+// A VerdictAsk suspends the loop — the host
 // resolves it through the same Resume channel as ask_user (empty response or a
 // "[denied: ...]" payload resolves the ask as a denial; any other response
 // approves). Bounds() declares the execution boundary, surfaced to the Thinker

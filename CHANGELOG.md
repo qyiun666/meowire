@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   宿主看到的提问仍是工具自己写的那句（此前投递会覆盖它）
 - **事件线不再猜**：`kind=state` 的记录缺状态名不再被读成 `StateIdle`，状态名出现在别的种类上
   同样拒绝；`EncodeEvent` 拒绝名字表里查不到的裁决值，而不是写出一条永远读不回的记录
+- **未知裁决不再放行**：膜返回名字表之外的 `Verdict` 时，此前 `switch` 的默认分支等于允许执行
+  ——现在循环两侧与 `GuardStack` 三个入口统一收在一处按 `Deny` 处置，拒绝文本点名那个值
+- **被拒的等待不吞掉原有失败**：并行批次里后到的等待被拒绝时，工具自己写过的 `Err` 追加在后面，
+  不再被覆盖成"名额已被占"一句
 
 ### Changed
 
@@ -31,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   启动；已关闭的 Agent 拒绝交换并返回 `ErrCellClosed`（此前静默返回"成功且无旧端口"）
 - **枚举一律按下标取值的名表**：事件种类、循环状态、膜的裁决、挂起成因四张表同一写法，
   由一条守卫测试钉住覆盖；`Session.Marshal` 不再把一个不认识的挂起成因写成 `pause`
+- **组合器不代管启动**：`GuardStack` / `Fallback*` 返回的端口值不声明 `Bootable`，
+  框架只对它拿到手的那个值做能力断言——必须先启动的成员在组合之前由宿主启动，
+  这条边界由一条守卫测试与 `compose.go` 的契约注释同时钉住
 - **往返守卫长牙**：夹具必须让 `Event` 的每个字段至少在一处非零（否则"两边都加了字段却忘了
   搬运"能静默通过），且 `WireEvent` 可达的任何结构里不得出现裸 `error` 字段
 - 已被报告过的丢失不再重复累加：`Dropped` 过一趟线还是那一串名字

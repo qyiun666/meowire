@@ -323,6 +323,12 @@ func TestUnnamedRulingRefusedAtEncode(t *testing.T) {
 	if _, err := EncodeEvent(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{Ruling: Verdict(42)}}); err == nil {
 		t.Fatal("an unnamed ruling was encoded")
 	}
+	// The mirror of DecodeEvent's rule: a state value on another kind is not a
+	// record this build can journal, and dropping it silently would be a loss no
+	// one reported.
+	if _, err := EncodeEvent(Event{Kind: EventText, Text: "x", State: StateWaiting}); err == nil {
+		t.Fatal("a state value on a text event was encoded by dropping it")
+	}
 }
 
 // TestEventKindNamesCoverEveryKind: the name table is indexed by kind value, so

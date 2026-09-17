@@ -165,6 +165,7 @@ type Sandbox interface {
 - `Allow` 三态裁决（`Verdict`）：`VerdictAllow` 放行执行；`VerdictDeny`（零值，fail-closed）时框架生成 `[sandbox-denied: reason]` 反馈进 Context，**循环继续**（不终止）；`VerdictAsk` **挂起征询**——reason 即展示给外部的问题文本，循环按 §6.4 的挂起-恢复协议挂起，宿主解决后批准才执行
 - `Emit` 在**任何人听到这段文本之前**裁决（消费者、累积输出、下一轮 Think 都算"听到"）：`Allow` 原样说出；`Deny` 以 `[sandbox-denied: reason]` 取代该轮文本，该文本同时进 Context（大脑下一轮读得到自己的话被拒）；`Ask` **扣住草稿**按 §6.4 挂起，草稿随 `Session` 走线，批复后原样说出或被拒文本取代——**不重跑该轮 Think**
 - 两侧 `err != nil` 都按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`（审计记录 Reason 保留 `sandbox error: ...` 内层形态）
+- 返回三态之外的 `Verdict` 值（构造出来的整数）也按 Deny 处理，拒绝文本写明 `sandbox returned an unknown ruling <n>`——不认识的值不可能"允许"任何东西
 - 审计记录以 `Call` 区分两侧：工具侧带被门禁的 `Call`，文本侧 `Call` 为零值；每一裁决恰好一条，ask 链再以终结记录闭合
 - `Bounds()` 返回执行边界描述，每次 Stimulate 快照一次、经 `Prompt.Bounds` 透传给 LLM（让大脑感知限制，如"只能访问 /workspace 下文件"）
 - 宿主实现安全策略：工具白名单/黑名单、人工确认（返回 `VerdictAsk` 即可，挂起与恢复由框架表达）、敏感操作拦截、出口内容审查（`Emit`）

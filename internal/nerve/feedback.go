@@ -137,7 +137,10 @@ func refuseLaterWait(eff *Effect, pending ToolCall) {
 	}
 	eff.Send = nil
 	eff.WaitInput = ""
-	eff.Err = fmt.Sprintf("one wait per round: %s already waits", pending.Name)
+	if eff.Err != "" {
+		eff.Err += "; "
+	}
+	eff.Err += fmt.Sprintf("one wait per round: %s already waits", pending.Name)
 }
 
 // admitted runs one call that cleared the membrane: BeforeAct (a mutated

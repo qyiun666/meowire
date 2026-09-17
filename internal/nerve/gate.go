@@ -108,10 +108,20 @@ func consultSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (ruling V
 	if err != nil {
 		return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), "", err
 	}
-	if ruling == VerdictAsk {
+	if ruling, reason = knownRuling(ruling, reason); ruling == VerdictAsk {
 		return VerdictAsk, "", reason, nil
 	}
 	return ruling, reason, "", nil
+}
+
+// knownRuling keeps the port contract's promise in one place: a membrane answer
+// this build has no name for has not permitted anything, so it rules as Deny
+// rather than falling through a switch's default branch into execution.
+func knownRuling(ruling Verdict, reason string) (Verdict, string) {
+	if verdictName(ruling) == "" {
+		return VerdictDeny, fmt.Sprintf("sandbox returned an unknown ruling %d", int(ruling))
+	}
+	return ruling, reason
 }
 
 // consultEmit is consultSandbox on the output side: an Emit error coerces to a
@@ -121,7 +131,7 @@ func consultEmit(ctx context.Context, lc *LoopContext, u Utterance) (ruling Verd
 	if err != nil {
 		return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), "", err
 	}
-	if ruling == VerdictAsk {
+	if ruling, reason = knownRuling(ruling, reason); ruling == VerdictAsk {
 		return VerdictAsk, "", reason, nil
 	}
 	return ruling, reason, "", nil

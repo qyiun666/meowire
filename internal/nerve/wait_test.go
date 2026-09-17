@@ -42,6 +42,31 @@ func waitHarness(t *testing.T, lc *LoopContext, calls []ToolCall, act func(Actio
 	return wait, fedBack
 }
 
+// TestParallelSecondWaitKeepsItsOwnFailure: refusing the wait must not erase the
+// call's own result — a failed tool that also asked to wait owes the brain both
+// facts, in one piece of feedback.
+func TestParallelSecondWaitKeepsItsOwnFailure(t *testing.T) {
+	lc := &LoopContext{CellID: "c1", Input: "go", ParallelActs: true}
+	_, fedBack := waitHarness(t, lc,
+		[]ToolCall{{ID: "t1", Name: "askFirst"}, {ID: "t2", Name: "askSecond"}},
+		func(a Action) (*Effect, error) {
+			if a.Call.Name == "askFirst" {
+				return &Effect{WaitInput: "first?"}, nil
+			}
+			return &Effect{WaitInput: "second?", Err: "exit status 3"}, nil
+		})
+	second := fedBack["t2"]
+	if second == nil {
+		t.Fatal("the sibling call produced no EventToolResult")
+	}
+	if !strings.Contains(second.Err, "exit status 3") {
+		t.Errorf("err = %q, want the call's own failure preserved", second.Err)
+	}
+	if !strings.Contains(second.Err, "one wait per round") {
+		t.Errorf("err = %q, want the refusal stated beside the failure", second.Err)
+	}
+}
+
 // TestWaitInputWinsOverSend: an Effect that carries both its own question and a
 // delegation asks the loop, not a peer. The port contract gives WaitInput
 // precedence, so the send never leaves and the tool's own text is what the host

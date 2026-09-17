@@ -206,6 +206,9 @@ tri-state grammar and one audit channel (`EventSandbox`).
 - An error from either method denies (fail-closed); the feedback lands as
   `[sandbox-denied: sandbox error: ...]` (the audit record keeps the inner
   `sandbox error: ...` reason)
+- A `Verdict` outside the three named states (a constructed integer) denies the same way, and the
+  refusal names it: `sandbox returned an unknown ruling <n>` — a value this build cannot name
+  cannot have permitted anything
 - The audit record tells the sides apart by `Call`: a tool-side ruling names the gated call, an
   utterance-side ruling carries a zero `Call`. Every ruling yields exactly one record, and an ask
   chain closes with its terminal record

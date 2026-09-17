@@ -104,7 +104,8 @@ you can rely on.
   that produced it, so one log can hold a whole colony
 - **Tri-state rulings on both sides & reflection primitives** — `Sandbox.Allow` (before a tool
   runs) and `Sandbox.Emit` (before a round's text is heard) each return a
-  `Verdict`: Deny (zero value, fail-closed), Allow, or Ask; an ask suspends via the same
+  `Verdict`: Deny (zero value, fail-closed), Allow, or Ask — a value outside those three named
+  states denies the same way; an ask suspends via the same
   suspension-resume protocol as ask_user and takes effect only after the host approves
   (one audit chain closes with a terminal resolve record). `Hooks.OnCycleEnd(ctx, output,
   outcome)` classifies how every cycle ended (`CycleOutcome`: Done/Suspended/MaxRounds/

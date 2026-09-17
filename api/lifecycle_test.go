@@ -303,6 +303,24 @@ func TestReplaceAfterCloseRefusesOrgan(t *testing.T) {
 	}
 }
 
+// TestCombinatorsDoNotForwardBoot: a combinator returns a port value, and the
+// framework asserts the lifecycle on the value it is handed — so members behind
+// GuardStack/Fallback* are never booted through it. A member that must be brought
+// up boots before it is composed; this is the contract, not an oversight.
+func TestCombinatorsDoNotForwardBoot(t *testing.T) {
+	o, _ := bootableOrgans()
+	first, second := &lifecycleLog{}, &lifecycleLog{}
+	o.Sandbox = GuardStack(probeSandbox{first}, probeSandbox{second})
+	a, err := New(Blueprint{Organs: o, Config: Config{}})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer a.Close()
+	if len(first.boots)+len(second.boots) != 0 {
+		t.Fatalf("member boots = %v / %v, want none through a combinator", first.boots, second.boots)
+	}
+}
+
 // TestOrganFilledCoversEveryBlueprintSlot: the api answers "is this slot
 // wired?" for every edge the blueprint declares. A slot added to the blueprint
 // without an entry here would be reported unwired forever — this guard turns

@@ -150,6 +150,8 @@ func EncodeEvent(e Event) ([]byte, error) {
 	}
 	if e.Kind == EventState {
 		w.State = e.State.String()
+	} else if e.State != 0 {
+		return nil, fmt.Errorf("nerve: encode event: state %q on kind %q", e.State, e.Kind)
 	}
 	if e.Err != nil {
 		w.Err = wireOfErr(e.Err)
