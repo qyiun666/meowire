@@ -47,7 +47,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **六个宿主注入端口，全部器官必填**（无 stub、无可选接线）：
   `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
-  `ContextBudget`（上下文调节器 —— 必须有 Trimmer 与 MaxTokens）
+  `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
@@ -116,7 +116,7 @@ meowire (模块根)
 | `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
 | `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
-| `ContextBudget` | 守卫 | 每次 Think 前裁剪上下文 |
+| `ContextBudget` | 守卫 | 每次 Think 前裁剪文本轨 `Context` 与结构化反馈轨 `ToolResults`（同一额度） |
 | `Event` | 事件 | 循环的类型化观察镜像 |
 | `Synapse` / `Memory` | internal | 供宿主参考的独立契约 |
 
@@ -182,11 +182,12 @@ func main() {
 		Think:   thinker{},
 		Act:     effector{},
 		Closer:  closer{},
-		Hooks:   &meowire.Hooks{},
+		Hooks:   meowire.FullHooks(meowire.Hooks{}), // 八个回调，显式 no-op
 		Sandbox: sandbox{},
 		Budget: &meowire.ContextBudget{
-			MaxTokens: 8192,
-			Trimmer:   func(c []string, max int) []string { return c },
+			MaxTokens:   8192,
+			Trimmer:     func(c []string, max int) []string { return c },
+			TrimResults: func(rs []meowire.ToolResult, max int) []meowire.ToolResult { return rs },
 		},
 		},
 		Config: meowire.Config{},

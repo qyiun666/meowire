@@ -374,7 +374,7 @@ func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict,
 
 func (s *sandbox) Bounds() string { return s.bounds }
 
-// ---- ContextBudget：每次 Think 前裁剪；是裁剪器不是硬停 ----
+// ---- ContextBudget：每次 Think 前裁两条累积轨；是裁剪器不是硬停 ----
 
 // 粗略 token 估算：英文 ~4 字符/token，中文 ~1.5 字符/token
 func trimContext(ctx []string, max int) []string {
@@ -384,6 +384,14 @@ func trimContext(ctx []string, max int) []string {
 	kept := ctx[len(ctx)-max:] // 保留最新的 max 条（旧的可丢给记忆系统）
 	return kept
 }
+
+// 结构化反馈轨同一额度、同一时点裁剪：不裁时原样返回即可
+func trimResults(rs []meowire.ToolResult, max int) []meowire.ToolResult {
+	if max <= 0 || len(rs) <= max {
+		return rs
+	}
+	return rs[len(rs)-max:]
+}
 ```
 
 **细节：**
@@ -391,7 +399,7 @@ func trimContext(ctx []string, max int) []string {
 - `Allow` 返回 `(VerdictAsk, 问题, nil)` → **挂起征询**：走与 ask_user 相同的挂起-恢复协议，批准后才执行且不再重新过门禁
 - `Allow` 返回 error → 按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`
 - `Bounds()` 每次 `Stimulate` 开始时快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
-- 裁剪器不想裁时返回入参原切片即可；`ContextBudget{MaxTokens: 0}` 也是合法装配（配了 Trimmer）
+- 裁剪器不想裁时返回入参原切片即可；但两条轨都必须给：`Trimmer`、`TrimResults` 任一为 nil 或 `MaxTokens <= 0` 装配失败
 
 ---
 
@@ -481,7 +489,7 @@ func main() {
 			Closer:  &noopCloser{},
 			Hooks:   buildHooks(mem),
 			Sandbox: &sandbox{allowed: map[string]bool{"calc": true}, bounds: "只允许 calc 工具"},
-			Budget:  &meowire.ContextBudget{MaxTokens: 20, Trimmer: trimContext},
+			Budget:  &meowire.ContextBudget{MaxTokens: 20, Trimmer: trimContext, TrimResults: trimResults},
 
 			System:   "你是 meow agent，用中文回答，简洁直接。",
 			Identity: "你叫 meow，角色 assistant",

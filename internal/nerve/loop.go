@@ -319,8 +319,8 @@ func settleRound(lc *LoopContext, b *actBatch, round int) string {
 func (b *actBatch) think() (*Decision, bool) {
 	lc := b.lc
 
-	// Apply context budget trimming before each Think
-	lc.Context = lc.Budget.Trimmer(lc.Context, lc.Budget.MaxTokens)
+	// Apply the regulator to both accumulating tracks before each Think
+	lc.metabolize()
 
 	lc.State = StateThinking
 	if !b.yield(Event{Kind: EventState, State: StateThinking}) {

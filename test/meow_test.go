@@ -41,7 +41,7 @@ func fullOrgans() meowire.Organs {
 		Closer:  &testutil.Closer{},
 		Hooks:   fullHooks(),
 		Sandbox: testutil.Sandbox{},
-		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }},
+		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }, TrimResults: func(rs []meowire.ToolResult, _ int) []meowire.ToolResult { return rs }},
 	}
 }
 
@@ -264,7 +264,7 @@ func TestFullOrgansWiring(t *testing.T) {
 				trimmerCalled = true
 				return ctx
 			},
-		},
+			TrimResults: func(rs []meowire.ToolResult, _ int) []meowire.ToolResult { return rs }},
 		System:   "sys",
 		Methods:  []meowire.MethodSpec{{Name: "m1", Desc: "md"}},
 		Tools:    []meowire.ToolSpec{{Name: "t1", Desc: "d"}},

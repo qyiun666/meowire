@@ -161,14 +161,15 @@ type Sandbox interface {
 
 ```go
 type ContextBudget struct {
-    MaxTokens int
-    Trimmer   func(ctx []string, max int) []string
+    MaxTokens   int
+    Trimmer     func(ctx []string, max int) []string
+    TrimResults func(results []ToolResult, max int) []ToolResult
 }
 ```
 
-- 每次 Think 前调用 `Trimmer`，把 Context 裁剪到 `MaxTokens` 内
+- 每次 Think 前**同点同额度**调用两个裁剪器：`Trimmer` 裁文本轨 `Context`，`TrimResults` 裁结构化反馈轨 `ToolResults`——一轮内只有这两条轨在累积，其余 Prompt 字段每轮整体替换
 - 是裁剪器不是硬停：超预算只剪不报错
-- 不想裁剪时返回入参原切片即可
+- 不想裁剪时返回入参原切片即可（但仍须提供该函数：只给 `Trimmer` 的 Budget 装配失败）
 
 ---
 
@@ -202,7 +203,7 @@ o := meowire.Organs{
 | `Closer` | Closer | 资源清理 | **是** |
 | `Hooks` | *Hooks | 拦截回调（全部八回调必填） | **是** |
 | `Sandbox` | Sandbox | 权限门 | **是** |
-| `Budget` | *ContextBudget | 上下文裁剪 | **是** |
+| `Budget` | *ContextBudget | 令牌调节器（文本轨 + 结构化反馈轨） | **是** |
 | `System` | string | 系统指令，进 Prompt.System | 否 |
 | `Identity` | string | 身份描述文本（宿主自拼），进 Prompt.Identity | 否 |
 | `Methods` | []MethodSpec | 内置能力描述（基因投影，仅描述不执行）；`MethodSpec{Name, Desc, Input, Output}`，进 Prompt.Methods | 否 |
@@ -274,9 +275,9 @@ agent, err := meowire.New(bp)
 oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulate 生效
 ```
 
-- 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
+- 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
 - 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）
-- 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
+- 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 - **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, Old, New}`，在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
 
 ### 5.2 能力卡：`AgentCard`（A2A 风格）
@@ -424,7 +425,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **`sess.RemainingCalls()`（v1.3.3）**：唯一授权的只读探测——返回挂起点尚未执行的调用克隆（无则空）：暂停快照保留整批未执行调用（Resume 重放）；`ParallelActs` 批内 WaitInput 挂起则为空（整批已执行完，Resume 只注入响应，绝不重放）
 - **持久化（v1.3.2）**：`sess.Marshal()` 产出 JSON 字节（含版本号），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本不匹配拒绝还原（防止旧/新格式误重放）
 - **不占轮次**：恢复后从挂起轮继续，消化响应的 Think 使用挂起轮的配额（`MaxRounds` 不额外扣减）
-- **不触发 budget**：等待期间无 Think，`Trimmer` 不调用；恢复后下一轮 Think 前才执行
+- **不触发 budget**：等待期间无 Think，两个裁剪器都不调用；恢复后下一轮 Think 前才执行
 - **响应语法（Sandbox 征询按三态裁决，ask_user 原样注入）**：响应写入恢复后的 `ToolResults`（`ID` 为该调用的 `call_xxx`），进入恢复后的第一次 Think。**Sandbox 征询**三态裁决：**空串** = 拒绝（反馈 `[sandbox-denied: declined]`）；**`[denied:` 前缀** = 以该文本拒绝（超时配方如上 `[denied: timeout]`，反馈落库为 `[sandbox-denied: ...]` 规范形式）；**其余任何响应** = 批准，放行 pending 调用执行（不再过门禁）。**ask_user** 的响应原样作为挂起工具的结构化结果注入（空串即空结果；拒绝语义由宿主在响应文本中表达，超时配方 `[denied: timeout]` 作为工具反馈被模型读到）。超时由宿主控制（默认拒绝）
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
@@ -596,7 +597,7 @@ case "spawn_agent":
 			Hooks:   hooksFor(args.ID), // 同一 hub 的闭包
 			Closer:  closerStub,
 			Sandbox: sandboxStub,
-			Budget:  &meowire.ContextBudget{},
+			Budget:  passBudget, // 直通裁剪器：Trimmer + TrimResults + MaxTokens>0 三者齐备
 			Tools:   subTools,
 		},
 		Config: subCfg,
@@ -656,7 +657,7 @@ func main() {
 			Closer:  &closer{},
 			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
-			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
+			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim, TrimResults: trimResults},
 			System:  "你是 meow agent，用中文回答",
 			Tools: []meowire.ToolSpec{
 				{Name: "calc", Desc: "计算器", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "数值"},

@@ -58,7 +58,7 @@ func (testSandbox) Bounds() string { return "test" }
 
 // testBudget returns the context unchanged.
 func testBudget() *ContextBudget {
-	return &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }}
+	return &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }}
 }
 
 // fillRequired fills the required ports (Hooks/Sandbox/Budget) with no-op
@@ -676,7 +676,7 @@ func TestDecisionLoopContextBudget(t *testing.T) {
 				}
 				return ctx
 			},
-		},
+			TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }},
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			calls++
 			if calls == 1 {

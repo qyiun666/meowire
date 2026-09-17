@@ -166,69 +166,100 @@ func (c *Cell) GetConfig() nerve.LoopConfig {
 	return c.Config
 }
 
-// Replace swaps one runtime port; it takes effect at the next Stimulate
-// because each Stimulate snapshots the ports into a fresh LoopContext (an
-// in-flight one keeps what it started with). A swapped port must be non-nil:
-// the loop dereferences Sandbox/Budget without a nil check, so an absent
-// organ would panic rather than fail closed — removing an organ means
-// swapping in an inert one, not nil. Closer is never swappable (it is the
-// resource binding Close drains once) and PauseGate is framework wiring.
-// Returns the previous port value (nil if none was set); a no-op after Close.
+// swapSpec is one swappable slot: how a port is validated and where the Cell
+// keeps it. The slot names here must match nerve.SwappableSlots() — a drift
+// would let a host swap an organ the blueprint does not expose (or refuse one
+// it does), and TestSlotTableMatchesBlueprint fails when that happens.
+type swapSpec struct {
+	assert func(any) (any, error)
+	load   func(*Cell) any
+	store  func(*Cell, any)
+}
+
+// wantPort asserts one port interface and rejects both a wrong type and a nil
+// implementation of the right type.
+func wantPort[T any](slot, want string, port any) (T, error) {
+	var zero T
+	v, ok := port.(T)
+	if !ok || any(v) == any(zero) {
+		return zero, fmt.Errorf("cell.Replace: %s: got %T, want %s", slot, port, want)
+	}
+	return v, nil
+}
+
+var swapSlots = map[string]swapSpec{
+	"think": {
+		assert: func(p any) (any, error) { return wantPort[nerve.Thinker]("think", "non-nil nerve.Thinker", p) },
+		load:   func(c *Cell) any { return c.Think },
+		store:  func(c *Cell, v any) { c.Think = v.(nerve.Thinker) },
+	},
+	"act": {
+		assert: func(p any) (any, error) { return wantPort[nerve.Effector]("act", "non-nil nerve.Effector", p) },
+		load:   func(c *Cell) any { return c.Act },
+		store:  func(c *Cell, v any) { c.Act = v.(nerve.Effector) },
+	},
+	"sandbox": {
+		assert: func(p any) (any, error) { return wantPort[nerve.Sandbox]("sandbox", "non-nil nerve.Sandbox", p) },
+		load:   func(c *Cell) any { return c.Sandbox },
+		store:  func(c *Cell, v any) { c.Sandbox = v.(nerve.Sandbox) },
+	},
+	"budget": {
+		assert: assertBudget,
+		load:   func(c *Cell) any { return c.Budget },
+		store:  func(c *Cell, v any) { c.Budget = v.(*nerve.ContextBudget) },
+	},
+	"hooks": {
+		assert: assertHooks,
+		load:   func(c *Cell) any { return c.Hooks },
+		store:  func(c *Cell, v any) { c.Hooks = v.(*nerve.Hooks) },
+	},
+}
+
+// assertBudget rejects a regulator that cannot regulate: both tracks need a
+// trimmer and the limit must be positive.
+func assertBudget(p any) (any, error) {
+	b, ok := p.(*nerve.ContextBudget)
+	if !ok || b == nil || b.Trimmer == nil || b.TrimResults == nil || b.MaxTokens <= 0 {
+		return nil, fmt.Errorf("cell.Replace: budget: got %T, want a complete non-nil ContextBudget (Trimmer, TrimResults, MaxTokens > 0)", p)
+	}
+	return b, nil
+}
+
+// assertHooks rejects a container missing any of the eight callbacks.
+func assertHooks(p any) (any, error) {
+	h, ok := p.(*nerve.Hooks)
+	if !ok || h == nil || !completeHooks(h) {
+		return nil, fmt.Errorf("cell.Replace: hooks: got %T, want non-nil Hooks with all eight callbacks", p)
+	}
+	return h, nil
+}
+
+// Replace swaps one runtime port; it takes effect at the next Stimulate because
+// each Stimulate snapshots the ports into a fresh LoopContext (an in-flight one
+// keeps what it started with). A swapped port must be non-nil and complete: the
+// loop dereferences Sandbox/Budget without a nil check, so an absent organ
+// would panic rather than fail closed — removing an organ means swapping in an
+// inert one, not nil. Closer is never swappable (it is the resource binding Close
+// drains once) and PauseGate is framework wiring. Returns the previous port
+// value (nil if none was set); a no-op after Close.
 func (c *Cell) Replace(slot string, port any) (any, error) {
 	if c.closed.Load() {
 		return nil, nil
 	}
-	c.wireMu.Lock()
-	defer c.wireMu.Unlock()
-	switch slot {
-	case "think":
-		v, ok := port.(nerve.Thinker)
-		if !ok || v == nil {
-			return nil, fmt.Errorf("cell.Replace: think: got %T, want non-nil nerve.Thinker", port)
-		}
-		old := c.Think
-		c.Think = v
-		c.recordReplace(slot, old, v)
-		return old, nil
-	case "act":
-		v, ok := port.(nerve.Effector)
-		if !ok || v == nil {
-			return nil, fmt.Errorf("cell.Replace: act: got %T, want non-nil nerve.Effector", port)
-		}
-		old := c.Act
-		c.Act = v
-		c.recordReplace(slot, old, v)
-		return old, nil
-	case "sandbox":
-		v, ok := port.(nerve.Sandbox)
-		if !ok || v == nil {
-			return nil, fmt.Errorf("cell.Replace: sandbox: got %T, want non-nil nerve.Sandbox", port)
-		}
-		old := c.Sandbox
-		c.Sandbox = v
-		c.recordReplace(slot, old, v)
-		return old, nil
-	case "budget":
-		v, ok := port.(*nerve.ContextBudget)
-		if !ok || v == nil || v.Trimmer == nil || v.MaxTokens <= 0 {
-			return nil, fmt.Errorf("cell.Replace: budget: got %T, want a complete non-nil ContextBudget", port)
-		}
-		old := c.Budget
-		c.Budget = v
-		c.recordReplace(slot, old, v)
-		return old, nil
-	case "hooks":
-		v, ok := port.(*nerve.Hooks)
-		if !ok || v == nil || !completeHooks(v) {
-			return nil, fmt.Errorf("cell.Replace: hooks: got %T, want non-nil Hooks with all eight callbacks", port)
-		}
-		old := c.Hooks
-		c.Hooks = v
-		c.recordReplace(slot, old, v)
-		return old, nil
-	default:
+	spec, ok := swapSlots[slot]
+	if !ok {
 		return nil, fmt.Errorf("cell.Replace: unknown slot %q", slot)
 	}
+	v, err := spec.assert(port)
+	if err != nil {
+		return nil, err
+	}
+	c.wireMu.Lock()
+	defer c.wireMu.Unlock()
+	old := spec.load(c)
+	spec.store(c, v)
+	c.recordReplace(slot, old, v)
+	return old, nil
 }
 
 // recordReplace appends one ReplaceAudit for a successful swap; the audit is

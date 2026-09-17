@@ -418,7 +418,7 @@ func TestDecisionLoopWaitInputNoBudgetDuringWait(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "work",
-		Budget: &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { trims++; return c }},
+		Budget: &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { trims++; return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }},
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			if trims == 1 {
 				return &Decision{Text: "ask", ToolCalls: []ToolCall{{ID: "t1", Name: "ask_user"}}}, nil

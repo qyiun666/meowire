@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **One slot-name source of truth** — `WirePoint` carries a `Slot` field and
+  `nerve.SwappableSlots()` derives the swappable names from the blueprint:
+  `cell.Replace`'s dispatch table, the `api` `Slot*` constants and the
+  blueprint itself are now checked against each other by three guards
+  (`internal/cell/slots_sync_test.go`, `api/slots_sync_test.go`), so a port
+  added to the blueprint cannot silently miss a `Replace` slot or an `Organs`
+  field. New blueprint entry `P6b Budget.TrimResults` (optional, implied by P6).
+
+### Changed
+
+- **`ContextBudget` now regulates both accumulating tracks** — the port gains
+  `TrimResults func([]ToolResult, int) []ToolResult`; before each Think the loop
+  applies `Trimmer` to the text `Context` and `TrimResults` to the structured
+  `ToolResults` under the same `MaxTokens`, at the same checkpoint. These are the
+  only two inputs that grow within a cycle, so one regulator is now a complete
+  budget — previously tool feedback accumulated unbounded and `MaxTokens`
+  described only half of what reached the brain.
+  **Breaking**: `TrimResults` is required — a Budget carrying only a `Trimmer`
+  fails assembly (`New`) and is refused by `Replace("budget", …)`.
+
 ### Removed
 
 - **`openai` reference Thinker package** — the kernel ships no LLM client, transport
@@ -31,9 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed — the sequence assertions in `internal/nerve` are the proof.
 - `size_test.go` enforces the complexity budget across the module (file
   ≤400 lines, function body ≤50, ≤4 parameters). The exemption list is closed
-  and carries a reason per entry (`Connectome` is a data table, `Replace`
-  collapses when slots become data-driven, `Resume`/`Hebbian`/`STDP` are
-  host-visible signatures).
+  and carries a reason per entry (`Connectome` is a data table,
+  `Resume`/`Hebbian`/`STDP` are host-visible signatures); `Replace` earned its
+  exemption only until the slots became data-driven and has since been removed
+  from it.
 - `api` package documentation and the oversized comments in `nerve`/`cell` were
   rewritten to the repository's current perspective; the slot table duplicated
   inside `cell.Replace`'s doc is gone (the blueprint in `nerve/wire.go` owns it).

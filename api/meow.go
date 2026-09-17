@@ -26,7 +26,8 @@ type Agent struct {
 	paused atomic.Bool // pause request flag (atomic; consumed at gap points)
 }
 
-// Swappable port slot names for Replace (dynamic wiring).
+// Swappable port slot names for Replace (dynamic wiring). The blueprint owns
+// these values (nerve.WirePoint.Slot); slots_sync_test.go fails on drift.
 const (
 	SlotThink   = "think"
 	SlotAct     = "act"

@@ -193,18 +193,23 @@ type Sandbox interface {
   (returning `VerdictAsk` is all it takes — suspension and resume are the framework's job),
   sensitive-operation interception
 
-### 2.7 ContextBudget — the context trimmer
+### 2.7 ContextBudget — the token regulator
 
 ```go
 type ContextBudget struct {
-    MaxTokens int
-    Trimmer   func(ctx []string, max int) []string
+    MaxTokens   int
+    Trimmer     func(ctx []string, max int) []string
+    TrimResults func(results []ToolResult, max int) []ToolResult
 }
 ```
 
-- `Trimmer` is called before each Think to trim Context down to `MaxTokens`
+- Both trimmers run before each Think, **at the same checkpoint and under the same
+  `MaxTokens`**: `Trimmer` for the text track `Context`, `TrimResults` for the
+  structured feedback track `ToolResults` — within a round only these two tracks
+  accumulate; every other Prompt field is replaced wholesale per round
 - It is a trimmer, not a hard stop: over budget trims, no error
-- Return the input slice unchanged to skip trimming
+- Return the input slice unchanged to skip trimming (the function must still be
+  provided: a Budget carrying only `Trimmer` fails assembly)
 
 ---
 
@@ -238,7 +243,7 @@ o := meowire.Organs{
 | `Closer` | Closer | Resource cleanup | **yes** |
 | `Hooks` | *Hooks | Interception callbacks (all eight callbacks required) | **yes** |
 | `Sandbox` | Sandbox | Permission gate | **yes** |
-| `Budget` | *ContextBudget | Context trimming | **yes** |
+| `Budget` | *ContextBudget | Token regulator (text track + structured-feedback track) | **yes** |
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
 | `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
@@ -313,12 +318,15 @@ agent, err := meowire.New(bp)
 oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at the next Stimulate
 ```
 
-- Swappable slots: `SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`;
+- Swappable slots: `SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks` (the
+  blueprint's `WirePoint.Slot` field is the single source; `Connectome()` / `SwappableSlots()`
+  enumerate it and a guard test pins the constants to it);
   `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable
 - Semantics: each `Stimulate` snapshots ports into a fresh LoopContext — an **in-flight
   Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
   port is returned (host decides whether to shut the old implementation down)
-- Concurrency-safe; no-op after `Close`; unknown slot or wrong port type returns an error
+- Concurrency-safe; no-op after `Close`; **rejects nil and incomplete ports** (a Budget needs
+  Trimmer + TrimResults + MaxTokens, a Hooks needs all eight callbacks); unknown slot or wrong port type returns an error
 - **Audit event (v1.3.0)**: every successful Replace records a `ReplaceAudit{CellID, Slot, Old, New}`,
   emitted as `EventReplace` at the start of the next Stimulate/Resume (the moment the swap
   takes effect — same level as `EventSandbox`, persistable); failed swaps record nothing;
@@ -528,7 +536,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   mismatch is rejected (a stale or future handle must not be replayed)
 - **No extra round**: Resume continues from the suspended round; the Think that digests
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
-- **No budget during the wait**: no Think happens while waiting, `Trimmer` is not called;
+- **No budget during the wait**: no Think happens while waiting, the trimmers are not called;
   it runs before the next Think after resume
 - **Response grammar (three-state ruling for sandbox asks, verbatim injection for ask_user)**:
   written as the suspended call's structured result in `ToolResults`
@@ -743,7 +751,7 @@ case "spawn_agent":
 			Hooks:   hooksFor(args.ID), // closures over the same hub
 			Closer:  closerStub,
 			Sandbox: sandboxStub,
-			Budget:  &meowire.ContextBudget{},
+			Budget:  passBudget, // pass-through trimmers: Trimmer + TrimResults + MaxTokens>0
 			Tools:   subTools,
 		},
 		Config: subCfg,
@@ -803,7 +811,7 @@ func main() {
 			Closer:  &closer{},
 			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
-			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim},
+			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim, TrimResults: trimResults},
 			System:  "You are a meow agent, answer in English",
 			Tools: []meowire.ToolSpec{
 				{Name: "calc", Desc: "calculator", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "number"},

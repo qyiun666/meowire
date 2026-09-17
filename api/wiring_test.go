@@ -36,7 +36,7 @@ func fullOrgans() Organs {
 		Closer:  &testutil.Closer{},
 		Hooks:   fullHooks(),
 		Sandbox: testutil.Sandbox{},
-		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }},
+		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }},
 	}
 }
 
@@ -153,8 +153,8 @@ func TestValidateIncompleteHook(t *testing.T) {
 	}
 }
 
-// TestValidateIncompleteBudget: a Budget without a Trimmer or MaxTokens is
-// an error — a budget that does not trim is not a budget.
+// TestValidateIncompleteBudget: a Budget missing either trimmer or its limit
+// is an error — a budget that does not trim both growing tracks is not a budget.
 func TestValidateIncompleteBudget(t *testing.T) {
 	o := fullOrgans()
 	o.Budget = &ContextBudget{} // no trimmer, no MaxTokens
@@ -166,6 +166,26 @@ func TestValidateIncompleteBudget(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("incomplete ContextBudget should surface an error finding")
+	}
+}
+
+// TestValidateBudgetMissingResultTrimmer is the second track's negative case:
+// a regulator that trims the text track only must still be refused, otherwise
+// the unbounded growth the two-track budget exists to prevent slips back in.
+func TestValidateBudgetMissingResultTrimmer(t *testing.T) {
+	o := fullOrgans()
+	o.Budget.TrimResults = nil
+	refused := false
+	for _, is := range Validate(o, Config{}) {
+		if is.Level == LevelError && is.Wire == "P6" {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("a Budget without TrimResults must be an error finding")
+	}
+	if _, err := New(Blueprint{Organs: o, Config: Config{}}); err == nil {
+		t.Fatal("New must reject a one-track budget")
 	}
 }
 
@@ -280,8 +300,7 @@ func TestBuildGraph(t *testing.T) {
 // TestSlotsByTarget: the find-by-function query returns every slot touching
 // a data object, and only those.
 func TestSlotsByTarget(t *testing.T) {
-	// Context: P6 (trim), H3 (replace) — nothing else (tool results moved to
-	// the ToolResults node since v1.3.1).
+	// Context: P6 (trim), H3 (replace) — the text track only.
 	slots := SlotsByTarget(fullOrgans(), "context")
 	got := map[string]bool{}
 	for _, s := range slots {
@@ -295,14 +314,15 @@ func TestSlotsByTarget(t *testing.T) {
 	if len(slots) != 2 {
 		t.Errorf("Context slots = %d, want 2", len(slots))
 	}
-	// ToolResults: F1 (append) — the single structured feedback track.
+	// ToolResults: F1 (append) writes it, P6b (trim) shrinks it — the single
+	// structured feedback track has exactly those two regulators.
 	trSlots := SlotsByTarget(fullOrgans(), "toolresults")
 	trGot := map[string]bool{}
 	for _, s := range trSlots {
 		trGot[s.Wire.ID] = true
 	}
-	if !trGot["F1"] || len(trSlots) != 1 {
-		t.Errorf("ToolResults slots = %v, want exactly F1", trSlots)
+	if !trGot["F1"] || !trGot["P6b"] || len(trSlots) != 2 {
+		t.Errorf("ToolResults slots = %v, want exactly F1 and P6b", trSlots)
 	}
 	if len(SlotsByTarget(fullOrgans(), "plan")) != 0 {
 		t.Error("plan node has no direct slots (host-side object)")

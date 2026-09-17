@@ -74,9 +74,29 @@ type WirePoint struct {
 	TargetID  string // graph node id (ConnectomeNodes)
 	Target    string // human-readable edge description
 	Semantics WireSemantics
-	Parallel  bool // host may parallelize; the loop itself stays serial
-	Required  bool
-	Desc      string
+	// Slot is the runtime-replaceable name of this port ("" = not swappable);
+	// it is the single source of truth for the string a host passes to
+	// Agent.Replace. A slot implied by a parent (P5b) carries the parent's
+	// name, because swapping the parent swaps the whole port.
+	Slot     string
+	Parallel bool // host may parallelize; the loop itself stays serial
+	Required bool
+	Desc     string
+}
+
+// SwappableSlots returns the slot names Agent.Replace accepts, in blueprint
+// order, deduplicated. Each call returns a fresh slice.
+func SwappableSlots() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, wp := range Connectome() {
+		if wp.Slot == "" || seen[wp.Slot] {
+			continue
+		}
+		seen[wp.Slot] = true
+		out = append(out, wp.Slot)
+	}
+	return out
 }
 
 // Connectome returns the static wiring blueprint. Each call returns a fresh
@@ -86,32 +106,36 @@ func Connectome() []WirePoint {
 		// --- ports (phase 2: host-implemented, all required) ---
 		{ID: "P1", Name: "Think", Phase: 2, Category: CategoryDecide,
 			TargetID: "prompt", Target: "Prompt (all fields) → Decision", Semantics: SemRead,
-			Parallel: true, Required: true,
+			Parallel: true, Required: true, Slot: "think",
 			Desc: "LLM reasoning port; host may run parallel candidates"},
 		{ID: "P2", Name: "Act", Phase: 2, Category: CategoryAct,
 			TargetID: "action", Target: "Action → Effect", Semantics: SemAct,
-			Parallel: true, Required: true,
+			Parallel: true, Required: true, Slot: "act",
 			Desc: "tool execution port; host may run tools in parallel"},
 		{ID: "P3", Name: "Closer", Phase: 2, Category: CategoryAct,
 			TargetID: "resources", Target: "external resources", Semantics: SemAct,
 			Parallel: false, Required: true,
-			Desc: "cleanup port, called once by Agent.Close"},
+			Desc: "cleanup port, called once by Agent.Close; never swappable (resource binding)"},
 		{ID: "P4", Name: "Hooks", Phase: 2, Category: CategoryDecide,
 			TargetID: "hooks", Target: "H1–H8 sub-slots", Semantics: SemContainer,
-			Parallel: false, Required: true,
+			Parallel: false, Required: true, Slot: "hooks",
 			Desc: "callback container; inner functions are optional"},
 		{ID: "P5", Name: "Sandbox", Phase: 2, Category: CategoryAct,
 			TargetID: "action", Target: "Action", Semantics: SemGate,
-			Parallel: false, Required: true,
+			Parallel: false, Required: true, Slot: "sandbox",
 			Desc: "security gate before every tool execution"},
 		{ID: "P5b", Name: "Sandbox.Bounds", Phase: 2, Category: CategorySense,
 			TargetID: "bounds", Target: "Prompt.Bounds", Semantics: SemRead,
-			Parallel: false, Required: false,
+			Parallel: false, Required: false, Slot: "sandbox",
 			Desc: "execution boundary snapshot once per Stimulate; implied by P5"},
 		{ID: "P6", Name: "Budget", Phase: 2, Category: CategoryDecide,
 			TargetID: "context", Target: "Prompt.Context", Semantics: SemTrim,
-			Parallel: false, Required: true,
-			Desc: "context trimming before each Think"},
+			Parallel: false, Required: true, Slot: "budget",
+			Desc: "text-track trimming before each Think"},
+		{ID: "P6b", Name: "Budget.TrimResults", Phase: 2, Category: CategoryDecide,
+			TargetID: "toolresults", Target: "Prompt.ToolResults", Semantics: SemTrim,
+			Parallel: false, Required: false, Slot: "budget",
+			Desc: "structured-feedback trimming at the same checkpoint and limit; implied by P6"},
 
 		// --- hooks (phase 3: host runtime updates, all required) ---
 		{ID: "H1", Name: "BeforeStimulate", Phase: 3, Category: CategorySense,

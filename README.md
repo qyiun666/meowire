@@ -51,8 +51,8 @@ you can rely on.
 - **Six host-injected ports, all organs required** (no stubs, no optional
   wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
-  absence), `Sandbox` (permission membrane), `ContextBudget` (context
-  regulator — needs a Trimmer and MaxTokens)
+  absence), `Sandbox` (permission membrane), `ContextBudget` (token
+  regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens)
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
@@ -127,7 +127,7 @@ meowire (module root)
 | `Thinker` / `Effector` / `Closer` | ports | Host-provided capabilities |
 | `Hooks` | ports | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | guard | Tool permission gate, invoked before each Act; `Bounds()` surfaces the execution boundary to the Thinker via `Prompt.Bounds` |
-| `ContextBudget` | guard | Trims context before each Think |
+| `ContextBudget` | guard | Trims the text `Context` and the structured `ToolResults` before each Think, same limit |
 | `Event` | events | Typed observation mirror of the loop |
 | `Synapse` / `Memory` | internal | Standalone reference contracts for hosts |
 
@@ -194,11 +194,12 @@ func main() {
 			Think:   thinker{},
 			Act:     effector{},
 			Closer:  closer{},
-			Hooks:   &meowire.Hooks{},
+			Hooks:   meowire.FullHooks(meowire.Hooks{}), // all eight callbacks, explicit no-ops
 			Sandbox: sandbox{},
 			Budget: &meowire.ContextBudget{
-				MaxTokens: 8192,
-				Trimmer:   func(c []string, max int) []string { return c },
+				MaxTokens:   8192,
+				Trimmer:     func(c []string, max int) []string { return c },
+				TrimResults: func(rs []meowire.ToolResult, max int) []meowire.ToolResult { return rs },
 			},
 		},
 		Config: meowire.Config{},

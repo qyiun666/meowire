@@ -40,16 +40,12 @@ var repoDirs = []string{
 // with the reason it earns the pass. Anything else must be split, not exempted.
 //
 //	Connectome  static data table — its length is the blueprint, not logic
-//	Replace     slot dispatch in the cell; it collapses into a table lookup
-//	            once slots become data-driven, and pre-splitting it here would
-//	            collide with that change
 //	Hebbian     host-visible learning-rule signature: (s, from, to, rate)
 //	STDP        host-visible learning-rule signature: (s, from, to, dt, params)
 //	Resume      host-visible resume entry point: ctx, loop context, session,
 //	            response and the consumer's yield
 var complexityExempt = map[string]bool{
 	"Connectome": true,
-	"Replace":    true,
 	"Hebbian":    true,
 	"STDP":       true,
 	"Resume":     true,

@@ -93,44 +93,42 @@ func SlotsByTarget(o Organs, targetID string) []Slot {
 	return out
 }
 
+// organFilled answers "is this blueprint slot wired?" per slot id. Ports read
+// their own Organs field, hooks read the container plus the specific callback,
+// and the framework built-in / api-injected slots are always active. An
+// unknown id is reported unfilled: a slot the api does not know about cannot
+// be assumed present.
+var organFilled = map[string]func(Organs) bool{
+	"P1":  func(o Organs) bool { return o.Think != nil },
+	"P2":  func(o Organs) bool { return o.Act != nil },
+	"P3":  func(o Organs) bool { return o.Closer != nil },
+	"P4":  func(o Organs) bool { return o.Hooks != nil },
+	"P5":  func(o Organs) bool { return o.Sandbox != nil },
+	"P5b": func(o Organs) bool { return o.Sandbox != nil },
+	"P6":  func(o Organs) bool { return o.Budget != nil },
+	"P6b": func(o Organs) bool { return o.Budget != nil },
+	"H1":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.BeforeStimulate != nil },
+	"H2":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.AfterStimulate != nil },
+	"H3":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.BeforeThink != nil },
+	"H4":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.AfterThink != nil },
+	"H5":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.BeforeAct != nil },
+	"H6":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.AfterAct != nil },
+	"H7":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnError != nil },
+	"H8":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnCycleEnd != nil },
+	"F1":  func(Organs) bool { return true },
+	"G1":  func(Organs) bool { return true },
+}
+
+// impliedSlots are sub-slots carried by a parent port (Sandbox.Bounds by
+// Sandbox, Budget.TrimResults by Budget). They are reported by WiringDiagram
+// for inspection but never checked twice.
+var impliedSlots = map[string]bool{"P5b": true, "P6b": true}
+
 // slotFilled reports whether a blueprint slot is actually wired in the
-// assembly. Ports check their Organs field; hooks check the Hooks container
-// plus the specific callback; built-ins are always active.
+// assembly.
 func slotFilled(o Organs, id string) bool {
-	switch id {
-	case "P1":
-		return o.Think != nil
-	case "P2":
-		return o.Act != nil
-	case "P3":
-		return o.Closer != nil
-	case "P4":
-		return o.Hooks != nil
-	case "P5", "P5b":
-		return o.Sandbox != nil
-	case "P6":
-		return o.Budget != nil
-	case "H1":
-		return o.Hooks != nil && o.Hooks.BeforeStimulate != nil
-	case "H2":
-		return o.Hooks != nil && o.Hooks.AfterStimulate != nil
-	case "H3":
-		return o.Hooks != nil && o.Hooks.BeforeThink != nil
-	case "H4":
-		return o.Hooks != nil && o.Hooks.AfterThink != nil
-	case "H5":
-		return o.Hooks != nil && o.Hooks.BeforeAct != nil
-	case "H6":
-		return o.Hooks != nil && o.Hooks.AfterAct != nil
-	case "H7":
-		return o.Hooks != nil && o.Hooks.OnError != nil
-	case "H8":
-		return o.Hooks != nil && o.Hooks.OnCycleEnd != nil
-	case "F1", "G1":
-		return true // framework built-in / api-injected
-	default:
-		return false
-	}
+	filled, ok := organFilled[id]
+	return ok && filled(o)
 }
 
 // Validate compares a host assembly against the wiring blueprint and returns
@@ -149,9 +147,10 @@ func Validate(o Organs, cfg Config) []Issue {
 	var issues []Issue
 	slots := WiringDiagram(o)
 
-	// error: required slots missing (P5b is implied by P5 and not re-checked).
+	// error: required slots missing. Implied sub-slots ride their parent port,
+	// so they are not checked separately.
 	for _, s := range slots {
-		if s.Wire.ID == "P5b" {
+		if impliedSlots[s.Wire.ID] {
 			continue
 		}
 		if s.Wire.Required && !s.Filled {
@@ -164,14 +163,15 @@ func Validate(o Organs, cfg Config) []Issue {
 		}
 	}
 
-	// error: Budget present but incomplete — a trimmer is the organ's function,
-	// MaxTokens its limit; either missing means the port cannot regulate.
-	if o.Budget != nil && (o.Budget.Trimmer == nil || o.Budget.MaxTokens <= 0) {
+	// error: Budget present but incomplete — a trimmer per growing track is the
+	// organ's function and MaxTokens its limit; either missing means the budget
+	// cannot regulate what reaches the brain.
+	if o.Budget != nil && (o.Budget.Trimmer == nil || o.Budget.TrimResults == nil || o.Budget.MaxTokens <= 0) {
 		issues = append(issues, Issue{
 			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "P6",
-			Msg:   "ContextBudget must have a Trimmer and MaxTokens > 0 (a budget that does not trim is not a budget)",
+			Msg:   "ContextBudget must have a Trimmer, a TrimResults and MaxTokens > 0 (a budget that does not trim both tracks is not a budget)",
 		})
 	}
 
