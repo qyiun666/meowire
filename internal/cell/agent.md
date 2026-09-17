@@ -17,7 +17,7 @@
 - `Cell`: minimal agent kernel
   - `ID string`: unique identifier
   - `Identity string`: identity description text (host composed, injected into Prompt)
-  - Required ports (the api assembly enforces all six): `Think nerve.Thinker`, `Act nerve.Effector`, `Hooks`, `Sandbox`, `Budget`, `Mem nerve.Memory`; `snapshot` refuses to run only when Think/Act are missing, so a cell built directly (not through `api.New`) dereferences whatever it was given
+  - Required ports (the api assembly enforces all seven): `Think nerve.Thinker`, `Act nerve.Effector`, `Hooks`, `Sandbox`, `Budget`, `Mem nerve.Memory`; `snapshot` refuses to run only when Think/Act are missing, so a cell built directly (not through `api.New`) dereferences whatever it was given
   - Framework wiring: `PauseGate func() *nerve.PauseGate` (nil = pause unsupported; factory called per Stimulate for a fresh gate; since v1.3.2 PauseGate carries only IsPaused — an honored pause yields EventPaused + Session and ends the iterator, resumed via Resume(sess, ""))
   - Config: `MaxRounds`, `MaxToolOutput`, `MaxRetries`, `ToolTimeout`, `ToolMaxRetries`, `ParallelActs` (zero values use defaults / disabled; ParallelActs=false = strict serial); `UpdateConfig(cfg)` swaps wholesale at the next Stimulate/Resume and — since v1.3.2 — records a `ConfigAudit{CellID, Old, New}` drained into the next LoopContext and emitted as EventConfig after EventReplace (the config-update counterpart of the Replace audit)
   - Host-injected fixed parts: `System string`, `Methods []nerve.MethodSpec`, `Tools []nerve.ToolSpec`, `Context []string`

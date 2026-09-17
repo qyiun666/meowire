@@ -23,6 +23,9 @@ func (askSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) 
 }
 
 func (askSandbox) Bounds() string { return "test-ask" }
+func (askSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // runAskCycle runs one Stimulate whose first Think declares
 // [alpha, dangerous, gamma] (alpha/gamma serial variants drop extras) and

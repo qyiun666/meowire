@@ -16,6 +16,12 @@ import (
 // ErrMaxRounds is returned when the loop exhausts all rounds with pending tool calls.
 var ErrMaxRounds = errors.New("nerve: max rounds exceeded")
 
+// ErrForeignSession is returned when Resume is handed a Session produced by a
+// different cell: the handle carries that cell's context, output and pending
+// calls, and replaying it against another cell's organs would run one agent's
+// half-finished round with another agent's brain and tools.
+var ErrForeignSession = errors.New("nerve: session belongs to another cell")
+
 // LoopContext carries all data needed for a single Cycle invocation.
 type LoopContext struct {
 	// Identity
@@ -124,19 +130,21 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		emitError(ctx, lc, yield, fmt.Errorf("nerve: resume: invalid session"))
 		return
 	}
+	if sess.cell != lc.CellID {
+		emitError(ctx, lc, yield, fmt.Errorf("nerve: resume: %w (session from %q, resumed by %q)",
+			ErrForeignSession, sess.cell, lc.CellID))
+		return
+	}
 	// Load the session: stimulus, plan, accumulated context, plus the
 	// accumulated output.
 	lc.Input = sess.input
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
-	// The response attaches to the pending tool — the meaning depends on the
-	// suspension flavor. ask_user: the response IS the tool's structured
-	// result (single track — rendering is the host's call). A
-	// pause-suspended session has no pending tool (zero value) and resumes
-	// with an empty response: nothing is injected, the loop just continues.
-	// Sandbox ask: the response resolves the confirmation below.
-	if sess.pending.ID != "" && !sess.sandboxAsk {
+	// A tool wait consumes the response as the pending tool's structured result
+	// (rendering is the host's call). A pause injects nothing: the loop just
+	// continues. Both membrane asks resolve through the tri-state grammar below.
+	if sess.kind == waitTool && sess.pending.ID != "" {
 		lc.ToolResults = append(lc.ToolResults, ToolResult{
 			ID:     sess.pending.ID,
 			Name:   sess.pending.Name,
@@ -152,37 +160,18 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		return
 	}
 
-	// Sandbox-ask flavor: resolve the tri-state confirmation. An empty
-	// response denies as "declined", a "[denied: ...]" payload denies with
-	// that text, anything else approves the pending call through the standard
-	// admitted pipeline without re-gating (a stateless membrane would re-ask
-	// forever). Either arm emits the terminal EventSandbox that closes the ask
-	// chain; neither consumes a round.
-	if sess.pending.ID != "" && sess.sandboxAsk {
-		resp := strings.TrimSpace(response)
-		ruling, fb := VerdictDeny, "[sandbox-denied: declined]"
-		switch {
-		case resp == "":
-		case strings.HasPrefix(resp, "[denied:"):
-			fb = "[sandbox-denied" + strings.TrimPrefix(resp, "[denied")
-		default:
-			ruling, fb = VerdictAllow, resp
-		}
-		if !yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
-			CellID: lc.CellID, Call: sess.pending, Ruling: ruling, Reason: fb,
-		}}) {
+	switch sess.kind {
+	case waitCallAsk:
+		if !b.resolveCallAsk(sess, response) {
 			return
 		}
-		if ruling == VerdictAllow {
-			lc.State = StateActing
-			if !yield(Event{Kind: EventState, State: StateActing}) {
-				return
-			}
-			waiting, ok := b.admitted(sess.pending, slices.Clone(sess.remaining))
-			if !ok || waiting != nil {
-				return
-			}
-		} else if !b.deny(sess.pending, fb) {
+	case waitUtterance:
+		done, ok := b.resolveUtteranceAsk(sess, response)
+		if !ok {
+			return
+		}
+		if done {
+			finalOutput = announceDone(lc, b)
 			return
 		}
 	}
@@ -311,6 +300,13 @@ func settleRound(lc *LoopContext, b *actBatch, round int) string {
 		emitError(b.ctx, lc, b.yield, ErrMaxRounds)
 		return ""
 	}
+	return announceDone(lc, b)
+}
+
+// announceDone stamps the Done terminal and yields the two closing events,
+// returning the finalized output. The output is read before StateDone so
+// OnCycleEnd still receives it when the consumer stops at the done event.
+func announceDone(lc *LoopContext, b *actBatch) string {
 	lc.endWith(OutcomeDone)
 	final := b.out.String()
 	lc.State = StateDone
@@ -322,9 +318,10 @@ func settleRound(lc *LoopContext, b *actBatch, round int) string {
 }
 
 // think runs one round's Think phase: context budget trimming, memory recall,
-// the StateThinking event, prompt assembly, Think with retry, AfterThink, then
-// the text and usage events. It returns the decision, or nil when the loop must
-// end (an error was emitted or the consumer stopped).
+// the StateThinking event, prompt assembly, Think with retry, AfterThink, the
+// usage event, then the output membrane and the round's text. It returns the
+// decision, or nil when the loop must end (an error was emitted, the membrane
+// suspended for confirmation, or the consumer stopped).
 func (b *actBatch) think() (*Decision, bool) {
 	lc := b.lc
 
@@ -361,16 +358,19 @@ func (b *actBatch) think() (*Decision, bool) {
 		return nil, false
 	}
 
-	b.out.WriteString(dec.Text)
-	if !b.yield(Event{Kind: EventText, Text: dec.Text}) {
-		return nil, false
-	}
-
-	// Report token usage of this Think (nil = skip accounting)
+	// Report token usage of this Think (nil = skip accounting) before the
+	// membrane gets the text: usage belongs to the Think, and an Ask ruling
+	// ends the iterator here.
 	if dec.Usage != nil {
 		if !b.yield(Event{Kind: EventUsage, Usage: dec.Usage}) {
 			return nil, false
 		}
+	}
+
+	// Output membrane: nothing reaches the consumer (or the accumulated
+	// output) before the ruling lands.
+	if !b.utter(dec) {
+		return nil, false
 	}
 	return dec, true
 }

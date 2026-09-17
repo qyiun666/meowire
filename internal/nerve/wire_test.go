@@ -56,7 +56,7 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 		byID[wp.ID] = wp
 	}
 	want := []string{
-		"P1", "P2", "P3", "P4", "P5", "P5b", "P6", "P6b", "P7", "P7b", // ports
+		"P1", "P2", "P3", "P4", "P5", "P5b", "P5c", "P6", "P6b", "P7", "P7b", // ports
 		"H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", // hooks
 		"F1", "G1", // framework built-ins
 	}

@@ -53,6 +53,7 @@ func TestStimulateEventSequence(t *testing.T) {
 		text string
 	}{
 		{meowire.EventState, ""},
+		{meowire.EventSandbox, ""},
 		{meowire.EventText, "final-output"},
 		{meowire.EventState, ""},
 		{meowire.EventDone, ""},
@@ -66,11 +67,11 @@ func TestStimulateEventSequence(t *testing.T) {
 			t.Fatalf("events[%d].Kind = %d, want %d", i, events[i].Kind, w.kind)
 		}
 	}
-	if events[1].Text != "final-output" {
-		t.Fatalf("events[1].Text = %q, want %q", events[1].Text, "final-output")
+	if events[2].Text != "final-output" {
+		t.Fatalf("events[2].Text = %q, want %q", events[2].Text, "final-output")
 	}
-	if events[3].Output != "final-output" {
-		t.Fatalf("events[3].Output = %q, want %q", events[3].Output, "final-output")
+	if events[4].Output != "final-output" {
+		t.Fatalf("events[4].Output = %q, want %q", events[4].Output, "final-output")
 	}
 }
 

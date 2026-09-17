@@ -6,6 +6,7 @@ package nerve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -16,6 +17,7 @@ import (
 // primitive hosts use to save and restore a suspended loop.
 func TestSessionMarshalRoundTrip(t *testing.T) {
 	sess := Session{
+		cell:        "c1",
 		round:       3,
 		input:       "in",
 		plan:        "plan",
@@ -33,8 +35,8 @@ func TestSessionMarshalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalSession: %v", err)
 	}
-	if got.round != 3 || got.input != "in" || got.plan != "plan" || got.output != "out" {
-		t.Fatalf("unmarshaled scalars = %d/%q/%q/%q, want 3/in/plan/out", got.round, got.input, got.plan, got.output)
+	if got.cell != "c1" || got.round != 3 || got.input != "in" || got.plan != "plan" || got.output != "out" {
+		t.Fatalf("unmarshaled scalars = %q/%d/%q/%q/%q, want c1/3/in/plan/out", got.cell, got.round, got.input, got.plan, got.output)
 	}
 	if len(got.context) != 2 || got.context[0] != "ctx1" || got.context[1] != "ctx2" {
 		t.Fatalf("unmarshaled context = %v, want [ctx1 ctx2]", got.context)
@@ -153,7 +155,7 @@ func TestDecisionLoopWaitInputSuspends(t *testing.T) {
 	}
 	events, wait := runSuspendingCycle(t, lc)
 
-	want := []EventKind{EventState, EventText, EventState, EventToolCall, EventSandbox, EventState, EventWaitInput}
+	want := []EventKind{EventState, EventSandbox, EventText, EventState, EventToolCall, EventSandbox, EventState, EventWaitInput}
 	if !slicesEqual(kindsOf(events), want) {
 		t.Fatalf("events = %v, want %v", kindsOf(events), want)
 	}
@@ -385,6 +387,52 @@ func TestDecisionLoopResumeInvalidSession(t *testing.T) {
 	}
 }
 
+// TestResumeRejectsForeignSession verifies a handle snapshotted by one cell is
+// rejected by another: the loop state belongs to the cell that suspended it, and
+// replaying it with different organs would run the first cell's round on the
+// second cell's ports.
+func TestResumeRejectsForeignSession(t *testing.T) {
+	thinkerA := &LoopContext{
+		CellID: "a",
+		Input:  "work",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			return &Decision{Text: "ask", ToolCalls: []ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{WaitInput: "q?"}, nil
+		}},
+	}
+	_, wait := runSuspendingCycle(t, thinkerA)
+	if wait == nil {
+		t.Fatal("no EventWaitInput yielded")
+	}
+	suspended := wait.Session
+
+	thinks := 0
+	cycleEnd := 0
+	lcB := &LoopContext{
+		CellID: "b",
+		Input:  "other work",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			thinks++
+			return &Decision{Text: "should never run"}, nil
+		}},
+		Act:   mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) { return &Effect{}, nil }},
+		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) { cycleEnd++ }},
+	}
+	events := collectResume(context.Background(), lcB, suspended, "yes")
+	last := events[len(events)-1]
+	if last.Kind != EventError || !errors.Is(last.Err, ErrForeignSession) {
+		t.Fatalf("last event = %+v, want EventError(%v)", last, ErrForeignSession)
+	}
+	if thinks != 0 {
+		t.Fatalf("foreign cell Think calls = %d, want 0", thinks)
+	}
+	if cycleEnd != 1 {
+		t.Fatalf("OnCycleEnd calls = %d, want 1 (the guarantee holds on rejection)", cycleEnd)
+	}
+}
+
 // TestDecisionLoopResumeCtxCancel verifies a canceled Resume context fails
 // fast through the prologue.
 func TestDecisionLoopResumeCtxCancel(t *testing.T) {
@@ -400,9 +448,9 @@ func TestDecisionLoopResumeCtxCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	// A valid session: the cancellation must fail through the prologue, not
-	// through the session validity check.
-	sess := Session{round: 1, input: "w", context: []string{}, pending: ToolCall{ID: "t1", Name: "ask_user"}}
+	// A valid session owned by this cell: the cancellation must fail through
+	// the prologue, not through the session entry checks.
+	sess := Session{cell: "c1", round: 1, input: "w", context: []string{}, pending: ToolCall{ID: "t1", Name: "ask_user"}}
 	events := collectResume(ctx, lc, sess, "yes")
 	last := events[len(events)-1]
 	if last.Kind != EventError {

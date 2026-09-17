@@ -42,7 +42,7 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 	}
 }
 
-// TestCellStimulate verifies basic event flow: State→Text→Done.
+// TestCellStimulate verifies basic event flow: State→Sandbox→Text→Done.
 func TestCellStimulate(t *testing.T) {
 	c := newTestCell(t,
 		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
@@ -58,21 +58,24 @@ func TestCellStimulate(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	// Expect: State(thinking), Text, State(done), Done
-	if len(events) != 4 {
-		t.Fatalf("events count = %d, want 4; events: %+v", len(events), events)
+	// Expect: State(thinking), Sandbox(utterance allow), Text, State(done), Done
+	if len(events) != 5 {
+		t.Fatalf("events count = %d, want 5; events: %+v", len(events), events)
 	}
 	if events[0].Kind != nerve.EventState || events[0].State != nerve.StateThinking {
 		t.Fatalf("events[0] = %+v, want EventState(StateThinking)", events[0])
 	}
-	if events[1].Kind != nerve.EventText || events[1].Text != "hello-response" {
-		t.Fatalf("events[1] = %+v, want EventText(hello-response)", events[1])
+	if events[1].Kind != nerve.EventSandbox || events[1].Verdict.Ruling != nerve.VerdictAllow {
+		t.Fatalf("events[1] = %+v, want EventSandbox(allow)", events[1])
 	}
-	if events[2].Kind != nerve.EventState || events[2].State != nerve.StateDone {
-		t.Fatalf("events[2] = %+v, want EventState(StateDone)", events[2])
+	if events[2].Kind != nerve.EventText || events[2].Text != "hello-response" {
+		t.Fatalf("events[2] = %+v, want EventText(hello-response)", events[2])
 	}
-	if events[3].Kind != nerve.EventDone || events[3].Output != "hello-response" {
-		t.Fatalf("events[3] = %+v, want EventDone(hello-response)", events[3])
+	if events[3].Kind != nerve.EventState || events[3].State != nerve.StateDone {
+		t.Fatalf("events[3] = %+v, want EventState(StateDone)", events[3])
+	}
+	if events[4].Kind != nerve.EventDone || events[4].Output != "hello-response" {
+		t.Fatalf("events[4] = %+v, want EventDone(hello-response)", events[4])
 	}
 }
 

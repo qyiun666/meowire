@@ -348,12 +348,13 @@ import (
 	meowire "github.com/qyiun666/meowire/api"
 )
 
-// ---- Sandbox：每次工具执行前三态裁决；拒绝 = 反馈，不终止循环 ----
+// ---- Sandbox：循环两侧三态裁决——Allow 守执行、Emit 守出口；拒绝 = 反馈，不终止循环 ----
 
 type sandbox struct {
-	allowed   map[string]bool // 工具名白名单（白名单验证，非黑名单）
-	dangerous map[string]bool // 敏感工具 → VerdictAsk 挂起征询
-	bounds    string          // 执行边界描述（透传给 LLM）
+	allowed      map[string]bool // 工具名白名单（白名单验证，非黑名单）
+	dangerous    map[string]bool // 敏感工具 → VerdictAsk 挂起征询
+	secretMarker string          // 出口审查标记（出现在草稿里即拒绝该轮文本）
+	bounds       string          // 执行边界描述（透传给 LLM）
 }
 
 func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
@@ -370,6 +371,14 @@ func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict,
 		return meowire.VerdictAsk, "允许执行 " + a.Call.Name + " 吗？", nil
 	}
 	return meowire.VerdictDeny, "tool not in whitelist: "+a.Call.Name, nil
+}
+
+// Emit 在该轮文本被任何人听到之前过审：拒绝即取代草稿，不终止循环。
+func (s *sandbox) Emit(ctx context.Context, u meowire.Utterance) (meowire.Verdict, string, error) {
+	if s.secretMarker != "" && strings.Contains(u.Text, s.secretMarker) {
+		return meowire.VerdictDeny, "contains a secret", nil
+	}
+	return meowire.VerdictAllow, "", nil
 }
 
 func (s *sandbox) Bounds() string { return s.bounds }
@@ -398,6 +407,8 @@ func trimResults(rs []meowire.ToolResult, max int) []meowire.ToolResult {
 - `Allow` 返回 `(VerdictAllow, _, nil)` 放行执行；返回 `(VerdictDeny, reason, nil)` → 框架生成 `[sandbox-denied: reason]` 反馈，**循环继续**——阻力是反馈不是失败（Deny 是零值，fail-closed）
 - `Allow` 返回 `(VerdictAsk, 问题, nil)` → **挂起征询**：走与 ask_user 相同的挂起-恢复协议，批准后才执行且不再重新过门禁
 - `Allow` 返回 error → 按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`
+- `Emit` 每轮 Think 出文本后、该文本进入事件流与累积输出之前调用：`Allow` 原样说出，`Deny` 以 `[sandbox-denied: reason]` 取代该轮文本（并进 Context，下一轮读得到），`Ask` 扣住草稿挂起，批复后按原稿说出、不重跑该轮 Think
+- `Emit` 返回 error 同样按 Deny 处理（fail-closed），审计记录 `Call` 为零值即文本侧裁决
 - `Bounds()` 每次 `Stimulate` 开始时快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
 - 裁剪器不想裁时返回入参原切片即可；但两条轨都必须给：`Trimmer`、`TrimResults` 任一为 nil 或 `MaxTokens <= 0` 装配失败
 

@@ -32,7 +32,7 @@ func (b *actBatch) pause(remaining []ToolCall) bool {
 	if !b.yield(Event{Kind: EventState, State: StatePaused}) {
 		return false
 	}
-	w := b.snapshot(ToolCall{}, remaining)
+	w := b.snapshot(suspension{remaining: remaining, kind: waitPause})
 	lc.endWith(OutcomeSuspended) // a Resume will continue this cycle
 	if !b.yield(Event{Kind: EventPaused, Wait: w}) {
 		return false
@@ -40,11 +40,23 @@ func (b *actBatch) pause(remaining []ToolCall) bool {
 	return false
 }
 
+// suspension describes one stop for external input: the call being waited on
+// (zero for a pause or an utterance confirmation), the calls that still have
+// to run, the question shown to the outside, why the loop stopped, and the
+// text the output membrane withheld.
+type suspension struct {
+	pending   ToolCall
+	remaining []ToolCall
+	question  string
+	kind      waitKind
+	utterance string // withheld text (kind == waitUtterance)
+}
+
 // snapshot freezes the loop state into a WaitInput handle — the single
-// suspension primitive behind tool waits, sandbox asks and pauses alike.
-// pending is the suspending tool (zero for a pause), remaining the calls after
-// the suspension point.
-func (b *actBatch) snapshot(pending ToolCall, remaining []ToolCall) *WaitInput {
+// suspension primitive behind tool waits, both membrane asks and pauses
+// alike. The handle records which cell produced it: a Session is only valid
+// against the organs that made it.
+func (b *actBatch) snapshot(s suspension) *WaitInput {
 	lc := b.lc
 	sess := Session{
 		round:       b.round,
@@ -52,22 +64,21 @@ func (b *actBatch) snapshot(pending ToolCall, remaining []ToolCall) *WaitInput {
 		plan:        lc.Plan,
 		context:     slices.Clone(lc.Context),
 		output:      b.out.String(),
-		pending:     pending,
-		remaining:   slices.Clone(remaining),
+		pending:     s.pending,
+		remaining:   slices.Clone(s.remaining),
 		toolResults: slices.Clone(lc.ToolResults),
+		cell:        lc.CellID,
+		kind:        s.kind,
+		utterance:   s.utterance,
 	}
-	return &WaitInput{CellID: lc.CellID, Call: pending, Session: sess}
+	return &WaitInput{CellID: lc.CellID, Call: s.pending, Question: s.question, Session: sess}
 }
 
 // suspend ends the iterator on a wait: snapshot, StateWaiting, then the two
-// wait events. sandboxAsk flavors the Session as a membrane confirmation
-// (resolved through the tri-state protocol on Resume) rather than a
-// tool-requested wait. Returns false when the consumer stopped.
-func (b *actBatch) suspend(pending ToolCall, remaining []ToolCall, question string, sandboxAsk bool) (*WaitInput, bool) {
+// wait events. Returns false when the consumer stopped.
+func (b *actBatch) suspend(s suspension) (*WaitInput, bool) {
 	lc := b.lc
-	w := b.snapshot(pending, remaining)
-	w.Question = question
-	w.Session.sandboxAsk = sandboxAsk
+	w := b.snapshot(s)
 	lc.endWith(OutcomeSuspended) // a Resume will continue this cycle
 	lc.State = StateWaiting
 	if !b.yield(Event{Kind: EventState, State: StateWaiting}) {

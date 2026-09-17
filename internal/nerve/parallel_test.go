@@ -148,6 +148,9 @@ func (denyOddSandbox) Allow(ctx context.Context, a Action) (Verdict, string, err
 }
 
 func (denyOddSandbox) Bounds() string { return "deny-odd" }
+func (denyOddSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // TestParallelActsBatchDenialIsolation: acceptance 4 — one denied call in
 // the batch produces its denial feedback and is skipped; the sibling runs
@@ -181,17 +184,15 @@ func TestParallelActsBatchDenialIsolation(t *testing.T) {
 	}
 	events := collectEvents(context.Background(), lc)
 
-	// Both calls audited: one denied verdict, one allowed verdict.
+	// Both calls audited on the tool side: one denied verdict, one allowed verdict.
 	var denied, allowed int
-	for _, e := range events {
-		if e.Kind == EventSandbox && e.Verdict != nil {
-			switch e.Verdict.Ruling {
-			case VerdictAllow:
-				allowed++
-			case VerdictDeny:
-				if e.Verdict.Reason == "odd calls are forbidden" {
-					denied++
-				}
+	for _, v := range toolVerdicts(events) {
+		switch v.Ruling {
+		case VerdictAllow:
+			allowed++
+		case VerdictDeny:
+			if v.Reason == "odd calls are forbidden" {
+				denied++
 			}
 		}
 	}
@@ -409,8 +410,8 @@ func TestParallelActsSingleCallKeepsSerialPath(t *testing.T) {
 	events := collectEvents(context.Background(), lc)
 
 	want := []EventKind{
-		EventState, EventText, EventState, EventToolCall, EventSandbox, EventToolResult,
-		EventState, EventText, EventState, EventDone,
+		EventState, EventSandbox, EventText, EventState, EventToolCall, EventSandbox, EventToolResult,
+		EventState, EventSandbox, EventText, EventState, EventDone,
 	}
 	if !slicesEqual(kindsOf(events), want) {
 		t.Fatalf("event kinds = %v, want serial shape %v", kindsOf(events), want)

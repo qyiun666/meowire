@@ -124,7 +124,7 @@ var organFilled = map[string]func(Organs) bool{
 // impliedSlots are sub-slots carried by a parent port (Sandbox.Bounds by
 // Sandbox, Budget.TrimResults and Mem.Remember by their own port). They are
 // reported by WiringDiagram for inspection but never checked twice.
-var impliedSlots = map[string]bool{"P5b": true, "P6b": true, "P7b": true}
+var impliedSlots = map[string]bool{"P5b": true, "P5c": true, "P6b": true, "P7b": true}
 
 // slotFilled reports whether a blueprint slot is actually wired in the
 // assembly.

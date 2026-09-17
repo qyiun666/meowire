@@ -39,6 +39,10 @@ type (
 	Usage      = nerve.Usage
 	Verdict    = nerve.Verdict // tri-state sandbox ruling (Deny / Allow / Ask)
 
+	// Utterance is what the output half of the membrane (Sandbox.Emit) is
+	// asked to rule on: one round's generated text.
+	Utterance = nerve.Utterance
+
 	// Memory port payload (P7): what recall returns and what a finished
 	// invocation hands back for persistence.
 	Record      = nerve.Record

@@ -252,4 +252,8 @@ func (d denyToolSandbox) Allow(ctx context.Context, a Action) (Verdict, string, 
 	return VerdictAllow, "", nil
 }
 
+func (d denyToolSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
+
 func (d denyToolSandbox) Bounds() string { return "test" }

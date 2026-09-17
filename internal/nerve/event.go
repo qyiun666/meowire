@@ -25,14 +25,15 @@ type Event struct {
 	Config   *ConfigAudit    // EventConfig: runtime config swap record (audit)
 }
 
-// SandboxVerdict is the audit record of one sandbox decision: every tool
-// execution attempt produces exactly one verdict before the tool runs,
-// and an Ask resolution adds a second terminal record (ask → allow/deny),
-// closing the chain. Hosts persist these to build the action-level audit
-// trail (who/what/why was permitted) required by the Authority model.
+// SandboxVerdict is the audit record of one membrane ruling. The guard covers
+// both sides of the loop and each ruling is audited exactly once: a tool
+// attempt records its Call before execution, a round's text records a zero
+// Call. Either side's Ask resolution adds a second terminal record (ask →
+// allow/deny), closing the chain. Hosts persist these to build the
+// who/what/why-was-permitted trail required by the Authority model.
 type SandboxVerdict struct {
 	CellID   string   // owning agent id
-	Call     ToolCall // the tool action being gated
+	Call     ToolCall // the gated tool action; zero for an utterance-side ruling
 	Ruling   Verdict  // tri-state decision: Deny / Allow / Ask
 	Reason   string   // policy reason ("" when allowed; the denial text when resolved-as-denied)
 	Question string   // confirmation prompt carried by an Ask ruling ("" otherwise)

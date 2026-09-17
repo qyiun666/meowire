@@ -77,7 +77,7 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 					tail = append(tail, other)
 				}
 			}
-			w, yOk := b.suspend(tc, tail, g.question, true)
+			w, yOk := b.suspend(suspension{pending: tc, remaining: tail, question: g.question, kind: waitCallAsk})
 			return nil, w, !yOk
 		case VerdictDeny:
 			if !b.deny(tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason)) {
@@ -135,7 +135,7 @@ func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*W
 	if suspendAt < 0 {
 		return nil, true
 	}
-	w, yOk := b.suspend(batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, false)
+	w, yOk := b.suspend(suspension{pending: batch[suspendAt].call, question: results[suspendAt].eff.WaitInput, kind: waitTool})
 	if !yOk {
 		return nil, false
 	}

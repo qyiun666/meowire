@@ -55,6 +55,9 @@ func (testSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error)
 }
 
 func (testSandbox) Bounds() string { return "test" }
+func (testSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // testBudget returns the context unchanged.
 func testBudget() *ContextBudget {
@@ -122,7 +125,30 @@ func collectEvents(ctx context.Context, lc *LoopContext) []Event {
 	return events
 }
 
-// TestDecisionLoopBasicFlow: Think returns no ToolCalls → EventState(thinking) → EventText → EventState(done) → EventDone.
+// The membrane audits both sides of the loop, so EventSandbox records are
+// separated by subject: a tool-side record names a Call, an utterance-side
+// record carries a zero Call.
+func toolVerdicts(events []Event) []*SandboxVerdict {
+	var out []*SandboxVerdict
+	for _, e := range events {
+		if e.Kind == EventSandbox && e.Verdict.Call.Name != "" {
+			out = append(out, e.Verdict)
+		}
+	}
+	return out
+}
+
+func utteranceVerdicts(events []Event) []*SandboxVerdict {
+	var out []*SandboxVerdict
+	for _, e := range events {
+		if e.Kind == EventSandbox && e.Verdict.Call.Name == "" {
+			out = append(out, e.Verdict)
+		}
+	}
+	return out
+}
+
+// TestDecisionLoopBasicFlow: Think returns no ToolCalls → EventState(thinking) → EventSandbox → EventText → EventState(done) → EventDone.
 func TestDecisionLoopBasicFlow(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
@@ -136,21 +162,24 @@ func TestDecisionLoopBasicFlow(t *testing.T) {
 	}
 	events := collectEvents(context.Background(), lc)
 
-	// Expect: State(thinking), Text, State(done), Done
-	if len(events) != 4 {
-		t.Fatalf("events count = %d, want 4; events: %+v", len(events), events)
+	// Expect: State(thinking), Sandbox(allow), Text, State(done), Done
+	if len(events) != 5 {
+		t.Fatalf("events count = %d, want 5; events: %+v", len(events), events)
 	}
 	if events[0].Kind != EventState || events[0].State != StateThinking {
 		t.Fatalf("events[0] = %+v, want EventState(StateThinking)", events[0])
 	}
-	if events[1].Kind != EventText || events[1].Text != "response" {
-		t.Fatalf("events[1] = %+v, want EventText(response)", events[1])
+	if events[1].Kind != EventSandbox || events[1].Verdict.Ruling != VerdictAllow || events[1].Verdict.Call != (ToolCall{}) {
+		t.Fatalf("events[1] = %+v, want utterance-side EventSandbox(allow)", events[1])
 	}
-	if events[2].Kind != EventState || events[2].State != StateDone {
-		t.Fatalf("events[2] = %+v, want EventState(StateDone)", events[2])
+	if events[2].Kind != EventText || events[2].Text != "response" {
+		t.Fatalf("events[2] = %+v, want EventText(response)", events[2])
 	}
-	if events[3].Kind != EventDone || events[3].Output != "response" {
-		t.Fatalf("events[3] = %+v, want EventDone(response)", events[3])
+	if events[3].Kind != EventState || events[3].State != StateDone {
+		t.Fatalf("events[3] = %+v, want EventState(StateDone)", events[3])
+	}
+	if events[4].Kind != EventDone || events[4].Output != "response" {
+		t.Fatalf("events[4] = %+v, want EventDone(response)", events[4])
 	}
 }
 
@@ -177,15 +206,16 @@ func TestDecisionLoopWithToolCalls(t *testing.T) {
 	}
 	events := collectEvents(context.Background(), lc)
 
-	// Expect: State(thinking), Text("need-tool"), State(acting), EventToolCall, EventToolResult,
-	//        State(thinking), Text("done"), State(done), Done
+	// Expect: State(thinking), Sandbox(utterance), Text("need-tool"), State(acting), EventToolCall,
+	//        Sandbox(call), EventToolResult,
+	//        State(thinking), Sandbox(utterance), Text("done"), State(done), Done
 	kinds := make([]EventKind, len(events))
 	for i, e := range events {
 		kinds[i] = e.Kind
 	}
 	wantKinds := []EventKind{
-		EventState, EventText, EventState, EventToolCall, EventSandbox, EventToolResult,
-		EventState, EventText, EventState, EventDone,
+		EventState, EventSandbox, EventText, EventState, EventToolCall, EventSandbox, EventToolResult,
+		EventState, EventSandbox, EventText, EventState, EventDone,
 	}
 	if len(kinds) != len(wantKinds) {
 		t.Fatalf("event kinds = %v, want %v", kinds, wantKinds)
@@ -379,6 +409,9 @@ func (denySandbox) Allow(ctx context.Context, a Action) (Verdict, string, error)
 }
 
 func (denySandbox) Bounds() string { return "deny-all" }
+func (denySandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // auditSandbox denies "rm" with a policy reason and allows everything else.
 type auditSandbox struct{}
@@ -391,11 +424,14 @@ func (auditSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error
 }
 
 func (auditSandbox) Bounds() string { return "audit-all" }
+func (auditSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // TestDecisionLoopSandboxAuditAllow: the membrane yields an
 // EventSandbox(allowed) verdict before the tool runs — the action-level
 // audit record the Authority model requires (the membrane is required, so
-// every tool execution is audited).
+// every ruling on either side is audited; this test counts the tool side).
 func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
 	calls := 0
 	lc := &LoopContext{
@@ -416,14 +452,9 @@ func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
 	}
 	events := collectEvents(context.Background(), lc)
 
-	var verdicts []*SandboxVerdict
-	for _, e := range events {
-		if e.Kind == EventSandbox {
-			verdicts = append(verdicts, e.Verdict)
-		}
-	}
+	verdicts := toolVerdicts(events)
 	if len(verdicts) != 1 {
-		t.Fatalf("sandbox verdicts = %d, want 1", len(verdicts))
+		t.Fatalf("tool-side sandbox verdicts = %d, want 1", len(verdicts))
 	}
 	v := verdicts[0]
 	if v.Ruling != VerdictAllow || v.Reason != "" || v.Err != nil {
@@ -431,6 +462,9 @@ func TestDecisionLoopSandboxAuditAllow(t *testing.T) {
 	}
 	if v.CellID != "c1" || v.Call.Name != "calc" {
 		t.Fatalf("verdict = %+v, want CellID c1 and Call calc", v)
+	}
+	if got := utteranceVerdicts(events); len(got) != 2 || got[0].Ruling != VerdictAllow || got[1].Ruling != VerdictAllow {
+		t.Fatalf("utterance-side verdicts = %+v, want one allowed record per round", got)
 	}
 }
 
@@ -526,7 +560,7 @@ func TestDecisionLoopOnCycleEndOnAbort(t *testing.T) {
 	(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
 		got = append(got, e.Kind)
 		// Stop right after EventState(StateDone) — before EventDone is consumed.
-		return len(got) < 3
+		return !(e.Kind == EventState && e.State == StateDone)
 	})
 	if cycleEndCalls != 1 {
 		t.Fatalf("OnCycleEnd calls = %d, want 1", cycleEndCalls)
@@ -839,19 +873,19 @@ func TestEventUsage(t *testing.T) {
 	}
 	events := collectEvents(context.Background(), lc)
 
-	// Expect: State(thinking), Text, Usage, State(done), Done
-	if len(events) != 5 {
-		t.Fatalf("events count = %d, want 5; events: %+v", len(events), events)
+	// Expect: State(thinking), Usage, Sandbox(utterance), Text, State(done), Done
+	if len(events) != 6 {
+		t.Fatalf("events count = %d, want 6; events: %+v", len(events), events)
 	}
-	u := events[2]
+	u := events[1]
 	if u.Kind != EventUsage || u.Usage == nil {
-		t.Fatalf("events[2] = %+v, want EventUsage with Usage", u)
+		t.Fatalf("events[1] = %+v, want EventUsage with Usage", u)
 	}
 	if u.Usage.Total != 15 {
 		t.Fatalf("usage total = %d, want 15", u.Usage.Total)
 	}
-	if events[3].Kind != EventState || events[3].State != StateDone {
-		t.Fatalf("events[3] = %+v, want EventState(StateDone)", events[3])
+	if events[4].Kind != EventState || events[4].State != StateDone {
+		t.Fatalf("events[4] = %+v, want EventState(StateDone)", events[4])
 	}
 }
 
@@ -1193,13 +1227,13 @@ func TestDecisionLoopPauseSuspends(t *testing.T) {
 		return true
 	})
 
-	// Expect: State(thinking), Text, State(acting), ToolCall, State(paused), EventPaused
-	want := []EventKind{EventState, EventText, EventState, EventToolCall, EventState, EventPaused}
+	// Expect: State(thinking), Sandbox(utterance), Text, State(acting), ToolCall, State(paused), EventPaused
+	want := []EventKind{EventState, EventSandbox, EventText, EventState, EventToolCall, EventState, EventPaused}
 	if !slicesEqual(kindsOf(events), want) {
 		t.Fatalf("event kinds = %v, want %v", kindsOf(events), want)
 	}
-	if events[4].Kind != EventState || events[4].State != StatePaused {
-		t.Fatalf("events[4] = %+v, want EventState(StatePaused)", events[4])
+	if events[5].Kind != EventState || events[5].State != StatePaused {
+		t.Fatalf("events[5] = %+v, want EventState(StatePaused)", events[5])
 	}
 	if wait == nil {
 		t.Fatal("no EventPaused yielded")
@@ -1561,6 +1595,9 @@ func (boundsSandbox) Allow(ctx context.Context, a Action) (Verdict, string, erro
 }
 
 func (boundsSandbox) Bounds() string { return "only /workspace" }
+func (boundsSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
 
 // TestActWithRetryAndTimeoutTransientError verifies a transient effector error
 // is still retried when ToolTimeout is configured but does not fire

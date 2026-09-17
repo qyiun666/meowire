@@ -176,7 +176,7 @@ func TestAuditOrderReplaceBeforeConfig(t *testing.T) {
 			break
 		}
 	}
-	want := []meowire.EventKind{meowire.EventReplace, meowire.EventConfig, meowire.EventState, meowire.EventText, meowire.EventState, meowire.EventDone}
+	want := []meowire.EventKind{meowire.EventReplace, meowire.EventConfig, meowire.EventState, meowire.EventSandbox, meowire.EventText, meowire.EventState, meowire.EventDone}
 	if len(kinds) != len(want) {
 		t.Fatalf("event kinds = %v, want %v", kinds, want)
 	}

@@ -30,7 +30,8 @@ meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）
 | `Effector` 端口 | MCP client（工具调用） | `Organs.Act` |
 | `ToolSpec` | MCP server 的 `tools` 列表投影 | `Organs.Tools` |
 | `Sandbox.Allow` | Authority 动作级授权（每次执行前） | `Organs.Sandbox` |
-| `EventSandbox` | 审计记录（谁/什么/为什么被允许） | 事件流持久化 |
+| `Sandbox.Emit` | 出口审查（该轮文本被听到前） | `Organs.Sandbox` |
+| `EventSandbox` | 审计记录（谁/什么/为什么被允许，两侧同一通道） | 事件流持久化 |
 | `Synapse` 契约 | A2A（Agent 间任务委托） | 宿主路由/消息工具 |
 | `Methods` | Agent Card 能力声明（机器可读） | `Organs.Methods` |
 | `System` / `Identity` | AGENTS.md（人机协作边界） | `Organs.System` / `Identity` |
@@ -81,17 +82,18 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，agent 间通�
   `Organs.Identity`（身份/人格），框架不解析格式——政策是文本，
   边界是代码（`Sandbox`）。
 
-## 4. Authority（动作级授权 + 审计）
+## 4. Authority（两侧授权 + 审计）
 
-- `Sandbox.Allow(ctx, Action)` 在**每次工具执行前**被调用——这就是
-  动作级授权点（对比"登录后一路放行"的会话级授权）。宿主在此结合
+- `Sandbox.Allow(ctx, Action)` 在**每次工具执行前**被调用，`Sandbox.Emit(ctx,
+  Utterance)` 在**该轮文本被任何人听到前**被调用——循环两侧各一个授权点
+  （对比"登录后一路放行"的会话级授权）。宿主在此结合
   身份、被委托的 authority、组织策略、声明的 intent 与实时上下文
   做决策。
-- **裁决**：`Sandbox.Allow` 返回三态 `Verdict`——`VerdictAllow` 放行、
+- **裁决**：两个方法各返回三态 `Verdict`——`VerdictAllow` 放行、
   `VerdictDeny`（零值，fail-closed）拒绝、`VerdictAsk` 挂起征询外部确认
-  （复用统一的挂起-恢复协议，批准才执行）。
-- **审计**：每次决策产出 `EventSandbox` 事件，携带 CellID、工具调用、裁决
-  （Ruling）、策略原因/征询问题与评估错误；ask 裁决以终结的第二条记录闭合
+  （复用统一的挂起-恢复协议，批准才生效；文本侧征询时草稿扣在 `Session` 里）。
+- **审计**：每次裁决产出 `EventSandbox` 事件，携带 CellID、工具调用（文本侧裁决为
+  零值）、裁决（Ruling）、策略原因/征询问题与评估错误；ask 裁决以终结的第二条记录闭合
   审计链。宿主持久化事件流即得到完整审计日志（谁、代表谁、何时、做了什么、
   为什么被允许）。
 - `Sandbox.Bounds()` 在每次 `Stimulate` 开始时快照进 `Prompt.Bounds`，

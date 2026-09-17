@@ -130,14 +130,17 @@ func TestNewAndStimulate(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	if len(events) != 4 {
-		t.Fatalf("events count = %d, want 4", len(events))
+	if len(events) != 5 {
+		t.Fatalf("events count = %d, want 5", len(events))
 	}
-	if events[1].Kind != meowire.EventText || events[1].Text != "meow-answer" {
-		t.Fatalf("events[1] = %+v, want EventText(meow-answer)", events[1])
+	if events[1].Kind != meowire.EventSandbox || events[1].Verdict.Ruling != meowire.VerdictAllow {
+		t.Fatalf("events[1] = %+v, want EventSandbox(allow) from the output membrane", events[1])
 	}
-	if events[3].Kind != meowire.EventDone || events[3].Output != "meow-answer" {
-		t.Fatalf("events[3] = %+v, want EventDone(meow-answer)", events[3])
+	if events[2].Kind != meowire.EventText || events[2].Text != "meow-answer" {
+		t.Fatalf("events[2] = %+v, want EventText(meow-answer)", events[2])
+	}
+	if events[4].Kind != meowire.EventDone || events[4].Output != "meow-answer" {
+		t.Fatalf("events[4] = %+v, want EventDone(meow-answer)", events[4])
 	}
 
 	if err := a.Close(); err != nil {

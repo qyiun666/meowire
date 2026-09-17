@@ -133,13 +133,16 @@ type Effect struct {
 	WaitInput string
 }
 
-// WaitInput is the EventWaitInput payload: which tool suspended the loop,
-// what it asked, and the resume handle. The host saves Session and passes
-// it back to Resume once the external input arrives.
+// WaitInput is the EventWaitInput payload: why the loop stopped for input and
+// the resume handle. The host saves Session and passes it back to Resume once
+// the answer arrives. Call and Question describe the flavour: a tool wait names
+// the tool and its question, a pre-execution membrane ask names the pending
+// call and the confirmation prompt, an utterance membrane ask carries no call at
+// all, and a pause carries neither.
 type WaitInput struct {
 	CellID   string
-	Call     ToolCall // the tool that requested input
-	Question string   // the question text (Effect.WaitInput)
+	Call     ToolCall // the tool that requested input (zero for an utterance ask or a pause)
+	Question string   // what the loop is waiting on an answer to
 	Session  Session  // resume handle — host saves and returns it
 }
 
@@ -149,8 +152,11 @@ type WaitInput struct {
 // EventWaitInput and EventPaused and consumed by Resume; hosts only save it
 // and pass it back — its fields are unexported and must not be inspected or
 // mutated (persistence round-trips through Marshal/UnmarshalSession).
-// A Session is single-use: resuming it twice re-executes the remaining tool
-// calls with duplicate side effects (host responsibility).
+// A Session belongs to the cell that suspended it: Resume rejects a handle
+// that another cell produced, because replaying it would run the first cell's
+// round on the second cell's organs. It is single-use too — resuming twice
+// re-executes the remaining tool calls with duplicate side effects (host
+// responsibility).
 type Session struct {
 	round       int          // round at suspension; Resume continues from it (no extra round)
 	input       string       // stimulus text at suspension
@@ -160,19 +166,63 @@ type Session struct {
 	pending     ToolCall     // the tool that requested input (zero value for pause suspensions)
 	remaining   []ToolCall   // tool calls after the suspending one
 	toolResults []ToolResult // accumulated structured tool feedback at suspension
-	sandboxAsk  bool         // sandbox-ask flavor: the pending call awaits a tri-state confirmation, not a tool result
+	cell        string       // owning cell: Resume refuses a handle from another cell
+	kind        waitKind     // why the loop stopped for input
+	utterance   string       // withheld text, kind == waitUtterance
+}
+
+// waitKind classifies one suspension — what the resumed response is for.
+type waitKind int
+
+const (
+	waitPause     waitKind = iota // gap pause: nothing is being asked, the loop just waits
+	waitTool                      // a tool requested external input (response = its result)
+	waitCallAsk                   // the membrane asked before executing pending (tri-state resolve)
+	waitUtterance                 // the membrane asked before saying utterance (tri-state resolve)
+)
+
+// wireName is the enum's JSON identity. Encoding kinds by name rather than by
+// number means a reordering of the iota cannot silently reinterpret a saved
+// handle.
+func (k waitKind) wireName() string {
+	switch k {
+	case waitTool:
+		return "tool"
+	case waitCallAsk:
+		return "call-ask"
+	case waitUtterance:
+		return "utterance-ask"
+	}
+	return "pause"
+}
+
+// waitKindOf decodes a wire name; an unknown name is reported as not-a-kind
+// (the caller rejects the handle rather than guessing a flavour).
+func waitKindOf(name string) (waitKind, bool) {
+	switch name {
+	case "pause":
+		return waitPause, true
+	case "tool":
+		return waitTool, true
+	case "call-ask":
+		return waitCallAsk, true
+	case "utterance-ask":
+		return waitUtterance, true
+	}
+	return 0, false
 }
 
 // sessionVersion is the Session serialization format version. Bump it on
 // any incompatible change to the marshaled shape; UnmarshalSession rejects
 // mismatched versions so a stale or future handle is never replayed.
-const sessionVersion = 2
+const sessionVersion = 3
 
 // sessionJSON is the wire shape of a Session. Session fields stay
 // unexported (hosts only save the handle and pass it back — no inspection,
 // no mutation), so persistence round-trips through Marshal/UnmarshalSession.
 type sessionJSON struct {
 	Version     int          `json:"version"`
+	Cell        string       `json:"cell"` // owning cell, checked by Resume
 	Round       int          `json:"round"`
 	Input       string       `json:"input"`
 	Plan        string       `json:"plan"`
@@ -181,20 +231,22 @@ type sessionJSON struct {
 	Pending     ToolCall     `json:"pending"`
 	Remaining   []ToolCall   `json:"remaining"`
 	ToolResults []ToolResult `json:"toolResults"`
-	SandboxAsk  bool         `json:"sandboxAsk"` // sandbox-ask suspension flavor
+	Ask         string       `json:"ask"`       // waitKind wire name
+	Utterance   string       `json:"utterance"` // withheld text (ask == "utterance-ask")
 }
 
 // Marshal serializes the session to its wire shape (JSON) — the persistence
-// primitive for both suspension kinds (ask_user and pause, v1.3.2): hosts
-// save the bytes, restore via UnmarshalSession, and pass the restored
-// Session to Resume. A zero-value Session (round == 0) is not a valid
-// handle and returns an error.
+// primitive behind every suspension flavour (tool wait, pause, and both
+// membrane asks): hosts save the bytes, restore via UnmarshalSession, and pass
+// the restored Session to Resume. A zero-value Session (round == 0) is not a
+// valid handle and returns an error.
 func (s Session) Marshal() ([]byte, error) {
 	if !s.valid() {
 		return nil, fmt.Errorf("nerve.Session.Marshal: invalid session (zero value)")
 	}
 	b, err := json.Marshal(sessionJSON{
 		Version:     sessionVersion,
+		Cell:        s.cell,
 		Round:       s.round,
 		Input:       s.input,
 		Plan:        s.plan,
@@ -203,7 +255,8 @@ func (s Session) Marshal() ([]byte, error) {
 		Pending:     s.pending,
 		Remaining:   s.remaining,
 		ToolResults: s.toolResults,
-		SandboxAsk:  s.sandboxAsk,
+		Ask:         s.kind.wireName(),
+		Utterance:   s.utterance,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("nerve.Session.Marshal: %w", err)
@@ -213,7 +266,9 @@ func (s Session) Marshal() ([]byte, error) {
 
 // UnmarshalSession restores a Session from Marshal output. A version
 // mismatch returns an error: the wire format has evolved and the saved
-// handle must not be replayed against a different contract.
+// handle must not be replayed against a different contract. An unknown ask
+// name is rejected too — resuming it as some other flavour would replay the
+// wrong side effects.
 func UnmarshalSession(data []byte) (Session, error) {
 	var sj sessionJSON
 	if err := json.Unmarshal(data, &sj); err != nil {
@@ -221,6 +276,10 @@ func UnmarshalSession(data []byte) (Session, error) {
 	}
 	if sj.Version != sessionVersion {
 		return Session{}, fmt.Errorf("nerve.UnmarshalSession: version %d != %d (wire format changed)", sj.Version, sessionVersion)
+	}
+	kind, ok := waitKindOf(sj.Ask)
+	if !ok {
+		return Session{}, fmt.Errorf("nerve.UnmarshalSession: unknown ask %q", sj.Ask)
 	}
 	s := Session{
 		round:       sj.Round,
@@ -231,7 +290,9 @@ func UnmarshalSession(data []byte) (Session, error) {
 		pending:     sj.Pending,
 		remaining:   sj.Remaining,
 		toolResults: sj.ToolResults,
-		sandboxAsk:  sj.SandboxAsk,
+		cell:        sj.Cell,
+		kind:        kind,
+		utterance:   sj.Utterance,
 	}
 	if !s.valid() {
 		return Session{}, fmt.Errorf("nerve.UnmarshalSession: invalid session payload (round < 1)")

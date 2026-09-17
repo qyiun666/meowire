@@ -169,29 +169,42 @@ type Hooks struct {
 
 **⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context. The same applies to `p.ToolResults` (shared with the loop's structured track): replace wholesale, never append in place.**
 
-### 2.6 Sandbox — the permission gate (the security red line)
+### 2.6 Sandbox — the permission gate (the security red line, both sides of the loop)
 
 ```go
 type Sandbox interface {
     Allow(ctx context.Context, a Action) (verdict Verdict, reason string, err error)
+    Emit(ctx context.Context, u Utterance) (verdict Verdict, reason string, err error)
     Bounds() string // execution boundary description (host defined), snapshotted once per Stimulate
 }
 ```
 
-- Tri-state ruling (`Verdict`): `VerdictAllow` proceeds to execution; on `VerdictDeny`
+`Utterance{CellID, Round, Text}` is the text this round's Think generated. Both sides share one
+tri-state grammar and one audit channel (`EventSandbox`).
+
+- `Allow`'s tri-state ruling (`Verdict`): `VerdictAllow` proceeds to execution; on `VerdictDeny`
   (the zero value — fail-closed) the framework appends `[sandbox-denied: reason]` feedback to
   Context and **the loop continues** (no halt); `VerdictAsk` **suspends for external
   confirmation** — the reason becomes the question text shown externally, the loop
   suspends through the §6.4 protocol, and execution happens only after the host approves
-- An error from `Allow` denies (fail-closed); the feedback lands as
+- `Emit` rules on a round's text **before anyone hears it** (the consumer, the accumulated
+  output and the next Think all count as hearing it): `Allow` says it as generated; `Deny`
+  replaces it with `[sandbox-denied: reason]`, which also joins Context (the brain reads its own
+  veto next round); `Ask` **withholds the draft** and suspends through §6.4 — the draft rides the
+  `Session`, and the answer either says it as generated or replaces it with the veto text,
+  **without re-running that round's Think**
+- An error from either method denies (fail-closed); the feedback lands as
   `[sandbox-denied: sandbox error: ...]` (the audit record keeps the inner
   `sandbox error: ...` reason)
+- The audit record tells the sides apart by `Call`: a tool-side ruling names the gated call, an
+  utterance-side ruling carries a zero `Call`. Every ruling yields exactly one record, and an ask
+  chain closes with its terminal record
 - `Bounds()` returns the execution boundary description; the framework
   snapshots it once per Stimulate and surfaces it to the LLM via `Prompt.Bounds`
   (so the brain perceives its limits, e.g. "only files under /workspace")
 - The host implements security policy: tool allowlist/denylist, human confirmation
   (returning `VerdictAsk` is all it takes — suspension and resume are the framework's job),
-  sensitive-operation interception
+  sensitive-operation interception, egress review (`Emit`)
 
 ### 2.7 ContextBudget — the token regulator
 
@@ -268,7 +281,7 @@ o := meowire.Organs{
 | `Act` | Effector | Tool execution | **yes** |
 | `Closer` | Closer | Resource cleanup | **yes** |
 | `Hooks` | *Hooks | Interception callbacks (all eight callbacks required) | **yes** |
-| `Sandbox` | Sandbox | Permission gate | **yes** |
+| `Sandbox` | Sandbox | Permission gate (`Allow` guards execution, `Emit` guards the round's text egress) | **yes** |
 | `Budget` | *ContextBudget | Token regulator (text track + structured-feedback track) | **yes** |
 | `Mem` | Memory | Experience port (`Recall` before each Think, `Remember` at the invocation terminal) | **yes** |
 | `System` | string | System instructions; feeds Prompt.System | no |
@@ -396,21 +409,20 @@ snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON: machine-rea
 
 ### 6.1 Event sequences
 
-**Single round without tools (4 events):**
+**Single round without tools (5 events):**
 
 ```
-EventState(thinking) → EventText → [EventUsage(optional)] → EventState(done) → EventDone(accumulated output)
+EventState(thinking) → [EventUsage(optional)] → EventSandbox(utterance ruling) → EventText → EventState(done) → EventDone(accumulated output)
 ```
 
-**With tool calls (inserted per round; may loop over multiple rounds; with a
-configured Sandbox, an audit event is inserted before each tool execution):**
+**With tool calls (inserted per round; may loop over multiple rounds):**
 
 ```
-EventState(thinking) → EventText → [EventUsage] → EventState(acting)
-  → (EventToolCall → [EventSandbox] → EventToolResult) × N → back to EventState(thinking) → …
+EventState(thinking) → [EventUsage] → EventSandbox(utterance ruling) → EventText → EventState(acting)
+  → (EventToolCall → EventSandbox(call ruling) → EventToolResult) × N → back to EventState(thinking) → …
 ```
 
-**Pause path (takes effect at gap points; snapshot suspension since v1.3.2 — the iterator ends normally, Resume continues):**
+**Pause path (takes effect at gap points; snapshot suspension — the iterator ends normally, Resume continues):**
 
 ```
 … → EventState(paused) → EventPaused(Session snapshot) → iterator ends normally (no Done/Error)
@@ -422,6 +434,15 @@ EventState(thinking) → EventText → [EventUsage] → EventState(acting)
 ```
 … → EventState(acting) → EventToolCall → EventSandbox → EventState(waiting)
   → EventWaitInput(tool name + question + Session) → iterator ends normally (no Done/Error)
+```
+
+**Utterance-confirmation suspension path (`Sandbox.Emit` returns `VerdictAsk`; the draft was never produced; see §6.4):**
+
+```
+EventState(thinking) → [EventUsage] → EventSandbox(ask) → EventState(waiting)
+  → EventWaitInput(question + withheld draft inside the Session, zero Call) → iterator ends normally
+→ host calls Resume(sess, answer) → EventSandbox(terminal) → EventText(draft as generated, or the veto text)
+  → [that round's tools run as usual → back to EventState(thinking)] or [nothing left → EventState(done) → EventDone]
 ```
 
 **Port-swap audit (at the start of the next Stimulate/Resume, before any other event; multiple in order):**
@@ -442,22 +463,23 @@ EventState(error) → EventError(Err)
 
 | Kind | Active field | Content |
 |------|--------------|---------|
-| `EventText` | `Text` | Whole-segment LLM text output |
+| `EventText` | `Text` | This round's text, **already through the output membrane** (`[sandbox-denied: reason]` when `Emit` denied) |
 | `EventToolCall` | `ToolCall *ToolCall` | Tool the LLM decided to call |
 | `EventToolResult` | `Effect *Effect`, `ToolCall *ToolCall` | Tool execution result (includes Sandbox denials: `Effect.Err = "[sandbox-denied: reason]"`); `ToolCall` echoes the call for ID association |
-| `EventSandbox` | `Verdict *SandboxVerdict` | Sandbox decision audit record (ruling Ruling: allow/deny/**ask**, tool, policy reason, ask question, evaluation error); an ask chain closes with its terminal second record; not emitted when no sandbox is wired |
+| `EventSandbox` | `Verdict *SandboxVerdict` | Membrane ruling audit record (ruling Ruling: allow/deny/**ask**, the gated tool or a zero value for the text side, policy reason, ask question, evaluation error); one record per ruling on either side of the loop, an ask chain closes with its terminal second record |
 | `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
 | `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
-| `EventWaitInput` | `Wait *WaitInput` | Tool requests external input: `WaitInput{CellID, Call, Question, Session}` — the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
-| `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (unified suspension-resume since v1.3.2) |
+| `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — three causes (a tool's own request: `Call` + question; a pre-execution confirmation: `Call` + question; an utterance confirmation: zero `Call` + question); the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
+| `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (the same channel every suspension uses) |
 | `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, Old, New}`; emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
 | `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace (v1.3.2), persistable |
 
-`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`: one record per decision of a
-configured sandbox, emitted before the tool runs (`Ruling` is tri-state; Deny is the zero value —
-fail-closed); an ask ruling produces two records on one chain (ask → resolve — the terminal record
+`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`: one record per ruling on
+either side of the loop (`Ruling` is tri-state; Deny is the zero value — fail-closed), where `Call`
+is the gated tool action and a zero `Call` means the ruling was about this round's text; an ask
+ruling produces two records on one chain (ask → resolve — the terminal record
 carries the final ruling: deny keeps its text, approval shows allow with an empty Reason).
 Persisting the event stream yields
 the action-level audit log (who, on whose behalf, when, what, why permitted). See
@@ -488,11 +510,11 @@ is just the standard Go iterator consumption semantics (tools after the stop
 point never run), not a second implementation — simulating ask_user with
 break loses the suspended context.
 
-### 6.4 Suspension-resume protocol (ask_user and sandbox asks)
+### 6.4 Suspension-resume protocol (tool input and membrane asks)
 
 The framework-level protocol for tools that need external input — or for a
-`Sandbox.Allow` returning `VerdictAsk` — **no blocking,
-no lost rounds**, replacing the old host-side synchronous block inside Effector:
+`Sandbox.Allow` / `Sandbox.Emit` returning `VerdictAsk` — **no blocking,
+no lost rounds**, so a host never has to block synchronously inside Effector:
 
 ```go
 // ① Tool side (Effector): declare the suspension, never block
@@ -535,46 +557,55 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   `EventWaitInput` and ends — no `EventDone`/`EventError`; `OnCycleEnd`/`AfterStimulate`
   still fire exactly once with `outcome = OutcomeSuspended` (distinguish the suspension
   via `StateWaiting`/outcome — **do not persist an unfinished round**)
-- **Sandbox ask = the same suspension mechanism (tri-state ruling)**: when
-  `Sandbox.Allow` returns `VerdictAsk`, the loop yields the identical
+- **Pre-execution ask (`Allow` = Ask) = the same suspension mechanism**: the loop yields the identical
   `EventState(StateWaiting)` + `EventWaitInput` pair (the question text comes from the
   ruling's reason), preceded by an ask-kind `EventSandbox` audit record; the host saves
   the Session, shows the question, and resolves via Resume exactly like ask_user;
   **an approved call is never re-gated** (a stateless membrane would re-ask forever),
   while sibling calls of the same round pass the normal gate on replay; the terminal
   resolve record closes the audit chain
-- **Pause (v1.3.2) = the same suspension mechanism**: yields `EventState(StatePaused)` →
+- **Utterance ask (`Emit` = Ask) = the same suspension mechanism**: the round's draft is
+  withheld — nothing in the event stream contains it (`EventWaitInput.Call` is a zero value and the
+  question comes from the ruling's reason) and the draft rides the `Session`; on approval it is
+  said **as generated, without re-running that round's Think**, on denial `[sandbox-denied: ...]`
+  takes its place and joins Context; the tool calls the round already declared run after the draft,
+  and if nothing else was pending the cycle closes with Done
+- **Pause = the same suspension mechanism**: yields `EventState(StatePaused)` →
   `EventPaused` (Session snapshot, Call zero value) and ends the iterator normally;
   `agent.Resume(sess, "")` continues without injecting anything (no pending tool); when
   the pause point is before a tool, the current tool is recorded in Session.remaining
   and Resume runs it first
 - **`Session` is an opaque value object** (snapshot of round/context/remaining tool calls/
   accumulated output): the host only saves and returns it, never inspects it;
+  **it belongs to the cell that suspended it** — `Resume` rejects a handle another cell
+  returned (`ErrForeignSession`; replaying it would run A's round on B's organs);
   **single-use** — resuming twice re-executes the remaining tool calls (duplicate side
   effects; host responsibility)
-- **`sess.RemainingCalls()` (v1.3.3)**: the sole sanctioned read-only probe — a clone of
+- **`sess.RemainingCalls()`**: the sole sanctioned read-only probe — a clone of
   the calls not yet executed at the suspension point (empty when nothing is left): a
   pause snapshot keeps the whole unexecuted batch (Resume replays it); a WaitInput
   suspension inside a `ParallelActs` batch is empty (the batch fully executed — Resume
   only injects the response, never replays)
-- **Persistence (v1.3.2)**: `sess.Marshal()` produces versioned JSON bytes; the host
+- **Persistence**: `sess.Marshal()` produces versioned JSON bytes (version 3 carries the
+  owning cell, the wait kind and the withheld draft); the host
   persists them; after a restart `meowire.UnmarshalSession(data)` restores the handle
   and Resume continues — suspensions and pauses recover across processes; a version
-  mismatch is rejected (a stale or future handle must not be replayed)
+  mismatch or an unknown wait name is rejected (a stale or future handle must not be replayed)
 - **No extra round**: Resume continues from the suspended round; the Think that digests
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, the trimmers are not called;
   it runs before the next Think after resume
-- **Response grammar (three-state ruling for sandbox asks, verbatim injection for ask_user)**:
-  written as the suspended call's structured result in `ToolResults`
-  (`ID` = the call's `call_xxx`), visible to the first Think after resume. **Sandbox asks**
-  resolve by the three-state ruling: an **empty string** = deny (feedback
-  `[sandbox-denied: declined]`); a **`[denied:` prefix** = deny with that text (timeout recipe
-  `[denied: timeout]` as shown above; the feedback lands in the canonical `[sandbox-denied: ...]`
-  form); **any other response** = approve — the pending call executes without re-gating.
-  **ask_user** responses are injected verbatim as the tool's structured result (an empty
+- **Response grammar (three-state ruling for both membrane asks, verbatim injection for ask_user)**:
+  **Sandbox asks** resolve by the three-state ruling: an **empty string** = deny (the call side
+  gets `[sandbox-denied: declined]` feedback, the text side gets that text in place of the draft);
+  a **`[denied:` prefix** = deny with that text (timeout recipe
+  `[denied: timeout]` as shown above; it lands in the canonical `[sandbox-denied: ...]`
+  form); **any other response** = approve — the pending call executes without re-gating, a
+  withheld draft is said as generated.
+  **ask_user** responses are written as the suspended call's structured result in `ToolResults`
+  (`ID` = the call's `call_xxx`), visible to the first Think after resume — an empty
   string is an empty result; a denial is expressed in the response text itself — the
-  `[denied: timeout]` recipe lands as tool feedback the model reads).
+  `[denied: timeout]` recipe lands as tool feedback the model reads.
   Timeouts are host-controlled (default deny)
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think

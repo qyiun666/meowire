@@ -22,12 +22,12 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **Think→Act 决策循环**，支持每轮重试与硬性轮数上限
 - **类型化事件流** —— `Stimulate` 返回 `iter.Seq[Event]`，宿主观察
   `EventText`、`EventToolCall`、`EventToolResult`、`EventState`、`EventDone`、`EventError`、`EventUsage`、
-  `EventSandbox`（动作级审计记录）、`EventWaitInput`（循环挂起等待外部输入）、
+  `EventSandbox`（膜裁决审计记录，两侧同通道）、`EventWaitInput`（循环挂起等待外部输入）、
   `EventPaused`（暂停请求生效 —— 快照 + 恢复句柄）、`EventReplace`（端口替换审计记录）、
   `EventConfig`（配置替换审计记录）
-- **动作级审计轨迹** —— 每个 Sandbox 决策（允许/拒绝）产出 `EventSandbox`
-  判定（工具、原因、错误）；持久化事件流即得完整"谁/做了什么/为什么被允许"审计，
-  符合 Authority 安全模型
+- **膜审计轨迹** —— `Sandbox` 的每次裁决（允许/拒绝/征询，循环两侧同一通道）产出
+  一条 `EventSandbox`（被门禁的工具，文本侧裁决则该字段为零值；加原因与错误）；
+  持久化事件流即得完整"谁/做了什么/为什么被允许"审计，符合 Authority 安全模型
 - **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
   图（数据对象节点 + 插槽边），供人或机器渲染
 - **动态接线（突触可塑性）** —— `Agent.Replace(slot, port)` 运行时替换
@@ -64,9 +64,9 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   - **可持久化**：`Session.Marshal()` / `UnmarshalSession` 提供带版本号的 JSON 持久化 ——
     挂起或暂停的循环可跨进程存活（对齐主流 checkpoint/resume）。
   超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
-- **三态 Sandbox 裁决与反思原语** —— `Sandbox.Allow` 返回 `Verdict`：
-  `VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`——ask 经与
-  ask_user 相同的挂起-恢复协议征询确认，批准后才执行。`OnCycleEnd(ctx, output,
+- **两侧三态裁决与反思原语** —— `Sandbox.Allow`（工具执行前）与 `Sandbox.Emit`（该轮文本
+  被听到前）各返回 `Verdict`：`VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`
+  ——ask 经与 ask_user 相同的挂起-恢复协议征询确认，批准后才生效。`OnCycleEnd(ctx, output,
   outcome)` 以 `CycleOutcome`（Done/Suspended/MaxRounds/Error/Aborted）分类每轮结束方式；
   `BeforeStimulate` 可写轮级反思便签到 `Prompt.Reflection`，全轮 Thinker 可见
 - **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，
@@ -115,7 +115,7 @@ meowire (模块根)
 | `Cell` | `internal/cell/cell.go` | 极简内核：ID + 端口 + 循环 |
 | `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
 | `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
-| `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
+| `Sandbox` | 守卫 | 循环两侧的权限膜：每次 Act 前 `Allow`、该轮文本被听到前 `Emit`；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪文本轨 `Context` 与结构化反馈轨 `ToolResults`（同一额度） |
 | `Memory` | 端口 | 把本轮召回写进 `Prompt.Memories`，并把结束那一轮的事实收回去 |
 | `Event` | 事件 | 循环的类型化观察镜像 |
@@ -167,10 +167,14 @@ type closer struct{}
 
 func (closer) Close() error { return nil }
 
-// sandbox 实现 meowire.Sandbox —— 工具权限门。
+// sandbox 实现 meowire.Sandbox —— 守循环两侧的权限膜。
 type sandbox struct{}
 
 func (sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
+	return meowire.VerdictAllow, "", nil
+}
+
+func (sandbox) Emit(context.Context, meowire.Utterance) (meowire.Verdict, string, error) {
 	return meowire.VerdictAllow, "", nil
 }
 
@@ -246,7 +250,7 @@ func main() {
 
 ### 统一挂起-恢复（v1.3.2）
 
-三种挂起 —— 工具请求输入（ask_user）、Sandbox 征询（`VerdictAsk`）与宿主请求暂停（Pause）—— 共用同一机制：
+四种挂起 —— 工具请求输入（ask_user）、执行前征询、文本征询（两侧都是 `VerdictAsk`）与宿主请求暂停（Pause）—— 共用同一机制：
 循环产出携带不透明 `Session` 快照的挂起事件后**迭代器正常结束**；宿主保存 Session
 （可选经 `Session.Marshal()` / `UnmarshalSession` 跨进程持久化恢复），然后调用
 `Agent.Resume(ctx, sess, response)` 从挂起点继续 —— 不占轮次、等待期间不触发 budget。
@@ -256,11 +260,11 @@ func main() {
 - **Pause**：`Agent.Pause()` 在间隙点生效 → `EventState(StatePaused)` + `EventPaused`；
   `Resume(sess, "")` 续跑，不注入任何内容（无 pending 工具）。暂停点在工具执行前时，
   当前工具（及其后的调用）计入 `Session.remaining`，Resume 先执行它们。
-- **Sandbox 征询**：`Sandbox.Allow` 返回 `VerdictAsk` → 同样的 `EventState(StateWaiting)` +
-  `EventWaitInput`（问题来自裁决 reason）；响应语法与 ask_user 一致 —— 空串拒绝
+- **膜征询**：`Sandbox.Allow`（工具执行前）或 `Sandbox.Emit`（该轮文本被听到前）返回 `VerdictAsk` → 同样的 `EventState(StateWaiting)` +
+  `EventWaitInput`（问题来自裁决 reason；文本征询的 `Call` 为零值，草稿扣在 `Session` 里）；响应语法与 ask_user 一致 —— 空串拒绝
   （`[sandbox-denied: declined]`）、`[denied:` 前缀按文本拒绝（反馈落库为
-  `[sandbox-denied: ...]` 规范形式）、其余任何响应批准并放行 pending
-  调用（不再重新过门禁）。
+  `[sandbox-denied: ...]` 规范形式）、其余任何响应批准：放行 pending
+  调用（不再重新过门禁）或按原稿说出被扣住的草稿（不重跑该轮 Think）。
 - `Agent.Resume` 自动清除失效的暂停请求；`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
 - Session 单次使用：重复恢复会重放剩余工具调用（宿主责任）。
   该统一模型取代旧的阻塞式 PauseGate 等待（v1.3.2 breaking）。
