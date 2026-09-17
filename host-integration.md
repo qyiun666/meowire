@@ -196,6 +196,22 @@ type Memory interface {
 - `CycleFacts` 只带框架构造得出的事实：`CellID` / `Input` / `Output` / `Outcome`；写什么、写成什么形状不经该端口，**删除与遗忘更不经过它**（那是宿主直接对自己的后端做的事）
 - `Recall` 失败 → 该轮 Think 以 error 结束（器官是装配的一部分，框架不替宿主决定"少一半上下文也想"）；`Remember` 失败 → 不改写已定的终态，经 `OnError` 报告
 
+### 2.9 器官组合：膜栈、降级链与可选的启动时点
+
+一个端口后面放多个实现——循环只看得到一个器官，不知道有过选择：
+
+```go
+o.Sandbox = meowire.GuardStack(工作区策略, 网络策略)   // 一层膜，两个裁决者
+o.Think   = meowire.FallbackThinker(主模型, 备模型)    // 一个大脑，两个候选
+o.Act     = meowire.FallbackEffector(本地工具, 远端工具) // 一双手，两处执行
+```
+
+- 组合器**返回的就是端口类型本身**，所以组合器官与单个器官的接法完全一致：没有新增插槽、事件或配置字段，`Replace` 接一个栈与接一个器官没有区别
+- `GuardStack` 按严重程度裁决，不按层次先后：第一个 Deny 即结束（后面更宽松的层没有投票权），第一个 Ask 压过 Allow，某层返回 error 就是端口契约本身定义的 fail-closed Deny；`Bounds()` 取第一个非空边界。空栈一律 Deny——没有层的膜不守卫任何东西
+- `FallbackThinker` / `FallbackEffector` 取第一个**执行未报错**的成员；全部失败时把各成员的错误一起返回（最后一个错不比第一个错更能解释为什么）。工具跑完了并说"不"（`Effect.Err`）是结果，不是器官坏了，因此降级链不会继续往下走
+- `Bootable{Boot(ctx) error}` 是唯一可选的生命周期时点：任何端口都可以声明，`New` 对每个实例调用一次，顺序就是蓝图列出必填端口的顺序（`meowire.PortOrder()`），发生在 agent 存在之前；`Replace` 先启动新器官再提交，所以一个起不来的替代品不会在轮次中途生效
+- `Boot` 失败即中止装配，本次尝试已经打开的东西经宿主 `Closer` 释放：框架从不关闭任何器官，`Close` 仍是唯一清理通道；被换下的旧器官同样不会被框架关闭——进行中的 Stimulate 可能还持有它，何时退场归宿主
+
 ---
 
 ## 3. 第 2 步：组装 `Organs`（装配根，唯一组装点）
@@ -293,8 +309,9 @@ agent, err := meowire.New(bp)
 - **Blueprint 是一次定义、多次装配**：同一 `bp` 可 `New` 出多个独立 Agent 实例（flat model 多 agent 场景）
 - `New` 基于**装配图**校验（蓝图 = 数据对象节点 + 槽位边），只有两档：
   - `error` 级（必填端口缺失 / 回调缺失 / Budget 不完整）：**恒阻断**，返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8），多缺联合报错
-  - `info` 级（空 Identity/Tools/Context、默认轮数）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
+  - `info` 级（空 Identity/Tools/Context、默认轮数、开了 ParallelActs 却没并发安全的 Effector、`Organs.Colony` 缺席）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
   - 不再有 `warn` 级：每个接线点都是必填，缺失即缺失器官，没有“半配放行”
+- `New` 依次做三件事：按图**校验**蓝图、逐个**启动**声明了 `Bootable` 的器官（见 §2.9）、**构造** cell。启动失败即中止，后面的步骤不再执行，本次尝试打开的东西经宿主 `Closer` 释放
 - 装配后宿主调用 `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`，并可经 `Replace` 运行时换端口、经 `AgentCard` 导出能力卡（见下）
 - 七端口 + 八回调均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**；宿主可用 `meowire.FullHooks(...)` 把不需要的钩子声明为显式 no-op
 
@@ -305,7 +322,7 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 ```
 
 - 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
-- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）
+- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）；新器官若声明了 `Bootable` 则先启动再提交，启动失败时接线保持原样
 - 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 - **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, Old, New}`，在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
 

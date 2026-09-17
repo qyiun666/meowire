@@ -34,7 +34,7 @@ Implement seven ports → Assemble Organs → Set Config → Assemble Blueprint 
 
 ---
 
-## 2. Step 1: Implement the Six Ports (Host Capabilities)
+## 2. Step 1: Implement the Seven Ports (Host Capabilities)
 
 ### 2.1 Thinker — the LLM wrapper (the brain)
 
@@ -256,6 +256,37 @@ type Memory interface {
   framework does not decide to think on half a context); a failing `Remember` never rewrites
   the already-decided outcome and reaches the host through `OnError`
 
+### 2.9 Composing organs: stacks, fallbacks, and the optional boot step
+
+Several implementations behind the one port the loop sees — the loop never learns there was a
+choice:
+
+```go
+o.Sandbox = meowire.GuardStack(workspacePolicy, networkPolicy) // one membrane, two layers
+o.Think   = meowire.FallbackThinker(primary, backup)          // one brain, two candidates
+o.Act     = meowire.FallbackEffector(localTools, remoteTools)  // one pair of hands
+```
+
+- Every combinator **returns the port type itself**, so a composed organ is wired exactly like a
+  plain one: no slot, no event, no config field was added, and `Replace` accepts a stack the same
+  way it accepts a single organ
+- `GuardStack` rules by severity, not by layer order: the first Deny ends the stack (a later, more
+  permissive layer gets no vote), the first Ask wins over Allow, and a layer that errors is the
+  fail-closed Deny the port contract already defines. `Bounds()` reports the first non-empty
+  boundary. An empty stack denies — a membrane with no layers guards nothing
+- `FallbackThinker` / `FallbackEffector` return the first member's answer that carries **no
+  execution error**; when every member fails, the joined errors surface (the last failure is no
+  more the reason than the first). A tool that ran and said no (`Effect.Err`) is a result, not a
+  broken organ, so the stack never moves on for it
+- `Bootable{Boot(ctx) error}` is the one optional lifecycle point: any port may declare it, and
+  `New` calls it once per instance, in the order the blueprint lists its required ports
+  (`meowire.PortOrder()`), before an agent exists. `Replace` boots an incoming organ **before**
+  committing it, so a dead replacement never takes effect mid-round
+- A failing `Boot` aborts assembly, and what the attempt opened is released through the host
+  `Closer`: the framework never closes an organ, so `Close` stays the one cleanup channel. An organ
+  swapped out is never closed either — an in-flight Stimulate may still hold it, and retiring the
+  old implementation stays the host's decision
+
 ---
 
 ## 3. Step 2: Assemble `Organs` (composition root — the single assembly point)
@@ -355,8 +386,12 @@ agent, err := meowire.New(bp)
 - `New` validates against the **assembly graph** (blueprint = data-object nodes + slot edges), two levels only:
   - `error` (missing required port / missing hook callback / incomplete Budget): **always blocks**, returns `meow: required port X not injected`
     (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
-  - `info` (empty Identity/Tools/Context, default rounds): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
+  - `info` (empty Identity/Tools/Context, default rounds, ParallelActs without a concurrency-safe
+    Effector, `Organs.Colony` absent): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
   - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
+- `New` runs three steps in order: **validate** the blueprint against the graph, **boot** every
+  organ that declared `Bootable` (§2.9), then **construct** the cell. Nothing after a failing boot
+  is reached, and the failed attempt is released through the host `Closer`
 - After assembly the host calls `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`, and may
   swap ports at runtime via `Replace` and export the capability card via `AgentCard` (below)
 - All seven ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
@@ -373,7 +408,9 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at
   `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable
 - Semantics: each `Stimulate` snapshots ports into a fresh LoopContext — an **in-flight
   Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
-  port is returned (host decides whether to shut the old implementation down)
+  port is returned (host decides whether to shut the old implementation down — the framework never
+  closes an organ it swapped out); an incoming organ that declares `Bootable` is booted first, and a
+  failing boot leaves the wiring exactly as it was
 - Concurrency-safe; no-op after `Close`; **rejects nil and incomplete ports** (a Budget needs
   Trimmer + TrimResults + MaxTokens, a Hooks needs all eight callbacks); unknown slot or wrong port type returns an error
 - **Audit event (v1.3.0)**: every successful Replace records a `ReplaceAudit{CellID, Slot, Old, New}`,

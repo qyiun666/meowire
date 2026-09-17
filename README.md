@@ -70,6 +70,13 @@ you can rely on.
   absence), `Sandbox` (permission membrane), `ContextBudget` (token
   regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens),
   `Memory` (experience port — `Recall` before each Think, `Remember` once per invocation)
+- **Several organs behind one port** — `GuardStack` / `FallbackThinker` / `FallbackEffector` compose
+  implementations into the one organ the loop sees and return **the port type itself**, so a composed
+  organ wires like a plain one and the blueprint gained nothing
+- **Organs can be brought up before they are used** — any port may declare `Bootable`; `New` boots
+  each declaring organ once, in `PortOrder()` (the sequence the blueprint implies, not a list written
+  beside it), and `Replace` boots before a swap commits. A failing boot aborts and releases what the
+  attempt opened through the host `Closer` — the framework still closes nothing
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)

@@ -45,10 +45,17 @@ const (
 // without rebuilding the agent. Closer is never swappable (resource
 // binding). Safe for concurrent use; a no-op after Close. Returns the
 // previous port value (nil if none was set); wrong slot or port type returns
-// an error.
+// an error. An incoming organ that implements Bootable is brought up first: a
+// Boot failure leaves the wiring exactly as it was, so a dead replacement never
+// takes effect mid-round.
 func (a *Agent) Replace(slot string, port any) (any, error) {
 	if a.closed.Load() {
 		return nil, nil
+	}
+	if b, ok := port.(Bootable); ok {
+		if err := b.Boot(context.Background()); err != nil {
+			return nil, fmt.Errorf("meow: replace %s: %w", slot, err)
+		}
 	}
 	old, err := a.cell.Replace(slot, port)
 	if err != nil {

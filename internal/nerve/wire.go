@@ -43,7 +43,7 @@ type WireNode struct {
 // call; callers must not rely on identity between calls.
 func ConnectomeNodes() []WireNode {
 	return []WireNode{
-		{ID: "prompt", Name: "Prompt", Desc: "full prompt bundle: System+Identity+Methods+Tools+Context+Input+Plan+Memories+ToolResults"},
+		{ID: "prompt", Name: "Prompt", Desc: "the whole prompt bundle the loop assembles for this round: every Prompt field, as one snapshot handed to the Thinker"},
 		{ID: "context", Name: "Context", Desc: "conversation context list (host base + sandbox denials)"},
 		{ID: "toolresults", Name: "ToolResults", Desc: "structured tool feedback list (single track)"},
 		{ID: "memories", Name: "Memories", Desc: "this round's recall output (volatile track)"},
@@ -118,6 +118,10 @@ func Connectome() []WirePoint {
 			TargetID: "resources", Target: "external resources", Semantics: SemAct,
 			Parallel: false, Required: true,
 			Desc: "cleanup port, called once by Agent.Close; never swappable (resource binding)"},
+		{ID: "P3b", Name: "Closer.Boot", Phase: 2, Category: CategoryAct,
+			TargetID: "resources", Target: "external resources", Semantics: SemAct,
+			Parallel: false, Required: false,
+			Desc: "optional warm-up the framework calls at assembly; filled only when the host's Closer implements Boot"},
 		{ID: "P4", Name: "Hooks", Phase: 2, Category: CategoryDecide,
 			TargetID: "hooks", Target: "H1–H8 sub-slots", Semantics: SemContainer,
 			Parallel: false, Required: true, Slot: "hooks",

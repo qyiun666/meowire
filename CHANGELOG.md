@@ -51,6 +51,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach nobody but the sender are errors. A capability may match many cells, so a fan-out has no
   answer path; a round that wants one delegates (`Effect.Send`), and a send naming no target is now
   refused as tool feedback instead of being fired at the empty ID.
+- **Many organs behind one port, without a new slot** — `GuardStack(layers...)`,
+  `FallbackThinker(ports...)` and `FallbackEffector(ports...)` compose several implementations into
+  the single organ the loop sees, and each returns **the port type itself**: a composed organ wires
+  like a plain one, `Replace` accepts it like a plain one, and the blueprint gained nothing. A
+  membrane stack rules by severity rather than by layer order (first Deny ends it, first Ask beats
+  Allow, a layer's error is the fail-closed Deny the contract already defines, an empty stack
+  denies); a fallback chain stops at the first member that answers without an execution error and
+  joins every member's error if all of them fail — while `Effect.Err`, a tool that ran and refused,
+  is a result and never moves the chain on.
+- **An organ can be brought up before it is used** — `Bootable{Boot(ctx) error}` is an optional
+  capability any port may declare: `New` now validates, then boots, then constructs, calling each
+  declaring organ once in `PortOrder()` — the sequence the blueprint already implies, derived rather
+  than written beside it, so adding a required port cannot leave its boot point unlisted. `Replace`
+  boots an incoming organ before committing it, so a replacement that cannot start never takes
+  effect mid-round. A boot failure aborts assembly and releases what the attempt opened through the
+  host `Closer`: the framework still closes nothing, so `Close` remains the one cleanup channel, and
+  an organ swapped out stays the host's to retire. Blueprint gains the optional `P3b Closer.Boot`
+  point, filled exactly when the host's Closer can boot.
 - **Every task state has exactly one writer, and it is the framework** — the cell opens a task
   (`TaskSubmitted`), the inbound step marks each drained stimulus `TaskWorking`, and the four
   closing states all come from one mapping, `TaskOutcome(CycleOutcome, ctxErr)`. Each request an

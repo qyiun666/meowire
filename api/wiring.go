@@ -96,13 +96,15 @@ func SlotsByTarget(o Organs, targetID string) []Slot {
 
 // organFilled answers "is this blueprint slot wired?" per slot id. Ports read
 // their own Organs field, hooks read the container plus the specific callback,
-// the framework built-in / api-injected slots are always active, and the
-// colony's outbound slot follows its organ. An unknown id is reported
+// the framework built-in / api-injected slots are always active, the colony's
+// outbound slot follows its organ, and the optional boot slot follows whether
+// the host's Closer can boot. An unknown id is reported
 // unfilled: a slot the api does not know about cannot be assumed present.
 var organFilled = map[string]func(Organs) bool{
 	"P1":  func(o Organs) bool { return o.Think != nil },
 	"P2":  func(o Organs) bool { return o.Act != nil },
 	"P3":  func(o Organs) bool { return o.Closer != nil },
+	"P3b": func(o Organs) bool { _, bootable := o.Closer.(Bootable); return bootable },
 	"P4":  func(o Organs) bool { return o.Hooks != nil },
 	"P5":  func(o Organs) bool { return o.Sandbox != nil },
 	"P5b": func(o Organs) bool { return o.Sandbox != nil },

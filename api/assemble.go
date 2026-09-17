@@ -94,9 +94,11 @@ type Blueprint struct {
 	Config Config
 }
 
-// New creates a new Agent from a blueprint.
-// Assembly is validated against the wiring blueprint: error-level findings
-// (missing required ports, incomplete ports) always abort New. Info findings
+// New creates a new Agent from a blueprint. Assembly runs in three steps:
+// validate against the wiring blueprint (error-level findings — missing or
+// incomplete ports — always abort), Boot every organ that declares the
+// capability (in PortOrder; a failure aborts and releases what the attempt
+// opened through the host's Closer), then construct the cell. Info findings
 // never block — hosts surface them via Validate / WiringDiagram /
 // RenderDiagram at assembly or test time.
 // There are no default implementations and no optional wiring points.
@@ -112,6 +114,9 @@ func New(b Blueprint) (*Agent, error) {
 	}
 
 	o, cfg := b.Organs, b.Config
+	if err := bootOrgans(o); err != nil {
+		return nil, err
+	}
 	c := &cell.Cell{
 		ID:       cmp.Or(o.ID, "agent"),
 		Identity: o.Identity,
@@ -134,4 +139,57 @@ func New(b Blueprint) (*Agent, error) {
 		a.cell.Egress = o.Colony.Fire
 	}
 	return a, nil
+}
+
+// organRef names one assembled host port, in the order the framework brings
+// the ports up.
+type organRef struct {
+	name  string
+	organ any
+}
+
+// hostOrgans lists every required port in boot order. The order is the
+// blueprint's (nerve.PortOrder) and a test pins the two against each other, so
+// a port added to the blueprint has to be added here as well — otherwise its
+// Boot would be skipped without a word.
+func hostOrgans(o Organs) []organRef {
+	return []organRef{
+		{"Think", o.Think},
+		{"Act", o.Act},
+		{"Closer", o.Closer},
+		{"Hooks", o.Hooks},
+		{"Sandbox", o.Sandbox},
+		{"Budget", o.Budget},
+		{"Mem", o.Mem},
+	}
+}
+
+// bootOrgans brings up every organ that declared the lifecycle capability, in
+// port order, before an agent exists. The first failure aborts assembly, and
+// what the attempt opened is released through the host's Closer — the one
+// cleanup channel the framework knows, since an organ is not a resource owner.
+func bootOrgans(o Organs) error {
+	for _, ref := range hostOrgans(o) {
+		b, ok := ref.organ.(Bootable)
+		if !ok {
+			continue
+		}
+		if err := b.Boot(context.Background()); err != nil {
+			return errors.Join(
+				fmt.Errorf("meow: boot %s: %w", ref.name, err),
+				cleanupAfterBoot(o),
+			)
+		}
+	}
+	return nil
+}
+
+// cleanupAfterBoot reports the failed assembly's cleanup, including the case
+// where the cleanup itself failed — a resource left open is never folded into
+// the boot error silently.
+func cleanupAfterBoot(o Organs) error {
+	if err := o.Closer.Close(); err != nil {
+		return fmt.Errorf("meow: cleanup after a failed boot: %w", err)
+	}
+	return nil
 }
