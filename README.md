@@ -15,7 +15,7 @@ you can rely on.
   backend — it injects seven host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~3.5k lines of Go. The decision loop reads as one concern
+- **Small and readable.** ~5.3k lines of Go. The decision loop reads as one concern
   per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
@@ -35,7 +35,7 @@ you can rely on.
 - **Wiring graph inspection** — `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` treat the
   assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
 - **Dynamic wiring (synaptic plasticity)** — `Agent.Replace(slot, port)` swaps
-  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks` at runtime; takes effect at the next `Stimulate`,
+  `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate`,
   an in-flight `Stimulate` keeps the ports it started with; every successful swap is
   audited as `EventReplace` at the start of the next Stimulate/Resume
 - **Runtime config updates** — `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` tune

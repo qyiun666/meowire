@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // eventVersion is the event wire format version. Bump it on any incompatible
@@ -32,8 +33,8 @@ const eventVersion = 1
 // WireEvent is one Event as it travels. The field set mirrors Event exactly (a
 // guard test fails on drift in either direction); three fields change shape on
 // purpose — Kind and State become names, and Err becomes a WireErr — while the
-// two audit records that used to hold a live value hold its description
-// instead (see ReplaceAudit) or degrade its error (see WireVerdict).
+// two audit records carry a description of a port (see ReplaceAudit) or a
+// degraded error (see WireVerdict) instead of a live value.
 type WireEvent struct {
 	Version  int           `json:"version"`
 	Kind     string        `json:"kind"`
@@ -129,9 +130,10 @@ type wrappedErr struct {
 func (w wrappedErr) Error() string { return w.text }
 func (w wrappedErr) Unwrap() error { return w.err }
 
-// EncodeEvent serializes one event. The only extra failure beyond JSON encoding
-// is a Session that cannot be serialized: a suspension handle is not something
-// to journal half of.
+// EncodeEvent serializes one event. Beyond JSON encoding it fails on two values
+// it cannot faithfully hand back: a Session that cannot be serialized (a
+// suspension handle is not something to journal half of) and a ruling this
+// build has no name for (the record could never be decoded again).
 func EncodeEvent(e Event) ([]byte, error) {
 	w := WireEvent{
 		Version:  eventVersion,
@@ -152,30 +154,16 @@ func EncodeEvent(e Event) ([]byte, error) {
 	if e.Err != nil {
 		w.Err = wireOfErr(e.Err)
 	}
-	if e.Verdict != nil {
-		w.Verdict = &WireVerdict{
-			CellID:   e.Verdict.CellID,
-			Call:     e.Verdict.Call,
-			Ruling:   verdictName(e.Verdict.Ruling),
-			Reason:   e.Verdict.Reason,
-			Question: e.Verdict.Question,
-		}
-		if e.Verdict.Err != nil {
-			w.Verdict.Err = wireOfErr(e.Verdict.Err)
-		}
+	verdict, err := encodeVerdict(e.Verdict)
+	if err != nil {
+		return nil, err
 	}
-	if e.Wait != nil {
-		raw, err := e.Wait.Session.Marshal()
-		if err != nil {
-			return nil, fmt.Errorf("nerve: encode event: %w", err)
-		}
-		w.Wait = &WireWait{
-			CellID:   e.Wait.CellID,
-			Call:     e.Wait.Call,
-			Question: e.Wait.Question,
-			Session:  raw,
-		}
+	w.Verdict = verdict
+	wait, err := encodeWait(e.Wait)
+	if err != nil {
+		return nil, err
 	}
+	w.Wait = wait
 	out, err := json.Marshal(w)
 	if err != nil {
 		return nil, fmt.Errorf("nerve: encode event: %w", err)
@@ -183,8 +171,45 @@ func EncodeEvent(e Event) ([]byte, error) {
 	return out, nil
 }
 
+// encodeVerdict mirrors one membrane audit record, refusing a ruling this build
+// has no name for: the record could never be decoded again.
+func encodeVerdict(v *SandboxVerdict) (*WireVerdict, error) {
+	if v == nil {
+		return nil, nil
+	}
+	ruling := verdictName(v.Ruling)
+	if ruling == "" {
+		return nil, fmt.Errorf("nerve: encode event: unknown ruling %d", v.Ruling)
+	}
+	w := &WireVerdict{
+		CellID:   v.CellID,
+		Call:     v.Call,
+		Ruling:   ruling,
+		Reason:   v.Reason,
+		Question: v.Question,
+	}
+	if v.Err != nil {
+		w.Err = wireOfErr(v.Err)
+	}
+	return w, nil
+}
+
+// encodeWait mirrors one suspension, carrying the handle as its own serialized
+// bytes so its version guard stays the thing that rejects a stale one.
+func encodeWait(w *WaitInput) (*WireWait, error) {
+	if w == nil {
+		return nil, nil
+	}
+	raw, err := w.Session.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("nerve: encode event: %w", err)
+	}
+	return &WireWait{CellID: w.CellID, Call: w.Call, Question: w.Question, Session: raw}, nil
+}
+
 // DecodeEvent restores an event written by this build. It fails on malformed
-// JSON, a foreign wire version, an unknown kind/state/ruling name, or a
+// JSON, a foreign wire version, an unknown kind/state/ruling name (a state
+// record with no state name included), a state name on any other kind, or a
 // suspension handle its own version guard rejects. An opaque value is not a
 // failure: it arrives as text and the event says so in Dropped.
 func DecodeEvent(data []byte) (Event, error) {
@@ -211,17 +236,15 @@ func DecodeEvent(data []byte) (Event, error) {
 		Config:   w.Config,
 		Dropped:  w.Dropped,
 	}
-	if w.State != "" {
-		state, ok := loopStateOf(w.State)
-		if !ok {
-			return Event{}, fmt.Errorf("nerve: decode event: unknown state %q", w.State)
-		}
-		e.State = state
+	state, err := decodeState(kind, w.State)
+	if err != nil {
+		return Event{}, err
 	}
-	if err, lost := errOf(w.Err); err != nil {
-		e.Err = err
+	e.State = state
+	if restored, lost := errOf(w.Err); restored != nil {
+		e.Err = restored
 		if lost {
-			e.Dropped = append(e.Dropped, "err.identity")
+			e.Dropped = reportLoss(e.Dropped, "err.identity")
 		}
 	}
 	verdict, lost, err := decodeVerdict(w.Verdict)
@@ -230,14 +253,40 @@ func DecodeEvent(data []byte) (Event, error) {
 	}
 	e.Verdict = verdict
 	if lost {
-		e.Dropped = append(e.Dropped, "verdict.err.identity")
+		e.Dropped = reportLoss(e.Dropped, "verdict.err.identity")
 	}
-	wait, err := decodeWait(w.Wait)
+	e.Wait, err = decodeWait(w.Wait)
 	if err != nil {
 		return Event{}, err
 	}
-	e.Wait = wait
 	return e, nil
+}
+
+// reportLoss names a value that arrived as a shadow. A record that has already
+// been through the wire once says so once: re-journaling a restored event must
+// not pile the same name up.
+func reportLoss(dropped []string, what string) []string {
+	if slices.Contains(dropped, what) {
+		return dropped
+	}
+	return append(dropped, what)
+}
+
+// decodeState resolves the name a state record carries. The name belongs to that
+// kind alone: a state record without one would decode as an invented StateIdle,
+// and a name on any other kind is not something this build writes.
+func decodeState(kind EventKind, name string) (LoopState, error) {
+	if kind != EventState {
+		if name != "" {
+			return 0, fmt.Errorf("nerve: decode event: state %q on kind %q", name, kind)
+		}
+		return 0, nil
+	}
+	state, ok := loopStateOf(name)
+	if !ok {
+		return 0, fmt.Errorf("nerve: decode event: unknown state %q", name)
+	}
+	return state, nil
 }
 
 // decodeVerdict rebuilds one membrane audit record (nil for an absent verdict)
@@ -274,31 +323,4 @@ func decodeWait(w *WireWait) (*WaitInput, error) {
 		}
 	}
 	return &WaitInput{CellID: w.CellID, Call: w.Call, Question: w.Question, Session: sess}, nil
-}
-
-// verdictName is the wire name of a membrane ruling.
-func verdictName(v Verdict) string {
-	switch v {
-	case VerdictAllow:
-		return "allow"
-	case VerdictAsk:
-		return "ask"
-	case VerdictDeny:
-		return "deny"
-	}
-	return "unknown"
-}
-
-// verdictOfName resolves a wire name; an unknown ruling is rejected rather than
-// read as the zero-value Deny.
-func verdictOfName(name string) (Verdict, bool) {
-	switch name {
-	case "deny":
-		return VerdictDeny, true
-	case "allow":
-		return VerdictAllow, true
-	case "ask":
-		return VerdictAsk, true
-	}
-	return 0, false
 }

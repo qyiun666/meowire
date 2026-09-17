@@ -12,7 +12,7 @@ import (
 
 // TestDecisionLoopToolResultsAccumulate verifies ToolResults accumulate
 // across a multi-round tool chain, echoing the LLM-provided call IDs with
-// Result carrying the raw output — and that tool results no longer enter
+// Result carrying the raw output — and that tool results never enter
 // the Context text track (single-track contract).
 func TestDecisionLoopToolResultsAccumulate(t *testing.T) {
 	var seen [][]ToolResult // snapshot of p.ToolResults per Think

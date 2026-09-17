@@ -1,7 +1,7 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// parallel_test.go — ParallelActs white-box tests (v1.3.3 acceptance set).
+// parallel_test.go — ParallelActs white-box tests.
 package nerve
 
 import (
@@ -30,7 +30,7 @@ func (b blockingEffector) Act(ctx context.Context, a Action) (*Effect, error) {
 	}
 }
 
-// TestParallelActsPeakConcurrency: acceptance 2 — with ParallelActs on and
+// TestParallelActsPeakConcurrency:  with ParallelActs on and
 // one round producing 2 calls, both Acts are in flight simultaneously
 // (blocking Effector + release channel).
 func TestParallelActsPeakConcurrency(t *testing.T) {
@@ -163,7 +163,7 @@ func TestParallelActsCeilingBoundsInFlight(t *testing.T) {
 	}
 }
 
-// TestParallelActsFeedbackOrderIsCallOrder: acceptance 3 — the slow call is
+// TestParallelActsFeedbackOrderIsCallOrder:  the slow call is
 // announced first and finishes last, yet ToolResults and EventToolResult
 // follow call order, never completion order.
 func TestParallelActsFeedbackOrderIsCallOrder(t *testing.T) {
@@ -226,7 +226,7 @@ func (denyOddSandbox) Emit(context.Context, Utterance) (Verdict, string, error) 
 	return VerdictAllow, "", nil
 }
 
-// TestParallelActsBatchDenialIsolation: acceptance 4 — one denied call in
+// TestParallelActsBatchDenialIsolation:  one denied call in
 // the batch produces its denial feedback and is skipped; the sibling runs
 // normally and the loop completes.
 func TestParallelActsBatchDenialIsolation(t *testing.T) {
@@ -293,7 +293,7 @@ func TestParallelActsBatchDenialIsolation(t *testing.T) {
 	}
 }
 
-// TestParallelActsWaitInputSuspendsNoReplay: acceptance 5 — a WaitInput
+// TestParallelActsWaitInputSuspendsNoReplay:  a WaitInput
 // inside the batch suspends with RemainingCalls() empty (the batch fully
 // executed, nothing may be replayed); sibling results — before AND after the
 // suspending call — are preserved in the snapshot's ToolResults, and Resume
@@ -388,7 +388,7 @@ func TestParallelActsWaitInputSuspendsNoReplay(t *testing.T) {
 	}
 }
 
-// TestParallelActsPauseSnapshotsWholeBatch: acceptance 6 — a pause at the
+// TestParallelActsPauseSnapshotsWholeBatch:  a pause at the
 // batch gap point snapshots the whole batch unexecuted (RemainingCalls() =
 // the full batch); Resume replays it (again in parallel) to completion.
 func TestParallelActsPauseSnapshotsWholeBatch(t *testing.T) {
@@ -492,7 +492,7 @@ func TestParallelActsSingleCallKeepsSerialPath(t *testing.T) {
 	}
 }
 
-// TestParallelActsBeforeActMutationApplies: regression (v1.3.5 review) — a
+// TestParallelActsBeforeActMutationApplies: regression: a
 // BeforeAct hook that rewrites the Action must reach the Effector on the
 // parallel path exactly as on the serial path; the gated Action, not the
 // raw ToolCall, is what executes.

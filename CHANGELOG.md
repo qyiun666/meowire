@@ -5,6 +5,35 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **一轮只有一个挂起名额，谁占住谁说清楚**：并行批次里后到的等待请求（第二个 `Effect.Send`、
+  或兄弟调用自报的 `WaitInput`）不再作为"空结果成功"回流——它在被下发之前就被明确拒绝成
+  该调用的工具反馈，反馈文本点名占住名额的那个调用
+- **`WaitInput` 优先于 `Send` 落地**：一个 Effect 同时给出两者时，委托不再被投递，
+  宿主看到的提问仍是工具自己写的那句（此前投递会覆盖它）
+- **事件线不再猜**：`kind=state` 的记录缺状态名不再被读成 `StateIdle`，状态名出现在别的种类上
+  同样拒绝；`EncodeEvent` 拒绝名字表里查不到的裁决值，而不是写出一条永远读不回的记录
+
+### Changed
+
+- **`Replace` 的启动时点**：槽位先接受端口，之后才 `Boot`——写错的槽名不再消耗器官唯一一次
+  启动；已关闭的 Agent 拒绝交换并返回 `ErrCellClosed`（此前静默返回"成功且无旧端口"）
+- **枚举一律按下标取值的名表**：事件种类、循环状态、膜的裁决、挂起成因四张表同一写法，
+  由一条守卫测试钉住覆盖；`Session.Marshal` 不再把一个不认识的挂起成因写成 `pause`
+- **往返守卫长牙**：夹具必须让 `Event` 的每个字段至少在一处非零（否则"两边都加了字段却忘了
+  搬运"能静默通过），且 `WireEvent` 可达的任何结构里不得出现裸 `error` 字段
+- 已被报告过的丢失不再重复累加：`Dropped` 过一趟线还是那一串名字
+- `SkillIndex.FanOut` 的参数收窄为只需投递能力的 `Colony`（此前要求整张五方法图）
+- 集成文档与注释只保留当前事实：全仓剥离版本变更叙述与批次编号（历史归 CHANGELOG 与 notes/），
+  并修正 `ReplaceAudit` 字段名、`Replace` 槽位列表、两处指向不存在 API 的说明
+
+### Removed
+
+- `cell.IsClosed`：仓库内除测试外零调用点，测试同包直接读该字段
+
 ## [1.3.8] - 2026-09-17
 
 ### Added

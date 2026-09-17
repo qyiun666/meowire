@@ -65,7 +65,7 @@ func (x *SkillIndex) TargetsFor(skill string) []string {
 // FanOut carries no answer back: the signal leaves without a minted id, so the
 // target owes nothing. A cell that wants a reply delegates instead (see
 // Effect.Send).
-func (x *SkillIndex) FanOut(ctx context.Context, s Synapse, sig Signal) ([]string, error) {
+func (x *SkillIndex) FanOut(ctx context.Context, s Colony, sig Signal) ([]string, error) {
 	switch {
 	case sig.Skill == "":
 		return nil, errors.New("meowire.FanOut: signal names no skill")

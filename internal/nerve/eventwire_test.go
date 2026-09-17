@@ -35,11 +35,13 @@ func wireEvents() []Event {
 		{Kind: EventPaused, CellID: "c1", Wait: &WaitInput{CellID: "c1", Session: sess}},
 		{Kind: EventReplace, CellID: "c1", Replace: &ReplaceAudit{CellID: "c1", Slot: "think", OldType: "nerve.a", NewType: "nerve.b"}},
 		{Kind: EventConfig, CellID: "c1", Config: &ConfigAudit{CellID: "c1", Old: LoopConfig{MaxRounds: 2}, New: LoopConfig{MaxRounds: 9, ParallelActs: true, MaxParallelActs: 3}}},
+		// A restored event carries its own loss report onward.
+		{Kind: EventText, CellID: "c1", Text: "restored", Dropped: []string{"err.identity"}},
 	}
 }
 
-// TestEventWireRoundTrip: every kind survives encode → decode unchanged, and
-// nothing reports itself as dropped.
+// TestEventWireRoundTrip: every kind survives encode → decode unchanged,
+// including the loss report a restored event carries onward.
 func TestEventWireRoundTrip(t *testing.T) {
 	for _, want := range wireEvents() {
 		data, err := EncodeEvent(want)
@@ -57,7 +59,8 @@ func TestEventWireRoundTrip(t *testing.T) {
 }
 
 // TestEventWireDropsNothingForFrameworkValues: the round trip above carries an
-// error and a suspension handle; neither may arrive as a shadow.
+// error and a suspension handle; neither may arrive as a shadow, and no event
+// gains or loses a name in its loss report on the way through.
 func TestEventWireDropsNothingForFrameworkValues(t *testing.T) {
 	for _, ev := range wireEvents() {
 		data, err := EncodeEvent(ev)
@@ -68,8 +71,8 @@ func TestEventWireDropsNothingForFrameworkValues(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if len(got.Dropped) != 0 {
-			t.Errorf("%v reported dropped fields %v, want none", ev.Kind, got.Dropped)
+		if !slices.Equal(got.Dropped, ev.Dropped) {
+			t.Errorf("%v reported dropped fields %v, want %v", ev.Kind, got.Dropped, ev.Dropped)
 		}
 	}
 }
@@ -204,6 +207,121 @@ func TestEventWireCoversEveryEventField(t *testing.T) {
 		if !slices.Contains(liveNames, name) {
 			t.Errorf("WireEvent.%s has no counterpart on Event", name)
 		}
+	}
+}
+
+// TestEnumNamesCoverEveryValue: every encoded enum travels by a table name, so a
+// value added without a name would be refused at write time. This catches it at
+// build time instead.
+func TestEnumNamesCoverEveryValue(t *testing.T) {
+	look := map[string]func(string) bool{
+		"loop state": func(n string) bool { _, ok := loopStateOf(n); return ok },
+		"ruling":     func(n string) bool { _, ok := verdictOfName(n); return ok },
+		"wait kind":  func(n string) bool { _, ok := waitKindOf(n); return ok },
+	}
+	for _, tb := range []struct {
+		what  string
+		names []string
+		n     int
+	}{
+		{"loop state", loopStateNames, int(StateError) + 1},
+		{"ruling", verdictNames, int(VerdictAsk) + 1},
+		{"wait kind", waitKindNames, int(waitUtterance) + 1},
+	} {
+		if len(tb.names) != tb.n {
+			t.Errorf("%d %s names for %d values", len(tb.names), tb.what, tb.n)
+		}
+		for i, name := range tb.names {
+			if name == "" || name == "unknown" {
+				t.Errorf("%s %d has no usable wire name (%q)", tb.what, i, name)
+				continue
+			}
+			if !look[tb.what](name) {
+				t.Errorf("%s %q does not resolve back", tb.what, name)
+			}
+		}
+	}
+}
+
+// TestWireFixtureCarriesEveryField: the round-trip guards can only prove what
+// they exercise. A field that no fixture event sets would survive a wire that
+// never carries it, so every field of Event must arrive non-zero somewhere in
+// the fixture set.
+func TestWireFixtureCarriesEveryField(t *testing.T) {
+	typ := reflect.TypeFor[Event]()
+	events := wireEvents()
+	cover := map[string]bool{}
+	for _, e := range events {
+		v := reflect.ValueOf(e)
+		for i := range v.NumField() {
+			if !v.Field(i).IsZero() {
+				cover[typ.Field(i).Name] = true
+			}
+		}
+	}
+	for _, name := range fieldNames(typ) {
+		if !cover[name] {
+			t.Errorf("no fixture event sets Event.%s, so the round-trip guards cannot see it", name)
+		}
+	}
+}
+
+// TestWireCarriesNoBareError: marshaling a struct that holds an error writes it
+// as an empty object and reports nothing lost — the hole this whole file exists
+// to close. Every error on the wire must therefore arrive as a WireErr, and a
+// payload struct that grows a bare error field breaks here.
+func TestWireCarriesNoBareError(t *testing.T) {
+	errType := reflect.TypeFor[error]()
+	var walk func(typ reflect.Type, path string, seen map[reflect.Type]bool) []string
+	walk = func(typ reflect.Type, path string, seen map[reflect.Type]bool) []string {
+		switch typ.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+			return walk(typ.Elem(), path, seen)
+		case reflect.Struct:
+			if seen[typ] {
+				return nil
+			}
+			seen[typ] = true
+			var found []string
+			for i := range typ.NumField() {
+				f := typ.Field(i)
+				next := path + "." + f.Name
+				if f.Type == errType {
+					found = append(found, next)
+					continue
+				}
+				found = append(found, walk(f.Type, next, seen)...)
+			}
+			return found
+		}
+		return nil
+	}
+	if found := walk(reflect.TypeFor[WireEvent](), "WireEvent", map[reflect.Type]bool{}); found != nil {
+		t.Fatalf("the wire carries bare error fields, which JSON cannot write: %v", found)
+	}
+}
+
+// TestStateNameOnlyOnStateRecord: a state name belongs to one kind. Missing on a
+// state record it would decode as an invented StateIdle; present on any other
+// record it is something this build never writes.
+func TestStateNameOnlyOnStateRecord(t *testing.T) {
+	noState := tamperedRecord(mustEncode(t, Event{Kind: EventState, State: StateActing}), map[string]any{"state": nil})
+	if _, err := DecodeEvent(noState); err == nil {
+		t.Fatal("a state record with no state name decoded as some state")
+	}
+	stray := mustEncode(t, Event{Kind: EventText, Text: "x"})
+	stray = tamperedRecord(stray, map[string]any{"state": "acting"})
+	if _, err := DecodeEvent(stray); err == nil {
+		t.Fatal("a state name on a text record decoded")
+	}
+}
+
+// TestUnnamedRulingRefusedAtEncode: a ruling this build has no name for cannot
+// be read back, so it is refused on the way out instead of being written as a
+// record no decoder accepts.
+func TestUnnamedRulingRefusedAtEncode(t *testing.T) {
+	if _, err := EncodeEvent(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{Ruling: Verdict(42)}}); err == nil {
+		t.Fatal("an unnamed ruling was encoded")
 	}
 }
 

@@ -301,25 +301,41 @@ func assertHooks(p any) (any, error) {
 // would panic rather than fail closed — removing an organ means swapping in an
 // inert one, not nil. Closer is never swappable (it is the resource binding Close
 // drains once) and PauseGate is framework wiring. Returns the previous port
-// value (nil if none was set); a no-op after Close.
+// value (nil if none was set); a closed cell refuses the swap, because it would
+// never be read.
 func (c *Cell) Replace(slot string, port any) (any, error) {
-	if c.closed.Load() {
-		return nil, nil
-	}
-	spec, ok := swapSlots[slot]
-	if !ok {
-		return nil, fmt.Errorf("cell.Replace: unknown slot %q", slot)
-	}
-	v, err := spec.assert(port)
+	v, err := checkSwap(slot, port)
 	if err != nil {
 		return nil, err
 	}
 	c.wireMu.Lock()
 	defer c.wireMu.Unlock()
+	if c.closed.Load() {
+		return nil, fmt.Errorf("cell.Replace: cell %s is closed", c.ID)
+	}
+	spec := swapSlots[slot]
 	old := spec.load(c)
 	spec.store(c, v)
 	c.recordReplace(slot, old, v)
 	return old, nil
+}
+
+// CheckSwap reports whether a slot would accept this port, without committing.
+// A caller that must bring the organ up before wiring it (api's Replace Boots a
+// Bootable port first) asks here, so a mistyped slot name never costs an organ
+// its one startup.
+func (c *Cell) CheckSwap(slot string, port any) error {
+	_, err := checkSwap(slot, port)
+	return err
+}
+
+// checkSwap resolves a slot to the port value it accepts.
+func checkSwap(slot string, port any) (any, error) {
+	spec, ok := swapSlots[slot]
+	if !ok {
+		return nil, fmt.Errorf("cell.Replace: unknown slot %q", slot)
+	}
+	return spec.assert(port)
 }
 
 // recordReplace appends one ReplaceAudit for a successful swap; the audit is
@@ -356,9 +372,4 @@ func completeHooks(h *nerve.Hooks) bool {
 func (c *Cell) Close() error {
 	c.closed.Store(true)
 	return nil
-}
-
-// IsClosed returns whether the cell is closed.
-func (c *Cell) IsClosed() bool {
-	return c.closed.Load()
 }

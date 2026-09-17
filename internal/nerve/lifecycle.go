@@ -9,16 +9,21 @@ import "context"
 
 // Bootable is an optional capability an organ may declare: it must open
 // something before the agent can use it (a connection, a model handle, a warm
-// cache). The framework calls Boot exactly once per organ instance, at the
-// moment that instance joins an assembly — during New for the assembled
-// organs, or immediately before a Replace commits the swap. A host that opens
-// its resources earlier should simply not implement it: an organ with a Boot
-// method that is called twice has two owners of one lifecycle.
+// cache). The framework calls Boot at the moment the instance joins an
+// assembly — during New for the assembled organs, or immediately before a
+// Replace commits the swap — and an instance joins exactly one assembly: a
+// Bootable organ is built per agent, not shared across New calls. Reusing one
+// instance would ask it to open its resources twice, and the framework cannot
+// deduplicate what it does not own. A host that opens its resources earlier
+// should simply not implement it.
 //
 // Boot is not the counterpart of Close. Cleanup has exactly one channel — the
 // host's Closer port — because an organ is not a resource owner. When Boot
 // fails mid-assembly, New releases what the attempt opened through that same
 // Closer rather than learning to close organs one by one.
+//
+// Boot runs on a background context: how long a startup may take is the organ's
+// own business (it owns the resource), not a deadline the framework guesses.
 type Bootable interface {
 	Boot(ctx context.Context) error
 }

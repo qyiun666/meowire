@@ -1145,7 +1145,7 @@ func TestDecisionLoopBeforeStimulateMutatesPrompt(t *testing.T) {
 	if len(firstCtx) != 1 || firstCtx[0] != "injected-history" {
 		t.Fatalf("first round context = %v, want [injected-history]", firstCtx)
 	}
-	// Tool results no longer enter Context (structured track only); the
+	// Tool results never enter Context (structured track only); the
 	// injected entry must persist across rounds.
 	found := slices.Contains(secondCtx, "injected-history")
 	if !found {
@@ -1188,7 +1188,7 @@ func TestDecisionLoopAfterActReceivesErr(t *testing.T) {
 // TestDecisionLoopPauseSuspends verifies a pause requested at a gap point
 // yields EventState(StatePaused) + EventPaused with a Session snapshot and
 // ends the iterator normally (no Done, no Error) — the unified
-// suspension-resume path (v1.3.2): the host resumes via Resume(sess, "").
+// suspension-resume path: the host resumes via Resume(sess, "").
 func TestDecisionLoopPauseSuspends(t *testing.T) {
 	var paused atomic.Bool
 	var executed []string

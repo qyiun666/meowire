@@ -18,7 +18,8 @@ import (
 // Unlike internal packages, which tolerate nil ports defensively, the api
 // layer rejects a missing port at assembly time.
 // Organs is carried by Blueprint; hosts write it once and reuse it for every
-// Agent instance.
+// Agent instance — with one exception: a port that declares Bootable joins one
+// assembly per instance, so it is built per agent.
 type Organs struct {
 	ID      string         // Agent unique identifier (empty = "agent")
 	Think   Thinker        // Required
@@ -78,7 +79,7 @@ func FullHooks(h Hooks) *Hooks {
 // Config holds the scalar loop configuration (alias of the internal
 // LoopConfig — the single source of truth for config semantics).
 // Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
-// MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables retry;
+// MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables Think retry;
 // ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
 // retry; MaxParallelActs<=0 runs a whole parallel batch at once.
 // UpdateConfig swaps it wholesale at runtime; the next Stimulate/Resume

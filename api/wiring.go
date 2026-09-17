@@ -83,7 +83,8 @@ func BuildGraph(o Organs) WiringGraph {
 
 // SlotsByTarget returns every slot that reads or mutates the given graph
 // node (TargetID), with filled state. This is the "find by function" query:
-// e.g. who touches Context → P6 (trim), H1/H3 (replace), F1 (append).
+// e.g. who touches Context → P6 (trim) and H3 (replace); the structured
+// tool-result track is its own node (P6b, F1).
 func SlotsByTarget(o Organs, targetID string) []Slot {
 	var out []Slot
 	for _, s := range WiringDiagram(o) {

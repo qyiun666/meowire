@@ -10,9 +10,25 @@ import (
 )
 
 // Resolve builds the delivery table for a colony: every agent's ID mapped to
-// its inbox. A synapse created over it — NewDirect(meowire.Resolve(a, b)) —
-// lands a signal on the right neuron without the host writing the switch or
-// owning the channels; the framework created both.
+// its inbox. A synapse created over it — the table below fills in with
+// SetResolver — lands a signal on the right neuron without the host writing the
+// switch or owning the channels; the framework created both.
+//
+// The table needs live agents and an agent needs its Colony at assembly time,
+// so a colony is wired in this order:
+//
+//	graph := meowire.NewDirect(meowire.DirectConfig{})
+//	a, _ := meowire.New(blueprintWithColony(graph, "a"))
+//	b, _ := meowire.New(blueprintWithColony(graph, "b"))
+//	table, _ := meowire.Resolve(a, b)
+//	graph.SetResolver(table)
+//	graph.Link(ctx, "a", "b", 1)
+//	graph.Link(ctx, "b", "a", 1)
+//
+// Link is one call per direction: a delegation travels the sender's edge, and
+// the answer travels the responder's. Both edges are the host's topology
+// decision, and a colony whose reply edge is missing strands the sender's
+// suspended round (the responder's answer is what fails, and only there).
 //
 // Duplicate IDs are refused because they make delivery ambiguous: one name
 // cannot address two cells. The table is a snapshot of the agents passed in;

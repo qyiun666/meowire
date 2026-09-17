@@ -470,6 +470,79 @@ func TestIdleAgentAppliesBackpressure(t *testing.T) {
 	}
 }
 
+// TestReplyEdgeMissingFailsWhereItIsObservable pins the one colony mistake a
+// host can make silently in no other way: a delegation travels the sender's
+// edge and its answer travels the responder's, so linking one direction only
+// leaves the sender's round waiting. The framework does not own the graph and
+// cannot invent the reply edge, but the refusal is never invisible — it is
+// reported where the answer was attempted, and the sender is left with nothing
+// to resume.
+func TestReplyEdgeMissingFailsWhereItIsObservable(t *testing.T) {
+	ctx := context.Background()
+	syn := meowire.NewDirect(meowire.DirectConfig{})
+
+	sender, err := testNew(colonyOrgans("a", meowire.Organs{
+		Colony: syn,
+		Think: testutil.Thinker{Fn: func(_ context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			if len(p.ToolResults) > 0 {
+				return &meowire.Decision{Text: "done"}, nil
+			}
+			return &meowire.Decision{Text: "asking", ToolCalls: []meowire.ToolCall{{ID: "c1", Name: "delegate"}}}, nil
+		}},
+		Act: testutil.Effector{Fn: func(_ context.Context, _ meowire.Action) (*meowire.Effect, error) {
+			return &meowire.Effect{Send: &meowire.Signal{To: "b", Skill: "help", Payload: []byte("please help")}}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("sender: %v", err)
+	}
+	defer sender.Close()
+
+	var refused []error
+	responder, err := testNew(colonyOrgans("b", meowire.Organs{
+		Colony: syn,
+		Hooks:  &meowire.Hooks{OnError: func(_ context.Context, err error) { refused = append(refused, err) }},
+		Think: testutil.Thinker{Fn: func(_ context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			return &meowire.Decision{Text: "here you are"}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("responder: %v", err)
+	}
+	defer responder.Close()
+
+	resolver, err := meowire.Resolve(sender, responder)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	syn.SetResolver(resolver)
+	if err := syn.Link(ctx, "a", "b", 1); err != nil {
+		t.Fatalf("Link a→b: %v", err)
+	}
+
+	waited := false
+	for ev := range sender.Stimulate(ctx, "solve it") {
+		if ev.Kind == meowire.EventWaitInput {
+			waited = true
+		}
+	}
+	if !waited {
+		t.Fatal("the delegation did not suspend the sender's round")
+	}
+	for range responder.Stimulate(ctx, "your turn") {
+	}
+
+	if len(refused) == 0 {
+		t.Fatal("an undeliverable answer vanished without a trace")
+	}
+	if !errors.Is(refused[0], meowire.ErrNotLinked) {
+		t.Fatalf("answer failure = %v, want the missing reply edge named", refused[0])
+	}
+	if got := sender.Resumptions(); len(got) != 0 {
+		t.Fatalf("sender has %d resumptions, want none: nothing answered it", len(got))
+	}
+}
+
 // TestColonyHostSurfaceIsWiringFree is the mechanical reading of the acceptance
 // criterion: hosting this colony never means declaring a channel, spawning a
 // goroutine, or receiving from a queue.

@@ -212,7 +212,7 @@ func TestDecisionLoopWaitInputMidList(t *testing.T) {
 		t.Fatalf("session remaining = %+v, want [tool3]", rem)
 	}
 	// The snapshot keeps the tool1 result in the structured track (tool
-	// results no longer enter Context).
+	// results never enter Context).
 	if len(wait.Session.toolResults) != 1 || wait.Session.toolResults[0].ID != "t1" || wait.Session.toolResults[0].Result != "ok" {
 		t.Fatalf("session toolResults = %+v, want one entry t1/ok", wait.Session.toolResults)
 	}

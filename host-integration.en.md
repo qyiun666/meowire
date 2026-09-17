@@ -121,7 +121,7 @@ type Closer interface {
 Releases host resources: LLM clients, HTTP connections, etc. The framework
 guarantees `Agent.Close` is idempotent (CAS); repeated calls have no side effects.
 
-### 2.4 Pause / Unpause — snapshot suspension (unified with ask_user into a single suspend-resume mechanism since v1.3.2)
+### 2.4 Pause / Unpause — snapshot suspension (unified with ask_user into a single suspend-resume mechanism)
 
 ```go
 agent.Pause()     // request a pause: takes effect at the next gap point (before a Think / before a tool)
@@ -130,7 +130,7 @@ agent.Unpause()   // clear a pause request that has not taken effect yet (back o
 
 - **Gap-effective**: a pause request never interrupts an in-flight Think/Act;
   the loop checks it at two gap points (before each Think, before each tool execution)
-- **Snapshot suspension (no longer blocking since v1.3.2)**: an honored pause yields
+- **Snapshot suspension (non-blocking)**: an honored pause yields
   `EventState(StatePaused)` → `EventPaused` (carrying a Session snapshot) and **ends
   the iterator normally**; the host resumes via `agent.Resume(sess, "")` (empty
   response — there is no pending tool to inject into) — the same Session/Resume path
@@ -355,10 +355,10 @@ type Config struct {
 | `MaxRetries` | Think retry count (retries Think only; tool-failure protection is host-side, in Effector/AfterAct) | no retry |
 | `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and are written to `ToolResults.Err`) | no timeout |
 | `ToolMaxRetries` | Tool retry count on effector errors (**executor err only**; `Effect.Err` is never retried — avoids duplicate side effects) | no retry |
-| `ParallelActs` | **Parallel execution of a round's multi-tool batch (v1.3.3, opt-in)**: serial gating (per-call events/sandbox verdicts/BeforeAct) → parallel Act (timeout/retry included) → serial feedback in call order (never completion order). A single call always keeps the serial path; **prerequisite: the Effector must be safe for concurrent Act calls** | strict serial |
-| `MaxParallelActs` | Ceiling on how many calls of one batch execute at the same time (v1.3.8). It only narrows `ParallelActs` — same calls, same call-order feedback — for a host that owes a rate limit or a connection pool somewhere else | whole batch at once |
+| `ParallelActs` | **Parallel execution of a round's multi-tool batch (opt-in)**: serial gating (per-call events/sandbox verdicts/BeforeAct) → parallel Act (timeout/retry included) → serial feedback in call order (never completion order). A single call always keeps the serial path; **prerequisite: the Effector must be safe for concurrent Act calls** | strict serial |
+| `MaxParallelActs` | Ceiling on how many calls of one batch execute at the same time. It only narrows `ParallelActs` — same calls, same call-order feedback — for a host that owes a rate limit or a connection pool somewhere else | whole batch at once |
 
-**Runtime hot update (v1.3.0):**
+**Runtime hot update:**
 
 ```go
 cfg := agent.GetConfig()  // read current values
@@ -411,11 +411,12 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at
 - Semantics: each `Stimulate` snapshots ports into a fresh LoopContext — an **in-flight
   Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
   port is returned (host decides whether to shut the old implementation down — the framework never
-  closes an organ it swapped out); an incoming organ that declares `Bootable` is booted first, and a
-  failing boot leaves the wiring exactly as it was
-- Concurrency-safe; no-op after `Close`; **rejects nil and incomplete ports** (a Budget needs
+  closes an organ it swapped out); an incoming organ that declares `Bootable` is booted once the slot
+  has accepted it and before the swap commits, so a failing boot — or a mistyped slot name —
+  leaves the wiring exactly as it was
+- Concurrency-safe; after `Close` it refuses the swap with `ErrCellClosed` and leaves the incoming port unbooted; **rejects nil and incomplete ports** (a Budget needs
   Trimmer + TrimResults + MaxTokens, a Hooks needs all eight callbacks); unknown slot or wrong port type returns an error
-- **Audit event (v1.3.0)**: every successful Replace records a `ReplaceAudit{CellID, Slot, Old, New}`,
+- **Audit event**: every successful Replace records a `ReplaceAudit{CellID, Slot, OldType, NewType}`
   emitted as `EventReplace` at the start of the next Stimulate/Resume (the moment the swap
   takes effect — same level as `EventSandbox`, persistable); failed swaps record nothing;
   zero output without swaps. The host closes its model-switch audit loop from the event
@@ -528,7 +529,7 @@ that could not cross the event wire (§6.5) — the loop itself never fills it, 
 | `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — three causes (a tool's own request: `Call` + question; a pre-execution confirmation: `Call` + question; an utterance confirmation: zero `Call` + question); the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
 | `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (the same channel every suspension uses) |
 | `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, OldType, NewType}` — the swapped ports named by Go type, not held (the record outlives the swap and must stay serializable; `Replace` returns the previous port to the caller); emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
-| `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace (v1.3.2), persistable |
+| `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace, persistable |
 
 `SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`: one record per ruling on
 either side of the loop (`Ruling` is tri-state; Deny is the zero value — fail-closed), where `Call`
@@ -667,8 +668,8 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   host append semantics `Session.Context` merges naturally with retrieval results);
   `Close` makes Resume yield `ErrCellClosed`; `Session` is an in-memory handle — it
   dies on host restart (treat as timeout-deny)
-- **Division of labor with Say injection**: `Say`/`BeforeThink` inject new messages
-  (`p.Input`); `Resume` injects the suspension response (structured result in `ToolResults`) — no overlap
+- **Division of labor with `BeforeThink`**: `BeforeThink` rewrites this round's
+  Prompt (it replaces `p.Context` as a whole slice); `Resume` injects the suspension response (structured result in `ToolResults`) — no overlap
 
 ### 6.5 Journaling the stream: `EncodeEvent` / `DecodeEvent`
 

@@ -17,6 +17,31 @@ const (
 	VerdictAsk                  // suspended pending external confirmation
 )
 
+// verdictNames is the wire name of each ruling, indexed by value (same
+// discipline as the event kind and loop state names).
+var verdictNames = []string{"deny", "allow", "ask"}
+
+// verdictName is the wire name of a membrane ruling; "" means the value is not
+// a ruling this build knows, which is a reason to refuse a record, not to write
+// one that can never be read back.
+func verdictName(v Verdict) string {
+	if int(v) < 0 || int(v) >= len(verdictNames) {
+		return ""
+	}
+	return verdictNames[v]
+}
+
+// verdictOfName resolves a wire name; an unknown ruling is rejected rather than
+// read as the zero-value Deny.
+func verdictOfName(name string) (Verdict, bool) {
+	for i, n := range verdictNames {
+		if n == name {
+			return Verdict(i), true
+		}
+	}
+	return 0, false
+}
+
 // Sandbox is the security membrane (required port). It guards both sides of
 // the loop: every tool execution passes Allow before it runs, and every
 // utterance passes Emit before it reaches the consumer. The host implements

@@ -31,7 +31,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
   图（数据对象节点 + 插槽边），供人或机器渲染
 - **动态接线（突触可塑性）** —— `Agent.Replace(slot, port)` 运行时替换
-  `Think`/`Act`/`Sandbox`/`Budget`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
+  `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
   每次成功替换以 `EventReplace` 在下次 Stimulate/Resume 开头审计产出
 - **运行期配置热更新** —— `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` 热调
   `MaxRounds` 等标量限制，免整 Agent 重建

@@ -27,7 +27,7 @@ type batchOutcome struct {
 }
 
 // runParallel executes b.calls in the three phases described above. Suspension
-// mirrors the serial path with two batch-specific differences documented on
+// mirrors the serial path apart from the batch-specific differences listed on
 // feedbackPhase.
 func (b *actBatch) runParallel() (waiting *WaitInput, ok bool) {
 	// Announce every call first (event order = call order).
@@ -137,15 +137,21 @@ func (b *actBatch) execWindow(n int) int {
 
 // feedbackPhase finalizes executed calls in call order, discarding completion
 // order. A WaitInput wins over err (serial-path parity) and the first such
-// result suspends the loop: the suspending call gets no AfterAct/EventToolResult
-// because its result arrives via Resume, while every sibling — before AND after
-// it — is fed back first, since the execution phase already ran the whole
-// batch. That is also why the snapshot carries no remaining calls: replaying a
-// completed batch would duplicate side effects.
+// result suspends the loop. Three things differ from the serial path, all
+// because the execution phase already ran the whole batch: the suspending call
+// gets no AfterAct/EventToolResult (its result arrives via Resume) while every
+// sibling — before AND after it — is fed back in this pass; the snapshot
+// therefore carries no remaining calls (replaying a completed batch would
+// duplicate side effects); and a later call's own wait is refused
+// (refuseLaterWait), since the round has no second suspension to spend.
 func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*WaitInput, bool) {
 	suspendAt := -1
 	for j := range batch {
-		b.delegate(results[j].eff)
+		if suspendAt >= 0 {
+			refuseLaterWait(results[j].eff, batch[suspendAt].call)
+		} else {
+			b.delegate(results[j].eff)
+		}
 		if suspendAt < 0 && results[j].eff != nil && results[j].eff.WaitInput != "" {
 			suspendAt = j
 			continue

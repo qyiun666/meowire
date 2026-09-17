@@ -43,14 +43,19 @@ const (
 // with. This is the dynamic-wiring counterpart of synaptic plasticity: hosts
 // swap organs between stimuli (another LLM, a stricter permission policy)
 // without rebuilding the agent. Closer is never swappable (resource
-// binding). Safe for concurrent use; a no-op after Close. Returns the
-// previous port value (nil if none was set); wrong slot or port type returns
-// an error. An incoming organ that implements Bootable is brought up first: a
-// Boot failure leaves the wiring exactly as it was, so a dead replacement never
-// takes effect mid-round.
+// binding). Safe for concurrent use; after Close it refuses the swap and leaves
+// the incoming port untouched. Returns the previous port value (nil if none was
+// set); wrong slot or port type returns an error. An incoming organ that
+// implements Bootable is brought up only once the slot has accepted it, and a
+// Boot failure leaves the wiring exactly as it was — a dead replacement never
+// takes effect mid-round, and a mistyped slot name never spends the organ's one
+// startup.
 func (a *Agent) Replace(slot string, port any) (any, error) {
 	if a.closed.Load() {
-		return nil, nil
+		return nil, fmt.Errorf("meow: replace %s: %w", slot, ErrCellClosed)
+	}
+	if err := a.cell.CheckSwap(slot, port); err != nil {
+		return nil, fmt.Errorf("meow: %w", err)
 	}
 	if b, ok := port.(Bootable); ok {
 		if err := b.Boot(context.Background()); err != nil {
@@ -148,8 +153,8 @@ func (a *Agent) GetConfig() Config {
 	return a.cell.GetConfig()
 }
 
-// Close shuts down the agent; subsequent Stimulate calls fail with
-// ErrCellClosed.
+// Close shuts down the agent: subsequent Stimulate and Resume calls yield
+// ErrCellClosed and Replace refuses the swap.
 func (a *Agent) Close() error {
 	if !a.closed.CompareAndSwap(false, true) {
 		return nil
@@ -172,9 +177,8 @@ func (a *Agent) Close() error {
 // Pause requests a pause. It takes effect at the next gap point (before a
 // Think or before a tool execution): the loop yields EventState(StatePaused)
 // + EventPaused with a Session snapshot and ends the iterator normally —
-// the host resumes via Resume(sess, "") (the unified suspension-resume
-// path, v1.3.2). An in-flight Think/Act is not interrupted. Idempotent and
-// safe for concurrent use; a no-op after Close.
+// the host resumes via Resume(sess, ""). An in-flight Think/Act is not
+// interrupted. Idempotent and safe for concurrent use; a no-op after Close.
 func (a *Agent) Pause() {
 	if a.closed.Load() {
 		return
@@ -185,8 +189,8 @@ func (a *Agent) Pause() {
 // Unpause clears a pending pause request before it takes effect (the
 // counterpart of Pause). Once the loop has honored the pause (EventPaused
 // yielded with a Session), clearing the request does not resume it — the
-// host must call Resume(sess, "") (v1.3.2 semantics). Idempotent and safe
-// for concurrent use; a no-op after Close.
+// host must call Resume(sess, ""). Idempotent and safe for concurrent use;
+// a no-op after Close.
 func (a *Agent) Unpause() {
 	if a.closed.Load() {
 		return

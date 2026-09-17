@@ -152,8 +152,9 @@ type Effect struct {
 	// send that cannot be delivered (names no target, no colony wired, busy or
 	// unknown target) never suspends: its error becomes this call's tool
 	// feedback, like any other resistance. WaitInput wins over Send when both
-	// are set; a second Send in the same round is refused rather than silently
-	// dropped.
+	// are set; a round has one suspension to spend, so a second wait in the same
+	// round — another Send, or a sibling call's own WaitInput — is refused with
+	// tool feedback rather than silently dropped.
 	Send *Signal
 }
 
@@ -206,33 +207,27 @@ const (
 	waitUtterance                 // the membrane asked before saying utterance (tri-state resolve)
 )
 
-// wireName is the enum's JSON identity. Encoding kinds by name rather than by
-// number means a reordering of the iota cannot silently reinterpret a saved
-// handle.
+// waitKindNames is the wire name of each suspension flavour, indexed by value:
+// encoding kinds by name rather than by number means a reordering of the iota
+// cannot silently reinterpret a saved handle.
+var waitKindNames = []string{"pause", "tool", "call-ask", "utterance-ask"}
+
+// wireName is the enum's JSON identity. "" means the value is not a flavour this
+// build knows, which Marshal refuses rather than writing out as a pause.
 func (k waitKind) wireName() string {
-	switch k {
-	case waitTool:
-		return "tool"
-	case waitCallAsk:
-		return "call-ask"
-	case waitUtterance:
-		return "utterance-ask"
+	if int(k) < 0 || int(k) >= len(waitKindNames) {
+		return ""
 	}
-	return "pause"
+	return waitKindNames[k]
 }
 
 // waitKindOf decodes a wire name; an unknown name is reported as not-a-kind
 // (the caller rejects the handle rather than guessing a flavour).
 func waitKindOf(name string) (waitKind, bool) {
-	switch name {
-	case "pause":
-		return waitPause, true
-	case "tool":
-		return waitTool, true
-	case "call-ask":
-		return waitCallAsk, true
-	case "utterance-ask":
-		return waitUtterance, true
+	for i, n := range waitKindNames {
+		if n == name {
+			return waitKind(i), true
+		}
 	}
 	return 0, false
 }
@@ -270,6 +265,10 @@ func (s Session) Marshal() ([]byte, error) {
 	if !s.valid() {
 		return nil, fmt.Errorf("nerve.Session.Marshal: invalid session (zero value)")
 	}
+	ask := s.kind.wireName()
+	if ask == "" {
+		return nil, fmt.Errorf("nerve.Session.Marshal: unknown suspension kind %d", s.kind)
+	}
 	b, err := json.Marshal(sessionJSON{
 		Version:     sessionVersion,
 		Cell:        s.cell,
@@ -282,7 +281,7 @@ func (s Session) Marshal() ([]byte, error) {
 		Remaining:   s.remaining,
 		ToolResults: s.toolResults,
 		Requests:    s.requests,
-		Ask:         s.kind.wireName(),
+		Ask:         ask,
 		Utterance:   s.utterance,
 	})
 	if err != nil {

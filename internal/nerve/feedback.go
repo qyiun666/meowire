@@ -99,6 +99,13 @@ func (b *actBatch) delegate(eff *Effect) {
 	if eff == nil || eff.Send == nil {
 		return
 	}
+	if eff.WaitInput != "" {
+		// The call already carries its own question (port contract: WaitInput wins
+		// over Send), so the delegation goes nowhere: delivering it would replace
+		// the tool's text with the send's, then wait on the wrong answer.
+		eff.Send = nil
+		return
+	}
 	sig := *eff.Send
 	eff.Send = nil
 	switch {
@@ -117,6 +124,20 @@ func (b *actBatch) delegate(eff *Effect) {
 		b.lc.awaiting = id
 		eff.WaitInput = "awaiting reply from " + sig.To
 	}
+}
+
+// refuseLaterWait drops a wait that arrived after the round spent its single
+// suspension on an earlier call of the batch. The snapshot replays no completed
+// calls, so this one is refused before it is delivered — as tool feedback, the
+// same shape as every other resistance — rather than coming back as a silent
+// empty success that nothing will ever answer.
+func refuseLaterWait(eff *Effect, pending ToolCall) {
+	if eff == nil || (eff.Send == nil && eff.WaitInput == "") {
+		return
+	}
+	eff.Send = nil
+	eff.WaitInput = ""
+	eff.Err = fmt.Sprintf("one wait per round: %s already waits", pending.Name)
 }
 
 // admitted runs one call that cleared the membrane: BeforeAct (a mutated

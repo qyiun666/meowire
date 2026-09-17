@@ -69,7 +69,7 @@ func TestConfigMaxToolOutput(t *testing.T) {
 // TestConfigAuditEmitted verifies UpdateConfig records a ConfigAudit that is
 // emitted as the first EventConfig of the next Stimulate (the moment the
 // swap takes effect) with Old/New correct — the config-update counterpart of
-// EventReplace (v1.3.2).
+// EventReplace.
 func TestConfigAuditEmitted(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {

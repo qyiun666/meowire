@@ -6,7 +6,7 @@
 
 - Capability layer: plastic synapse graph — inter-agent connections (Link/Unlink/Reinforce) and signal delivery (Fire), plus Direct implementation
 - Depends on nerve; does not depend on cell (uses Resolver closure to resolve targets, avoiding cell import)
-- The graph is content-agnostic (it never reads a `Payload` and has no opinion on what a signal means), but a signal's routing fields are framework-owned end to end since v1.3.8: `api.Resolve` hands it cell queues instead of host channels, and the cell pairs replies against its own delegations
+- The graph is content-agnostic (it never reads a `Payload` and has no opinion on what a signal means), but a signal's routing fields are framework-owned end to end: `api.Resolve` hands it cell queues instead of host channels, and the cell pairs replies against its own delegations
 - Learning rules (Hebbian/STDP) are host-side: the framework stores state (weights, delivery counts, conduct times), never decides when to change it
 
 ## Dependencies
@@ -17,7 +17,7 @@
 ## Interface Contract
 
 - `Edge{From, To string, Weight float64, Fired int64, Spiked int64}`: one synaptic edge (strength + cumulative deliveries + last conduct time in Unix nanoseconds, 0 = never)
-- `Synapse` interface (five methods, plastic graph since 1.1.1):
+- `Synapse` interface (five methods, plastic graph):
   - `Link(ctx, from, to, weight) error` — synaptogenesis; idempotent overwrite; negative weight clamps to 0
   - `Unlink(ctx, from, to) error` — synapse elimination; missing connection → `ErrNotLinked`; empty rows dropped
   - `Reinforce(ctx, from, to, delta) error` — LTP/LTD; result floor 0; missing → `ErrNotLinked`
@@ -41,11 +41,11 @@
 - Resolver closure decouples synapse from cell (dependency direction: nerve ← synapse)
 - Fire enforces connection check: synapse only delivers between linked agents
 - Non-blocking delivery: buffer full → ErrTargetBusy immediately (never waits for target consumption)
-- Plastic graph since 1.1.1: Link carries initial weight; Unlink/Reinforce/Edges added; single-path policy — no two-interface compatibility shim
-- Weight is not connectivity (v1.3.8): conduction is gated by a floor the host injects at construction, and zero switches gating off — a strong-enough-to-exist connection is not automatically strong-enough-to-carry. `ErrWeakSynapse` is a third refusal beside `ErrNotLinked` (no connection) and `ErrTargetBusy` (connection and target present, no room), because a host retries on one and not the other. The floor stops traffic; `Prune`'s `weightFloor` deletes the edge. Never merged: same number, different consequence
-- The graph keeps its own moments (v1.3.8): every successful delivery stamps `Spiked` in the same write that bumps `Fired`, so `STDPFrom` can pair spikes from graph state alone and a persisted snapshot restores both (no clock seam in the graph, and a host that wants millisecond-free tests seeds `Initial`)
+- Plastic graph: `Link` carries the initial weight and `Unlink`/`Reinforce`/`Edges` complete the set; one `Synapse` interface, no compatibility shim
+- Weight is not connectivity: conduction is gated by a floor the host injects at construction, and zero switches gating off — a strong-enough-to-exist connection is not automatically strong-enough-to-carry. `ErrWeakSynapse` is a third refusal beside `ErrNotLinked` (no connection) and `ErrTargetBusy` (connection and target present, no room), because a host retries on one and not the other. The floor stops traffic; `Prune`'s `weightFloor` deletes the edge. Never merged: same number, different consequence
+- The graph keeps its own moments: every successful delivery stamps `Spiked` in the same write that bumps `Fired`, so `STDPFrom` can pair spikes from graph state alone and a persisted snapshot restores both (no clock seam in the graph, and a host that wants millisecond-free tests seeds `Initial`)
 - Persistence round-trip: export `Edges(ctx, "")` → host serializes; restore via `NewDirect(DirectConfig{Resolver: resolver, Initial: restored})` — Agent.New stays unaware (host-domain assembly)
-- Two sanctioned routes through Fire (v1.3.8): the framework's own — `Organs.Colony` is this graph's `Fire`, driven by the kernel for a delegation (`Effect.Send`) and for the answers it owes, which is what gets ids minted and replies paired — and the host's — a `send_message` tool firing signals of its own convention, which the cell cannot pair (it never minted those ids) and therefore surfaces as ordinary inbound traffic
+- Two sanctioned routes through Fire: the framework's own — `Organs.Colony` is this graph's `Fire`, driven by the kernel for a delegation (`Effect.Send`) and for the answers it owes, which is what gets ids minted and replies paired — and the host's — a `send_message` tool firing signals of its own convention, which the cell cannot pair (it never minted those ids) and therefore surfaces as ordinary inbound traffic
 - Delivery resistance stays feedback: a `Fire` error reaches `Effect{Err}` (EventToolResult) on the host route and a tool feedback on the delegation route, so the loop continues rather than dying — a busy or unknown peer is information, not a failure
 
 ## Pitfalls

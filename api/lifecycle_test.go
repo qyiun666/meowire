@@ -256,6 +256,53 @@ func TestReplaceBootFailureLeavesWiringAlone(t *testing.T) {
 	}
 }
 
+// TestReplaceRejectsBadSlotWithoutBooting: an organ gets one startup per
+// assembly, so a mistyped slot name is refused before Boot — otherwise the
+// organ spends its lifecycle on a swap that never happened, and arrives at the
+// slot it does belong to already used.
+func TestReplaceRejectsBadSlotWithoutBooting(t *testing.T) {
+	o, _ := bootableOrgans()
+	a, err := New(Blueprint{Organs: o, Config: Config{}})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer a.Close()
+
+	log := &lifecycleLog{}
+	if _, err := a.Replace("thinking", probeThinker{log}); err == nil {
+		t.Fatal("a slot the blueprint does not declare was accepted")
+	}
+	if len(log.boots) != 0 {
+		t.Fatalf("boot calls = %v, want none before a refused slot", log.boots)
+	}
+	if _, err := a.Replace(SlotThink, probeThinker{log}); err != nil {
+		t.Fatalf("replace after a refused slot: %v", err)
+	}
+	if !slices.Equal(log.boots, []string{"Think"}) {
+		t.Errorf("boot calls = %v, want the organ booted once, at its real slot", log.boots)
+	}
+}
+
+// TestReplaceAfterCloseRefusesOrgan: a closed agent cannot use a port, so it
+// says so instead of quietly consuming one that was already brought up.
+func TestReplaceAfterCloseRefusesOrgan(t *testing.T) {
+	o, _ := bootableOrgans()
+	a, err := New(Blueprint{Organs: o, Config: Config{}})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	log := &lifecycleLog{}
+	if _, err := a.Replace(SlotThink, probeThinker{log}); !errors.Is(err, ErrCellClosed) {
+		t.Fatalf("Replace after Close = %v, want it to report the agent closed", err)
+	}
+	if len(log.boots) != 0 {
+		t.Errorf("boot calls = %v, want none for a closed agent", log.boots)
+	}
+}
+
 // TestOrganFilledCoversEveryBlueprintSlot: the api answers "is this slot
 // wired?" for every edge the blueprint declares. A slot added to the blueprint
 // without an entry here would be reported unwired forever — this guard turns

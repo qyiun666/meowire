@@ -21,34 +21,27 @@ const (
 	StateError                     // Error
 )
 
+// loopStateNames is the wire name of each state, indexed by value: a state
+// travels by name, so reordering the iota cannot silently reinterpret a stored
+// stream. A guard test pins the table against the last constant.
+var loopStateNames = []string{
+	"idle", "thinking", "acting", "paused", "waiting", "done", "error",
+}
+
 // String returns the human-readable name of the loop state.
 func (s LoopState) String() string {
-	switch s {
-	case StateIdle:
-		return "idle"
-	case StateThinking:
-		return "thinking"
-	case StateActing:
-		return "acting"
-	case StatePaused:
-		return "paused"
-	case StateWaiting:
-		return "waiting"
-	case StateDone:
-		return "done"
-	case StateError:
-		return "error"
-	default:
+	if int(s) < 0 || int(s) >= len(loopStateNames) {
 		return "unknown"
 	}
+	return loopStateNames[s]
 }
 
 // loopStateOf resolves a state name; an unknown name is reported as not-a-state
 // so a stored stream is rejected instead of read as some other state.
 func loopStateOf(name string) (LoopState, bool) {
-	for s := StateIdle; s <= StateError; s++ {
-		if s.String() == name {
-			return s, true
+	for i, n := range loopStateNames {
+		if n == name {
+			return LoopState(i), true
 		}
 	}
 	return 0, false
@@ -61,8 +54,8 @@ const DefaultMaxRounds = 8
 // provided). Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables Think retry;
 // ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
-// retry; ParallelActs=false keeps strict serial tool execution (v1.3.2
-// behavior), and MaxParallelActs<=0 places no ceiling on a parallel batch
+// retry; ParallelActs=false keeps strict serial tool execution, and
+// MaxParallelActs<=0 places no ceiling on a parallel batch
 // (every admitted call runs at once). UpdateConfig swaps it wholesale; the next
 // Stimulate/Resume snapshots the new values (an in-flight loop keeps the values
 // it started with).

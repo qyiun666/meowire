@@ -7,10 +7,10 @@
 // every organ implementation and the multi-agent colony.
 //
 // Kernel: an internal/cell Cell holds an ID, the ports and a
-// nerve.DecisionLoop, and yields iter.Seq[Event]. Both suspensions — a tool
-// that waits for input and a pause request — share one primitive: the loop
-// ends the iterator normally with a Session handle the host saves and returns
-// to Resume.
+// nerve.DecisionLoop, and yields iter.Seq[Event]. Every suspension — a tool
+// waiting for input, a pause request, and the membrane's ask on either side of
+// the loop — shares one primitive: the loop ends the iterator normally with a
+// Session handle the host saves and returns to Resume.
 //
 // Assembly: New(Blueprint) is the sole composition root. Every port and every
 // hook callback is required; a missing one is a missing organ, never a

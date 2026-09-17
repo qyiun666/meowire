@@ -90,13 +90,13 @@ func TestCellClose(t *testing.T) {
 		}},
 	)
 
-	if c.IsClosed() {
+	if c.closed.Load() {
 		t.Fatal("cell should not be closed initially")
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	if !c.IsClosed() {
+	if !c.closed.Load() {
 		t.Fatal("cell should be closed after Close()")
 	}
 }
@@ -118,7 +118,7 @@ func TestCellCloseIdempotent(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
-	if !c.IsClosed() {
+	if !c.closed.Load() {
 		t.Fatal("cell should be closed")
 	}
 }
@@ -243,7 +243,8 @@ func TestCellReplaceErrors(t *testing.T) {
 	}
 }
 
-// TestCellReplaceAfterClose: Replace is a no-op after Close.
+// TestCellReplaceAfterClose: a closed cell refuses a swap — the port it would
+// have held is never read, so reporting success would be a lie.
 func TestCellReplaceAfterClose(t *testing.T) {
 	think := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
 		return &nerve.Decision{Text: "old"}, nil
@@ -255,7 +256,7 @@ func TestCellReplaceAfterClose(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	old, err := c.Replace("think", testutil.Thinker{})
-	if err != nil || old != nil {
-		t.Fatalf("Replace after Close = (%v, %v), want (nil, nil)", old, err)
+	if err == nil || old != nil {
+		t.Fatalf("Replace after Close = (%v, %v), want an error and no previous port", old, err)
 	}
 }

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// sandbox_ask_test.go — Sandbox tri-state ruling (v1.3.x): VerdictAsk
+// sandbox_ask_test.go — Sandbox tri-state ruling: VerdictAsk
 // suspends the loop for external confirmation, resolved via the shared
 // Resume channel (same channel as ask_user).
 package nerve

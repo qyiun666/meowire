@@ -105,7 +105,7 @@ type Closer interface {
 
 释放 LLM 客户端、HTTP 连接等宿主资源。框架保证 Agent.Close 幂等（CAS），重复调用无副作用。
 
-### 2.4 Pause / Unpause —— 快照挂起（v1.3.2 起与 ask_user 统一为单一挂起-恢复机制）
+### 2.4 Pause / Unpause —— 快照挂起（与 ask_user 统一为单一挂起-恢复机制）
 
 ```go
 agent.Pause()     // 请求暂停：下一个间隙点生效（Think 前 / 工具执行前）
@@ -113,7 +113,7 @@ agent.Unpause()   // 清除未生效的暂停请求（Pause 后、间隙点前�
 ```
 
 - **间隙生效**：暂停请求不打断正在执行的 Think/Act；循环在「每轮 Think 前」与「每个工具执行前」两个间隙点检查
-- **快照挂起（v1.3.2 起不再阻塞）**：暂停生效时事件流产出 `EventState(StatePaused)` → `EventPaused`（携带 Session 快照），**迭代器正常结束**；宿主用 `agent.Resume(sess, "")` 续跑（response 传空，无 pending 工具可注入）——与 ask_user 共用同一条 Session/Resume 路径（LangGraph-interrupt 式单一挂起原语）
+- **快照挂起（不阻塞）**：暂停生效时事件流产出 `EventState(StatePaused)` → `EventPaused`（携带 Session 快照），**迭代器正常结束**；宿主用 `agent.Resume(sess, "")` 续跑（response 传空，无 pending 工具可注入）——与 ask_user 共用同一条 Session/Resume 路径（LangGraph-interrupt 式单一挂起原语）
 - **工具间隙暂停**：暂停点在工具执行前，快照会把「当前工具及其后调用」记入 Session.remaining，Resume 先执行它们再回到 Think（当前工具未执行，不会丢失）
 - 暂停状态是 **Agent 级、跨 Stimulate 保留**：暂停中再次 `Stimulate`，入口处先挂起（StatePaused + EventPaused）
 - `Pause` / `Unpause` **幂等、并发安全**；`Close` 后调用为 no-op
@@ -209,7 +209,7 @@ o.Act     = meowire.FallbackEffector(本地工具, 远端工具) // 一双手，
 - 组合器**返回的就是端口类型本身**，所以组合器官与单个器官的接法完全一致：没有新增插槽、事件或配置字段，`Replace` 接一个栈与接一个器官没有区别
 - `GuardStack` 按严重程度裁决，不按层次先后：第一个 Deny 即结束（后面更宽松的层没有投票权），第一个 Ask 压过 Allow，某层返回 error 就是端口契约本身定义的 fail-closed Deny；`Bounds()` 取第一个非空边界。空栈一律 Deny——没有层的膜不守卫任何东西
 - `FallbackThinker` / `FallbackEffector` 取第一个**执行未报错**的成员；全部失败时把各成员的错误一起返回（最后一个错不比第一个错更能解释为什么）。工具跑完了并说"不"（`Effect.Err`）是结果，不是器官坏了，因此降级链不会继续往下走
-- `Bootable{Boot(ctx) error}` 是唯一可选的生命周期时点：任何端口都可以声明，`New` 对每个实例调用一次，顺序就是蓝图列出必填端口的顺序（`meowire.PortOrder()`），发生在 agent 存在之前；`Replace` 先启动新器官再提交，所以一个起不来的替代品不会在轮次中途生效
+- `Bootable{Boot(ctx) error}` 是唯一可选的生命周期时点：任何端口都可以声明，实例每次加入一次装配时被调用一次（`New` 一次、每次被 `Replace` 接入时一次），顺序就是蓝图列出必填端口的顺序（`meowire.PortOrder()`），发生在 agent 存在之前。框架从不关闭器官，所以声明 `Boot` 的端口属于单个装配、按 agent 新建，不跨 `New` 复用。`Replace` 在槽位接受该端口之后、提交之前启动它，因此一个起不来的替代品不会在轮次中途生效，写错的槽名也不会白白消耗掉这一次启动
 - `Boot` 失败即中止装配，本次尝试已经打开的东西经宿主 `Closer` 释放：框架从不关闭任何器官，`Close` 仍是唯一清理通道；被换下的旧器官同样不会被框架关闭——进行中的 Stimulate 可能还持有它，何时退场归宿主
 
 ---
@@ -280,10 +280,10 @@ type Config struct {
 | `MaxRetries` | Think 重试次数（仅重试 Think；工具失败防护在宿主侧 Effector/AfterAct） | 不重试 |
 | `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，写入 `ToolResults.Err` 继续循环） | 无超时 |
 | `ToolMaxRetries` | 工具执行失败重试次数（**仅执行器 error**；`Effect.Err` 不重试，防重复副作用） | 不重试 |
-| `ParallelActs` | **同轮多工具批次并行（v1.3.3，opt-in）**：串行门控（逐条事件/沙箱裁决/BeforeAct）→ 并行 Act（含超时/重试）→ 串行反馈（按调用序，与完成顺序无关）。单调用恒走串行路径；**前提：Effector 实现并发安全** | 严格串行 |
-| `MaxParallelActs` | 一个批次同时执行的工具调用上限（v1.3.8）。只收窄 `ParallelActs`——跑哪些调用、反馈顺序都不变——给一个「能并发但不能一起上」的宿主（别处有限流、连接池） | 整批一起跑 |
+| `ParallelActs` | **同轮多工具批次并行（opt-in）**：串行门控（逐条事件/沙箱裁决/BeforeAct）→ 并行 Act（含超时/重试）→ 串行反馈（按调用序，与完成顺序无关）。单调用恒走串行路径；**前提：Effector 实现并发安全** | 严格串行 |
+| `MaxParallelActs` | 一个批次同时执行的工具调用上限。只收窄 `ParallelActs`——跑哪些调用、反馈顺序都不变——给一个「能并发但不能一起上」的宿主（别处有限流、连接池） | 整批一起跑 |
 
-**运行期热更新（v1.3.0）**：
+**运行期热更新**：
 
 ```go
 cfg := agent.GetConfig()  // 读当前值
@@ -324,9 +324,9 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 ```
 
 - 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
-- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）；新器官若声明了 `Bootable` 则先启动再提交，启动失败时接线保持原样
-- 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
-- **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, OldType, NewType}`（被换的端口按 Go 类型名记录、不作持有：审计在替换之后才产出，必须可序列化；被换下的端口由 `Replace` 的返回值交给宿主），在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
+- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）；新器官若声明了 `Bootable`，则先由槽位断言接受、再启动、最后提交，启动失败或槽位不合时接线都保持原样
+- 并发安全；`Close` 后拒绝交换并返回 `ErrCellClosed`（换入的端口不会被启动）；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
+- **审计事件**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, OldType, NewType}`（被换的端口按 Go 类型名记录、不作持有：审计在替换之后才产出，必须可序列化；被换下的端口由 `Replace` 的返回值交给宿主），在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
 
 ### 5.2 能力卡：`AgentCard`（A2A 风格）
 
@@ -480,7 +480,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **挂起 = 迭代器正常结束**：yield `EventState(StateWaiting)` → `EventWaitInput` 后结束，无 `EventDone`/`EventError`；`OnCycleEnd`/`AfterStimulate` 照常恰好一次，outcome 为 `OutcomeSuspended`（宿主凭 StateWaiting/outcome 区分挂起收尾，**勿沉淀未完成轮次**）
 - **执行前征询（`Allow` = Ask）= 同一挂起机制**：循环产出相同的 `EventState(StateWaiting)` + `EventWaitInput`（问题文本来自裁决 reason），且事先产出一条 ask 型 `EventSandbox` 审计记录；宿主用与 ask_user 完全相同的方式保存 Session、展示问题、Resume 解决；**批准的调用不再重新过门禁**（无状态膜会无限重问），同轮其余调用重放时照常过门禁；终结的 resolve 记录闭合审计链
 - **文本征询（`Emit` = Ask）= 同一挂起机制**：该轮草稿被扣住，事件流里读不到它（`EventWaitInput.Call` 为零值，问题文本来自裁决 reason），草稿随 `Session` 走线；批复后按原稿说出（**不重跑该轮 Think**）或以 `[sandbox-denied: ...]` 取代并进 Context；该轮已声明的工具调用排在草稿之后照常执行，若该轮别无待办则直接收尾 Done
-- **暂停（v1.3.2）= 同一挂起机制**：yield `EventState(StatePaused)` → `EventPaused`（Session 快照，Call 零值）后迭代器正常结束；`agent.Resume(sess, "")` 续跑，不注入任何结果（无 pending 工具）；暂停点在工具执行前时，当前工具记入 Session.remaining，Resume 先执行
+- **暂停= 同一挂起机制**：yield `EventState(StatePaused)` → `EventPaused`（Session 快照，Call 零值）后迭代器正常结束；`agent.Resume(sess, "")` 续跑，不注入任何结果（无 pending 工具）；暂停点在工具执行前时，当前工具记入 Session.remaining，Resume 先执行
 - **`Session` 是不透明值对象**（`round`/Context/剩余工具调用/累积输出快照）：宿主只保存、传回，不碰内部；**归属明确**——`Resume` 拒绝别的 cell 交回的句柄（`ErrForeignSession`，重放等于拿 B 的器官跑 A 的那一轮）；**单次消费**——重复 Resume 会重复执行剩余工具（副作用重复，宿主责任）
 - **`sess.RemainingCalls()`**：唯一授权的只读探测——返回挂起点尚未执行的调用克隆（无则空）：暂停快照保留整批未执行调用（Resume 重放）；`ParallelActs` 批内 WaitInput 挂起则为空（整批已执行完，Resume 只注入响应，绝不重放）
 - **持久化**：`sess.Marshal()` 产出 JSON 字节（version 3：句柄归属的 cell、挂起成因、被扣住的草稿都在其上），宿主存盘；重启后 `meowire.UnmarshalSession(data)` 还原句柄再 Resume——挂起/暂停跨进程可恢复；版本或挂起成因不认识的名字拒绝还原（防止旧/新格式误重放）
@@ -489,7 +489,7 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **响应语法（膜的两侧按三态裁决，ask_user 原样注入）**：**空串** = 拒绝（执行前征询落 `[sandbox-denied: declined]` 反馈、文本征询以该文本取代草稿）；**`[denied:` 前缀** = 以该文本拒绝（超时配方如上 `[denied: timeout]`，落库为 `[sandbox-denied: ...]` 规范形式）；**其余任何响应** = 批准——执行前征询放行 pending 调用执行（不再过门禁），文本征询按原稿说出。**ask_user** 的响应原样作为挂起工具的结构化结果写入恢复后的 `ToolResults`（`ID` 为该调用的 `call_xxx`，进入恢复后的第一次 Think；空串即空结果；拒绝语义由宿主在响应文本中表达，超时配方 `[denied: timeout]` 作为工具反馈被模型读到）。超时由宿主控制（默认拒绝）
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
-- **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠
+- **与 `BeforeThink` 的注入分工**：`BeforeThink` 改写的是本轮 Prompt（整体替换 `p.Context` 等字段），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠
 
 ### 6.5 事件流落盘：`EncodeEvent` / `DecodeEvent`
 
@@ -785,7 +785,7 @@ func main() {
 6. **事件流是观察镜像**：宿主不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
 7. **流式 UX 在 Thinker 内做**：`EventText` 永远整段，token 增量不进事件流
 8. **错误处理**：宿主端口返回的错误会被框架包装（`nerve.hookBeforeThink: ...` 等）后经 `EventError` 透出；判断错误类型用 `errors.Is`（如 `meowire.ErrMaxRounds`）
-9. **暂停不打断执行中的工具**：Pause 在间隙点生效（v1.3.2 起为快照挂起，`EventPaused` 后迭代器结束、`Resume(sess, "")` 续跑）；如需中断正在执行的工具，用 ctx 取消（§2.4）
+9. **暂停不打断执行中的工具**：Pause 在间隙点生效（快照挂起，`EventPaused` 后迭代器结束、`Resume(sess, "")` 续跑）；如需中断正在执行的工具，用 ctx 取消（§2.4）
 10. **hub 生命周期归宿主**（§7.3）：流式 channel 满会阻塞 agent 循环（Thinker 转发是同步的），宿主必须管理背压（buffer 大小）与回收（agent 结束后 close/删除 channel）；框架不参与
 11. **子 agent 必须注入与主 agent 同一个 hub 实例**（§7.3）：换实例即失联，统一状态视图靠共享实例实现
 
