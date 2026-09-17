@@ -20,22 +20,16 @@ const (
 	OutcomeAborted                           // consumer stopped early (yield returned false) before any terminal
 )
 
-// Hooks are the wiring interception points (all eight required — the
-// sensory/decision/action regulation loop). Hosts that want no behavior at
-// a point pass an explicit no-op; a nil callback fails assembly. An
-// explicit no-op is a declared decision; an absent callback is a missing
-// organ.
-// BeforeStimulate/AfterStimulate fire exactly once per Stimulate:
-// BeforeStimulate receives a Prompt prototype whose content fields
-// (System/Identity/Methods/Tools/Context/Input/Plan) are written back to the
-// loop after the hook returns, so modifications apply to every round of the
-// Stimulate (State is loop-managed and not written back); an error terminates
-// the whole Stimulate. AfterStimulate runs after the cycle ends — guaranteed
-// on normal completion, error path, and early consumer stop (yield=false).
-// AfterAct receives the tool execution error (err non-nil = effector failure).
-// OnCycleEnd is guaranteed to run exactly once per Cycle on all paths,
-// carrying the CycleOutcome classification (Done / Suspended / MaxRounds /
-// Error / Aborted).
+// Hooks are the wiring interception points; all eight are required. An
+// explicit no-op is a declared decision, an absent callback a missing organ —
+// so a nil callback fails assembly.
+// BeforeStimulate fires once before any event and receives a Prompt prototype
+// whose content fields (System/Identity/Methods/Tools/Context/Input/Plan) are
+// written back, applying to every round of the Stimulate; an error terminates
+// the whole Stimulate. AfterStimulate and OnCycleEnd each run exactly once per
+// Stimulate on all paths (normal completion, error, suspension, consumer
+// stop); OnCycleEnd carries the CycleOutcome classification. AfterAct receives
+// the tool execution error (err non-nil = effector failure).
 type Hooks struct {
 	BeforeStimulate func(ctx context.Context, p *Prompt) error
 	AfterStimulate  func(ctx context.Context, output string)

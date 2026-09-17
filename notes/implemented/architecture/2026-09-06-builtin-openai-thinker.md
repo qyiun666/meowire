@@ -1,6 +1,7 @@
 # 决策档案: meowire 内置参考 LLM Thinker（openai 包，宽缝收编）
 
 Status: implemented
+Superseded by: 2026-09-17-kernel-ships-no-organs.md
 
 `openai/` 包随本档案同任务落地，渲染文案与传输一并收编进内核。
 

@@ -32,7 +32,6 @@ type Prompt struct {
 
 	// Dynamic part (updated each round)
 	Input string // Current stimulus text
-	State string // Current loop state (framework auto-updated)
 	Plan  string // Task plan/progress (host injected, brain can update)
 	// Reflection carries the host's reflexion note (e.g. a failure
 	// post-mortem from the previous attempt). Injected via BeforeStimulate /
@@ -40,8 +39,7 @@ type Prompt struct {
 	// loop's standard slot, so hosts never invent private prompt channels.
 	Reflection string
 
-	// Structured tool feedback accumulated within this cycle (single track:
-	// tool results no longer enter Context; rendering is the host's call).
+	// Structured tool feedback accumulated within this cycle (see ToolResult).
 	ToolResults []ToolResult
 }
 
@@ -159,7 +157,7 @@ type sessionJSON struct {
 	Pending     ToolCall     `json:"pending"`
 	Remaining   []ToolCall   `json:"remaining"`
 	ToolResults []ToolResult `json:"toolResults"`
-	SandboxAsk  bool         `json:"sandboxAsk"` // v1.3.x: sandbox-ask suspension flavor
+	SandboxAsk  bool         `json:"sandboxAsk"` // sandbox-ask suspension flavor
 }
 
 // Marshal serializes the session to its wire shape (JSON) — the persistence

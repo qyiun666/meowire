@@ -119,8 +119,7 @@ type LoopContext struct {
 	Context []string // Host-injected base + sandbox denials (tool results live in ToolResults)
 	Bounds  string   // Sandbox.Bounds() snapshot, taken once per Stimulate
 
-	// Structured tool feedback accumulated within this cycle (single track:
-	// tool results no longer enter Context; rendering is the host's call).
+	// Structured tool feedback accumulated within this cycle (see ToolResult).
 	ToolResults []ToolResult
 
 	// PendingReplace: port swap audits recorded since the last Stimulate/
@@ -213,17 +212,12 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		return
 	}
 
-	// Sandbox-ask flavor: resolve the tri-state confirmation. The response
-	// grammar is the input protocol: an empty response denies, a "[denied:
-	// ...]" payload denies with that text (the host's timeout recipe is
-	// Resume(sess, "[denied: timeout]")), any other non-empty response
-	// approves execution of the pending call through the standard admitted
-	// pipeline. The denial feedback lands in its canonical output form
-	// ("[sandbox-denied: ...]") — the input encoding and the feedback text
-	// are deliberately distinct formats. Either arm emits the terminal
-	// EventSandbox that closes the ask chain. A denial feeds back in place;
-	// approval runs the call first, then the untouched remainder below.
-	// Neither arm consumes a round.
+	// Sandbox-ask flavor: resolve the tri-state confirmation. An empty
+	// response denies as "declined", a "[denied: ...]" payload denies with
+	// that text, anything else approves the pending call through the standard
+	// admitted pipeline without re-gating (a stateless membrane would re-ask
+	// forever). Either arm emits the terminal EventSandbox that closes the ask
+	// chain; neither consumes a round.
 	if sess.pending.ID != "" && sess.sandboxAsk {
 		resp := strings.TrimSpace(response)
 		ruling, fb := VerdictDeny, "[sandbox-denied: declined]"
@@ -407,7 +401,6 @@ func thinkRound(ctx context.Context, lc *LoopContext, out *strings.Builder, yiel
 		Context:     lc.Context,
 		Bounds:      lc.Bounds,
 		Input:       lc.Input,
-		State:       lc.State.String(),
 		Plan:        lc.Plan,
 		Reflection:  lc.Reflection,
 		ToolResults: lc.ToolResults,
@@ -526,9 +519,6 @@ func executeAdmitted(ctx context.Context, lc *LoopContext, tc ToolCall, round in
 		return w, true
 	}
 
-	// Structured track only: tool results no longer enter the Context text
-	// track (rendering is the host's decision; Context keeps host-injected
-	// base + sandbox denials).
 	if !toolFeedback(ctx, lc, tc, eff, err, yield) {
 		return nil, false
 	}
@@ -783,12 +773,11 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 		Input:       lc.Input,
 		Plan:        lc.Plan,
 		Reflection:  lc.Reflection,
-		State:       lc.State.String(),
 	}
 	if err := lc.Hooks.BeforeStimulate(ctx, proto); err != nil {
 		return fmt.Errorf("nerve.hookBeforeStimulate: %w", err)
 	}
-	// Write back content fields (State is overwritten by the loop each round).
+	// Write back the content fields the hook may have changed.
 	lc.System = proto.System
 	lc.Identity = proto.Identity
 	lc.Methods = proto.Methods

@@ -54,8 +54,6 @@ myhost/
 
 用标准库 `net/http` 实现，零第三方依赖（宿主想用官方 SDK 也可以，接口一样）。任何 OpenAI 兼容端点都可用：`https://api.openai.com/v1`、DeepSeek、Ollama（`http://localhost:11434/v1`）、Qwen 等，换 `baseURL` + `apiKey` 即可。
 
-> 生产用途可省掉本节：内置参考 Thinker（`openai.New(Config) → api.Thinker`，双 wire + 重试 + 流式）开箱即用——手写实现保留在此用于展示端口形状。
-
 ```go
 // llm.go
 package main
@@ -232,7 +230,7 @@ func (t *thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decisi
 | `Context` | 多条 `system`/`user` | 记忆基底 + 框架追加的 sandbox 裁决（工具结果不在文本轨） |
 | `ToolResults` | 追加进 `user` | 结构化工具结果（`[tool_call_id=xxx]` 标记条目，见下）——框架唯一反馈轨道，必须渲染 |
 | `Input` | `user` 消息 | 本次刺激 |
-| `State` / `Plan` | 追加进 `user` | 循环状态 + 任务计划 |
+| `Plan` | 追加进 `user` | 任务计划 |
 
 ```go
 func buildMessages(p *meowire.Prompt) []chatMsg {
@@ -259,14 +257,11 @@ func buildMessages(p *meowire.Prompt) []chatMsg {
 	if fb.Len() > 0 {
 		msgs = append(msgs, chatMsg{Role: "user", Content: "[工具结果]" + fb.String()})
 	}
-	statePlan := p.Input
+	userText := p.Input
 	if p.Plan != "" {
-		statePlan += "\n[当前计划] " + p.Plan
+		userText += "\n[当前计划] " + p.Plan
 	}
-	if p.State != "" {
-		statePlan += "\n[循环状态] " + p.State
-	}
-	msgs = append(msgs, chatMsg{Role: "user", Content: statePlan})
+	msgs = append(msgs, chatMsg{Role: "user", Content: userText})
 	return msgs
 }
 ```

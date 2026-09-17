@@ -167,24 +167,13 @@ func (c *Cell) GetConfig() nerve.LoopConfig {
 }
 
 // Replace swaps one runtime port; it takes effect at the next Stimulate
-// (each Stimulate snapshots the current ports into a fresh LoopContext — an
-// in-flight Stimulate keeps the ports it started with). This is the
-// dynamic-wiring counterpart of synaptic plasticity: hosts swap organs
-// between stimuli (another LLM, a stricter permission policy) without
-// rebuilding the agent.
-//
-// Supported slots and their port types (all required — a swapped port must
-// be non-nil, a missing organ cannot be swapped in):
-//
-//	"think"   → nerve.Thinker
-//	"act"     → nerve.Effector
-//	"sandbox" → nerve.Sandbox
-//	"budget"  → *nerve.ContextBudget
-//	"hooks"   → *nerve.Hooks
-//
-// Closer and PauseGate are not swappable: Closer is a resource binding
-// (Close drains it exactly once), PauseGate is framework wiring. Returns the
-// previous port value (nil if none was set); a no-op after Close.
+// because each Stimulate snapshots the ports into a fresh LoopContext (an
+// in-flight one keeps what it started with). A swapped port must be non-nil:
+// the loop dereferences Sandbox/Budget without a nil check, so an absent
+// organ would panic rather than fail closed — removing an organ means
+// swapping in an inert one, not nil. Closer is never swappable (it is the
+// resource binding Close drains once) and PauseGate is framework wiring.
+// Returns the previous port value (nil if none was set); a no-op after Close.
 func (c *Cell) Replace(slot string, port any) (any, error) {
 	if c.closed.Load() {
 		return nil, nil

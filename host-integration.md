@@ -49,7 +49,6 @@ type Thinker interface {
 | `ToolResults` | 结构化工具结果（`ToolResult{ID, Name, Result, Err}`）：循环内累积，ID 为 LLM 返回的 `call_xxx`，Result/Err 为截断后的原始输出；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记等）归宿主 Thinker | 框架，循环内追加 |
 | `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
-| `State` | 当前循环状态字符串（`"thinking"`/`"acting"`/…） | 框架自动更新 |
 | `Plan` | 任务计划/进度文本 | 宿主经 `Hooks.BeforeThink` 写 `p.Plan`（指针可改，下一轮 Think 生效）；配合宿主 `update_plan` 工具形成闭环（§7.3 ③） |
 
 **返回值 `Decision` 字段：**
@@ -65,25 +64,6 @@ type Thinker interface {
 - 流式输出在 Thinker 内部自行消费（如推给 WebSocket channel）；事件流只承载整段 Text
 - **必须监控 `ctx.Done`**（长请求可被框架取消）
 - 同一 Agent 并发 Stimulate 时 Thinker 必须并发安全
-
-> **不想自己写 Thinker？** 本仓内置参考实现 `github.com/qyiun666/meowire/openai`
-> （零三方依赖、OpenAI 兼容、chat/responses 双 wire 自动探测）：
->
-> ```go
-> import meowopenai "github.com/qyiun666/meowire/openai"
->
-> thinker, err := meowopenai.New(meowopenai.Config{
->     BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
->     Sampling: meowopenai.Sampling{Temperature: 0.7, MaxTokens: 8192},
-> },
->     meowopenai.WithStreamGate(func() bool { return uiSubscribed() }),  // 每轮判定流式
->     meowopenai.WithChunkSink(func(ctx context.Context, c meowopenai.Chunk) { /* 推 UI */ }),
-> )
-> ```
->
-> Prompt 渲染（槽位文案、工具 schema、采样下发）与传输（SSE/重试/超时）全部由参考
-> 实现承担，宿主填 Prompt 即用。端口契约不变：需要自定义提示词渲染或传输的宿主
-> 仍自行实现 `Thinker`（§2.1 其余内容即其契约）。
 
 ### 2.2 Effector —— 工具执行器（手）
 
@@ -295,7 +275,7 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 ```
 
 - 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
-- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回旧端口（宿主自行决定是否关闭旧实现）
+- 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）
 - 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 - **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, Old, New}`，在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
 
@@ -646,7 +626,7 @@ func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Dec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/State/Plan → messages
+	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/Plan → messages
 	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
 	return &meowire.Decision{
 		Text:      resp.Text,

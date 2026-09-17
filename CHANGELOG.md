@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`openai` reference Thinker package** — the kernel ships no LLM client, transport
+  or prompt renderer: `Thinker` is a port the host implements, and the framework
+  defines only the `Prompt` that goes in and the `Decision` that comes out.
+- **Dead contract members with no producer or consumer** — `Message` /
+  `MessageRole` (the conversation shape lives in `Prompt` and `ToolResult`),
+  `Signal.ErrPayload`, `Prompt.State` (the loop set it to `StateThinking` before
+  every Think, so it carried no information), and `Direct.Connected` (absent from
+  the `Synapse` interface, therefore unreachable through the public surface —
+  connectivity is read via the `Edges` snapshot).
+
+### Internal
+
+- `api` package documentation and the oversized comments in `nerve`/`cell` were
+  rewritten to the repository's current perspective; the slot table duplicated
+  inside `cell.Replace`'s doc is gone (the blueprint in `nerve/wire.go` owns it).
+
 ## [1.3.7] - 2026-09-06
 
 ### Added

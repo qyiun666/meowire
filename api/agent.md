@@ -9,7 +9,7 @@
 ## Dependencies
 
 - internal/cell (agent kernel)
-- internal/nerve (Event, ports, Hooks, MethodSpec, Signal/Message)
+- internal/nerve (Event, ports, Hooks, MethodSpec, Signal)
 - internal/synapse (inter-agent connections, re-exported errors)
 - internal/memory (Memory/Record/Query type aliases)
 - Go standard library only

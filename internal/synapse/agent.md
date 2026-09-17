@@ -27,9 +27,9 @@
   - Edge table `map[string]map[string]Edge` (from→to→Edge, RWMutex protected)
   - `Resolver func(id) (chan<- nerve.Signal, bool)`: resolves target inbox by ID (host-injected closure)
   - `NewDirect(r Resolver, initial ...Edge)`: initial restores a persisted graph (omitted = empty); negative weights clamp
-  - `SetResolver`/`Connected`: assembly and read-only query
+  - `SetResolver`: late resolver injection at assembly time; connectivity is read through the `Edges` snapshot
 - Error variables: `ErrNoTarget`, `ErrNotLinked`, `ErrTargetBusy`
-- Reference learning rules (1.1.2, host-callable; framework never auto-applies):
+- Reference learning rules (host-callable; the framework never auto-applies):
   - `Hebbian(ctx, s, from, to, rate) error` — fire-together-wire-together step (Reinforce +rate)
   - `STDP(ctx, s, from, to, dt, STDPParams{APlus, AMinus, Tau}) error` — spike-timing window: dt>0 LTP (Δw=APlus·exp(−dt/τ)), dt<0 LTD (−AMinus·exp(dt/τ)), dt=0 no change; Tau≤0 or negative magnitudes error
   - `Prune(ctx, s, weightFloor, minFired) (int, error)` — removes edges with weight<floor AND Fired<minFired; returns removed count

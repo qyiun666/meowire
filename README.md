@@ -53,10 +53,6 @@ you can rely on.
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (context
   regulator — needs a Trimmer and MaxTokens)
-- **Built-in reference Thinker (`openai` package)** — `openai.New(Config)` yields a
-  zero-dependency OpenAI-compatible `api.Thinker` (Chat Completions + Responses API,
-  wire auto-detected or pinned; streaming gate + chunk sink; retry with backoff).
-  Hosts fill the Prompt and go — the port stays open for custom prompting/transports
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)

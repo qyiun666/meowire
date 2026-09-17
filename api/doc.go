@@ -1,42 +1,21 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// Package meowire is the public facade of the meowire harness.
+// Package meowire is the public facade of the meowire harness: a decision-loop
+// kernel (Think → Act event stream) plus the six-port assembly surface. The
+// framework owns the loop, the events and the wiring contract; the host owns
+// every organ implementation and the multi-agent colony.
 //
-// Architecture:
+// Kernel: an internal/cell Cell holds an ID, the ports and a
+// nerve.DecisionLoop, and yields iter.Seq[Event]. Both suspensions — a tool
+// that waits for input and a pause request — share one primitive: the loop
+// ends the iterator normally with a Session handle the host saves and returns
+// to Resume.
 //
-//   - Single agent kernel: Cell = ID + ports + DecisionLoop (nerve.DecisionLoop{}.Cycle)
-//   - DecisionLoop: Think → Act → yield events (iter.Seq[Event] return model)
-//   - Flat model: the host manages multiple Agent instances for multi-agent scenarios
-//   - Sub-agent = host tool (spawn_agent tool pattern, not framework-level nesting)
-//   - History managed by host (MemHop pattern: host controls context accumulation)
-//
-// Concept map:
-//
-//   - DecisionLoop: internal/nerve/loop.go (pure orchestration: Think→Act→yield events)
-//   - Cell: internal/cell/cell.go (ID + ports + DecisionLoop → iter.Seq[Event])
-//   - Ports: internal/nerve/port.go (Thinker/Effector/Closer), internal/nerve/hook.go (Hooks)
-//   - Guard ports: internal/nerve/sandbox.go (Sandbox), internal/nerve/context.go (ContextBudget)
-//   - Events: internal/nerve/event.go
-//   - Wiring blueprint: internal/nerve/wire.go (wiring graph — ConnectomeNodes
-//     are the data-object nodes, Connectome is the slot edge list; each slot
-//     carries TargetID, Semantics, Phase, Category, Parallel, Required),
-//     wiring.go (WiringDiagram / BuildGraph / SlotsByTarget / Validate /
-//     RenderDiagram / RenderJSON: blueprint × assembly comparison as a graph)
-//   - Dynamic wiring: Agent.Replace(slot, port) swaps runtime ports between
-//     Stimulates (plasticity); AgentCard(Organs) renders the A2A-style
-//     capability card; Signal.Status carries A2A task lifecycle states
-//   - Synapse: internal/synapse/ (plastic synapse graph: Link/Unlink/Reinforce/
-//     Fire/Edges + reference learning rules Hebbian/STDP/Prune)
-//   - Memory: internal/memory/ (standalone contract, host reference)
-//   - Composition: assemble.go (Blueprint{Organs, Config} + New(Blueprint)
-//     single assembly point; every wiring point is required — error-level
-//     findings always block, no warn level; FullHooks fills declared no-ops)
-//   - Facade: meow.go (Agent: Stimulate returns iter.Seq[Event]; Pause/Resume; Close)
-//
-// Sealed internals: all implementation packages live under internal/ and are
-// not importable outside this module. The api package is the sole public
-// surface of the meowire module.
+// Assembly: New(Blueprint) is the sole composition root. Every port and every
+// hook callback is required; a missing one is a missing organ, never a
+// default. An assembly is checked against the wiring graph (ConnectomeNodes
+// are the data objects, Connectome the slots) before an Agent exists.
 //
 // Dependency graph (strictly unidirectional):
 //
@@ -44,8 +23,4 @@
 //	  ├── internal/cell → internal/nerve
 //	  └── internal/synapse → internal/nerve
 //	internal/memory: standalone contract, not consumed by the framework
-//
-// All six ports (Think/Act/Closer/Hooks/Sandbox/Budget) and all eight hook
-// callbacks (H1–H8) are required — New rejects a missing port or callback;
-// there are no stubs, no default implementations, no optional wiring.
 package meowire

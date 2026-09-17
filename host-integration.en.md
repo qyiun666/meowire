@@ -56,7 +56,6 @@ type Thinker interface {
 | `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
-| `State` | Current loop state string (`"thinking"`/`"acting"`/…) | Framework, auto-updated |
 | `Plan` | Task plan/progress text | Host, updatable via Hooks |
 
 **Return `Decision` fields:**
@@ -73,27 +72,6 @@ type Thinker interface {
   the event stream only carries whole-segment Text
 - **Must respect `ctx.Done`** (long requests may be cancelled by the framework)
 - Must be concurrency-safe if the same Agent is stimulated concurrently
-
-> **Don't want to write a Thinker?** The repo ships a reference implementation at
-> `github.com/qyiun666/meowire/openai` (zero third-party dependencies,
-> OpenAI-compatible, chat/responses dual wire with automatic detection):
->
-> ```go
-> import meowopenai "github.com/qyiun666/meowire/openai"
->
-> thinker, err := meowopenai.New(meowopenai.Config{
->     BaseURL: cfg.BaseURL, APIKey: cfg.APIKey, Model: cfg.Model,
->     Sampling: meowopenai.Sampling{Temperature: 0.7, MaxTokens: 8192},
-> },
->     meowopenai.WithStreamGate(func() bool { return uiSubscribed() }), // re-evaluated per Think
->     meowopenai.WithChunkSink(func(ctx context.Context, c meowopenai.Chunk) { /* push to UI */ }),
-> )
-> ```
->
-> Prompt rendering (slot texts, tool schemas, sampling) and transport (SSE /
-> retries / timeouts) are fully covered — fill the Prompt and go. The port
-> contract is unchanged: hosts that need custom prompting or transports keep
-> implementing `Thinker` themselves (the rest of §2.1 is that contract).
 
 ### 2.2 Effector — the tool executor (the hands)
 
@@ -795,7 +773,7 @@ func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Dec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/State/Plan → messages
+	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/Plan → messages
 	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
 	return &meowire.Decision{
 		Text:      resp.Text,

@@ -13,13 +13,12 @@ package nerve
 // Status tracks the task lifecycle when the signal is a task exchange
 // (A2A-style states; "" = not tracked).
 type Signal struct {
-	ID         string     // Unique identifier
-	From       string     // Sender ID
-	To         string     // Target ID
-	Kind       SignalKind // Signal category
-	Status     TaskStatus // Task lifecycle state ("" = not tracked)
-	Payload    []byte     // Content
-	ErrPayload bool       // Structured error flag
+	ID      string     // Unique identifier
+	From    string     // Sender ID
+	To      string     // Target ID
+	Kind    SignalKind // Signal category
+	Status  TaskStatus // Task lifecycle state ("" = not tracked)
+	Payload []byte     // Content
 }
 
 // TaskStatus tracks an inter-agent task lifecycle (A2A-style states,
@@ -43,21 +42,3 @@ const (
 	KindResponse                   // Response: agent reply
 	KindNotice                     // Notice: side-channel message, no DecisionLoop
 )
-
-// Message and MessageRole are retained for host use. The framework does not consume them.
-
-// MessageRole categorizes message roles.
-type MessageRole string
-
-const (
-	RoleUser      MessageRole = "user"
-	RoleAssistant MessageRole = "assistant"
-	RoleTool      MessageRole = "tool"
-)
-
-// Message is a structured conversation message (retained for host use).
-type Message struct {
-	Role       MessageRole
-	Content    string
-	ToolCallID string
-}

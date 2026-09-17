@@ -203,20 +203,5 @@ func (d *Direct) Edges(ctx context.Context, from string) ([]Edge, error) {
 	return out, nil
 }
 
-// connected reports whether a from→to connection exists.
-func (d *Direct) connected(from, to string) bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	toSet, ok := d.links[from]
-	if !ok {
-		return false
-	}
-	_, ok = toSet[to]
-	return ok
-}
-
-// Connected reports whether a from→to connection exists (public read-only).
-func (d *Direct) Connected(from, to string) bool { return d.connected(from, to) }
-
 // Compile-time assertion: Direct implements Synapse.
 var _ Synapse = (*Direct)(nil)

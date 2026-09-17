@@ -4,8 +4,8 @@
 // learning.go — reference learning rules for the plastic synapse graph.
 //
 // The framework stores state (weights, delivery counts) and never decides
-// when to change it; these rules are reference implementations hosts may
-// use directly or adapt (1.1.2). They operate on the Synapse interface only
+// when to change it; these rules are reference implementations hosts may use
+// directly or adapt. They operate on the Synapse interface only
 // (Reinforce / Edges / Unlink), so they work with any implementation.
 package synapse
 

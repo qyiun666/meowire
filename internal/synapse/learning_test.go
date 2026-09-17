@@ -168,11 +168,11 @@ func TestPruneRemovesWeak(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	if d.Connected("a", "b") {
+	if conducts(t, d, "a", "b") {
 		t.Fatal("a->b should be pruned")
 	}
 	for _, pair := range [][2]string{{"a", "c"}, {"a", "d"}, {"e", "f"}} {
-		if !d.Connected(pair[0], pair[1]) {
+		if !conducts(t, d, pair[0], pair[1]) {
 			t.Fatalf("%s->%s should survive", pair[0], pair[1])
 		}
 	}

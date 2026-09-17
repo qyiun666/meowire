@@ -167,21 +167,35 @@ func TestSetResolver(t *testing.T) {
 	}
 }
 
-// TestConnected verifies Connected reflects Link state.
-func TestConnected(t *testing.T) {
+// conducts reports whether a from→to edge exists in a fresh whole-graph
+// snapshot. Tests use this read path because connectivity is observable only
+// through Edges — the graph exposes no per-edge probe.
+func conducts(t *testing.T, d *Direct, from, to string) bool {
+	t.Helper()
+	edges, err := d.Edges(context.Background(), "")
+	if err != nil {
+		t.Fatalf("edges: %v", err)
+	}
+	_, ok := findEdge(edges, from, to)
+	return ok
+}
+
+// TestLinkShowsInSnapshot verifies Link makes an edge visible in the graph
+// snapshot and that the connection is directed.
+func TestLinkShowsInSnapshot(t *testing.T) {
 	ctx := context.Background()
 	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{}))
 
-	if d.Connected("a", "b") {
+	if conducts(t, d, "a", "b") {
 		t.Fatal("a->b should not be connected initially")
 	}
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
-	if !d.Connected("a", "b") {
+	if !conducts(t, d, "a", "b") {
 		t.Fatal("a->b should be connected after Link")
 	}
-	if d.Connected("b", "a") {
+	if conducts(t, d, "b", "a") {
 		t.Fatal("b->a should not be connected (directed)")
 	}
 }
@@ -232,13 +246,13 @@ func TestUnlinkRemoves(t *testing.T) {
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
-	if !d.Connected("a", "b") {
+	if !conducts(t, d, "a", "b") {
 		t.Fatal("a->b should be connected")
 	}
 	if err := d.Unlink(ctx, "a", "b"); err != nil {
 		t.Fatalf("unlink: %v", err)
 	}
-	if d.Connected("a", "b") {
+	if conducts(t, d, "a", "b") {
 		t.Fatal("a->b should be severed after Unlink")
 	}
 	if err := d.Unlink(ctx, "a", "b"); !errors.Is(err, ErrNotLinked) {
@@ -361,7 +375,7 @@ func TestNewDirectInitialEdges(t *testing.T) {
 		Edge{From: "a", To: "b", Weight: 1.5, Fired: 7},
 		Edge{From: "a", To: "c", Weight: -1},
 	)
-	if !d.Connected("a", "b") || !d.Connected("a", "c") {
+	if !conducts(t, d, "a", "b") || !conducts(t, d, "a", "c") {
 		t.Fatal("initial edges should be connected")
 	}
 	edges, _ := d.Edges(context.Background(), "a")

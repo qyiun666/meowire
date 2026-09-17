@@ -69,14 +69,12 @@ type (
 
 // Inter-agent messaging (host reference).
 type (
-	Synapse     = synapse.Synapse
-	Edge        = synapse.Edge
-	Resolver    = synapse.Resolver
-	Signal      = nerve.Signal
-	SignalKind  = nerve.SignalKind
-	TaskStatus  = nerve.TaskStatus
-	Message     = nerve.Message
-	MessageRole = nerve.MessageRole
+	Synapse    = synapse.Synapse
+	Edge       = synapse.Edge
+	Resolver   = synapse.Resolver
+	Signal     = nerve.Signal
+	SignalKind = nerve.SignalKind
+	TaskStatus = nerve.TaskStatus
 )
 
 // NewDirect creates the reference Direct synapse (connection-table with
@@ -168,13 +166,6 @@ const (
 	TaskCompleted  TaskStatus = nerve.TaskCompleted
 	TaskFailed     TaskStatus = nerve.TaskFailed
 	TaskCancelled  TaskStatus = nerve.TaskCancelled
-)
-
-// MessageRole constants.
-const (
-	RoleUser      MessageRole = nerve.RoleUser
-	RoleAssistant MessageRole = nerve.RoleAssistant
-	RoleTool      MessageRole = nerve.RoleTool
 )
 
 // WireCategory constants.
