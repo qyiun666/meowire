@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
+- The decision loop is split by concern (`state.go`, `loop.go`, `feedback.go`,
+  `gate.go`, `pause.go`, `retry.go`, `hooks.go`, `parallel.go`): `loop.go` had
+  grown past the file budget by accumulating the membrane, the pause gate,
+  retries and the batch path. Every Act-phase step now runs through one
+  `actBatch` handle (calls, round, output accumulator, yield) instead of
+  dragging a six-to-nine-argument convoy, and the parallel batch splits into
+  `gatePhase` / `execPhase` / `feedbackPhase`. No contract and no event order
+  changed — the sequence assertions in `internal/nerve` are the proof.
+- `size_test.go` enforces the complexity budget across the module (file
+  ≤400 lines, function body ≤50, ≤4 parameters). The exemption list is closed
+  and carries a reason per entry (`Connectome` is a data table, `Replace`
+  collapses when slots become data-driven, `Resume`/`Hebbian`/`STDP` are
+  host-visible signatures).
 - `api` package documentation and the oversized comments in `nerve`/`cell` were
   rewritten to the repository's current perspective; the slot table duplicated
   inside `cell.Replace`'s doc is gone (the blueprint in `nerve/wire.go` owns it).

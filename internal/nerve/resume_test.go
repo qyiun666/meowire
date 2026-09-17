@@ -15,10 +15,16 @@ import (
 // the full session (ask_user shape with a pending tool) — the persistence
 // primitive hosts use to save and restore a suspended loop.
 func TestSessionMarshalRoundTrip(t *testing.T) {
-	sess := Session{}.snapshot(3, "in", "plan", []string{"ctx1", "ctx2"}, "out",
-		ToolCall{ID: "t1", Name: "ask_user"},
-		[]ToolCall{{ID: "t2", Name: "tool2"}},
-		[]ToolResult{{ID: "t1", Name: "ask_user", Result: "yes"}})
+	sess := Session{
+		round:       3,
+		input:       "in",
+		plan:        "plan",
+		context:     []string{"ctx1", "ctx2"},
+		output:      "out",
+		pending:     ToolCall{ID: "t1", Name: "ask_user"},
+		remaining:   []ToolCall{{ID: "t2", Name: "tool2"}},
+		toolResults: []ToolResult{{ID: "t1", Name: "ask_user", Result: "yes"}},
+	}
 	b, err := sess.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -71,7 +77,7 @@ func TestSessionMarshalZeroValue(t *testing.T) {
 // TestUnmarshalSessionVersionMismatch verifies a tampered wire version is
 // rejected — a stale or future handle must not be replayed.
 func TestUnmarshalSessionVersionMismatch(t *testing.T) {
-	sess := Session{}.snapshot(1, "in", "", nil, "", ToolCall{}, nil, nil)
+	sess := Session{round: 1, input: "in"}
 	b, err := sess.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
@@ -396,7 +402,7 @@ func TestDecisionLoopResumeCtxCancel(t *testing.T) {
 	cancel()
 	// A valid session: the cancellation must fail through the prologue, not
 	// through the session validity check.
-	sess := Session{}.snapshot(1, "w", "", []string{}, "", ToolCall{ID: "t1", Name: "ask_user"}, nil, nil)
+	sess := Session{round: 1, input: "w", context: []string{}, pending: ToolCall{ID: "t1", Name: "ask_user"}}
 	events := collectResume(ctx, lc, sess, "yes")
 	last := events[len(events)-1]
 	if last.Kind != EventError {

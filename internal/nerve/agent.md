@@ -5,6 +5,8 @@
 ## Purpose
 
 - Capability layer: decision loop orchestration, host ports (Thinker/Effector/Closer), hooks, events
+- File layout by concern: `state.go` (loop states, round cap, LoopConfig), `loop.go` (LoopContext, Cycle/Resume, round loop, Think), `feedback.go` (actBatch — one round's Act path), `gate.go` (membrane ruling, audit, denial), `pause.go` (pause gate + the shared suspension snapshot), `retry.go` (Think/Act retry, truncation), `parallel.go` (opt-in batch path), `hooks.go` (hook adapters + error terminal), plus `port.go`, `event.go`, `signal.go`, `wire.go`
+- `size_test.go` enforces the complexity budget mechanically (file ≤400 lines, function body ≤50, ≤4 params) over the whole module; the exemption list is closed and each entry carries its reason
 - Guard ports: Sandbox (execution boundary), ContextBudget (context size limit)
 - Depends on nothing above cell/synapse/root (memory is standalone, not referenced)
 

@@ -1,146 +1,143 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// parallel.go — ParallelActs batch execution path (v1.3.3, opt-in): one
-// round's multiple tool calls run concurrently in three phases — serial
-// gating, parallel Act, serial feedback. Events and hooks stay serial in
-// call order throughout; only actWithRetry enters the concurrent phase.
+// parallel.go — the opt-in batch path (LoopConfig.ParallelActs): one round's
+// tool calls run concurrently in three phases — serial gating, parallel Act,
+// serial feedback. Events and hooks stay serial in call order throughout;
+// only the execution phase is concurrent.
 package nerve
 
 import (
-	"context"
 	"fmt"
-	"strings"
 	"sync"
 )
 
-// runToolCallsParallel executes one round's tool call batch in three phases:
-//
-//  1. Serial gating — announce every call (EventToolCall in call order),
-//     one pause gap point for the whole batch, then per-call gateTool
-//     (sandbox membrane audit + BeforeAct, shared with the serial path).
-//     A denied call gets its [sandbox-denied: reason] feedback in place and is
-//     skipped — it never affects its siblings.
-//  2. Parallel execution — one goroutine per admitted call runs
-//     actWithRetry (timeout/retry included); results land by call index.
-//     Hooks, events, and loop state never enter this phase (the goroutines
-//     read lc's config/ports read-only).
-//  3. Serial feedback — AfterAct + ToolResult + EventToolResult in call
-//     order regardless of completion order.
-//
-// Suspension semantics mirror the serial path with two batch-specific
-// differences: a WaitInput result suspends with remaining empty (the batch
-// has fully executed — replaying any call would duplicate side effects) and
-// every sibling's feedback is appended before the snapshot, so Resume sees
-// the complete picture. A pause at the batch gap point snapshots the whole
-// batch unexecuted, so Resume replays it. ok=false ends the iterator (an
-// error was emitted or the consumer stopped).
-func runToolCallsParallel(ctx context.Context, lc *LoopContext, calls []ToolCall, round int, out *strings.Builder, yield func(Event) bool) (waiting *WaitInput, ok bool) {
+// batchEntry keeps both identities of an admitted call: the call as announced
+// (feedback and snapshot identity, identical to the serial path) and the gated
+// Action (execution payload, carrying BeforeAct mutations).
+type batchEntry struct {
+	call ToolCall
+	act  Action
+}
+
+// batchOutcome is one goroutine's result, indexed by call position so the
+// feedback phase stays in call order regardless of completion order.
+type batchOutcome struct {
+	eff *Effect
+	err error
+}
+
+// runParallel executes b.calls in the three phases described above. Suspension
+// mirrors the serial path with two batch-specific differences documented on
+// feedbackPhase.
+func (b *actBatch) runParallel() (waiting *WaitInput, ok bool) {
 	// Announce every call first (event order = call order).
-	for i := range calls {
-		if !yield(Event{Kind: EventToolCall, ToolCall: &calls[i]}) {
+	for i := range b.calls {
+		if !b.yield(Event{Kind: EventToolCall, ToolCall: &b.calls[i]}) {
 			return nil, false
 		}
 	}
 
 	// One pause gap point before the batch: a paused run snapshots the whole
-	// batch (nothing has executed yet) so Resume replays it — isomorphic with
-	// the serial path pausing at the first call.
-	if !waitIfPaused(ctx, lc, round, out, calls, yield) {
+	// batch unexecuted, so Resume replays it.
+	if !b.pause(b.calls) {
 		return nil, false
 	}
 
-	// Phase 1: serial gating — the shared membrane gate per call (sandbox
-	// audit + ruling). Each admitted entry keeps both identities: the
-	// original call (feedback/snapshot identity, same as the serial path)
-	// and the gated Action (execution payload; BeforeAct mutations apply at
-	// execution time). A denied call gets its [sandbox-denied: reason] feedback in
-	// place and is skipped — it never affects its siblings. The FIRST Ask
-	// ruling stops everything: no further gating, no phase 2. Already-
-	// admitted-but-unexecuted siblings and the not-yet-gated tail are all
-	// still pending — they ride the snapshot so Resume replays them after
-	// resolution (finalized denials stay out).
-	type batchEntry struct {
-		call ToolCall // announced/original call — feedback identity
-		act  Action   // gated action — execution payload
+	batch, w, stop := b.gatePhase()
+	if stop {
+		return nil, false
 	}
-	batch := make([]batchEntry, 0, len(calls))
-	denied := make([]bool, len(calls))
-	for i, tc := range calls {
-		g := gateTool(ctx, lc, tc, yield)
+	if w != nil {
+		return w, true
+	}
+	return b.feedbackPhase(batch, b.execPhase(batch))
+}
+
+// gatePhase runs the shared membrane gate per call. A denied call gets its
+// [sandbox-denied: reason] feedback in place and is skipped — it never affects
+// its siblings. The FIRST Ask stops everything: no further gating and no
+// execution phase, so already-admitted siblings and the not-yet-gated tail all
+// ride the snapshot (finalized denials stay out, their feedback already
+// landed). suspended is non-nil when the batch suspends on an ask; stop means
+// the iterator must end (an error was emitted or the consumer stopped).
+func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop bool) {
+	batch = make([]batchEntry, 0, len(b.calls))
+	denied := make([]bool, len(b.calls))
+	for i, tc := range b.calls {
+		g := b.gate(tc)
 		if !g.ok {
-			return nil, false
+			return nil, nil, true
 		}
 		switch g.ruling {
 		case VerdictAsk:
-			tail := make([]ToolCall, 0, len(calls)-1)
-			for j, other := range calls {
+			tail := make([]ToolCall, 0, len(b.calls)-1)
+			for j, other := range b.calls {
 				if j != i && !denied[j] {
 					tail = append(tail, other)
 				}
 			}
-			w, yOk := emitWait(lc, round, out, tc, tail, g.question, true, yield)
-			if !yOk {
-				return nil, false
-			}
-			return w, true
+			w, yOk := b.suspend(tc, tail, g.question, true)
+			return nil, w, !yOk
 		case VerdictDeny:
-			if !appendDenied(ctx, lc, tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason), yield) {
-				return nil, false
+			if !b.deny(tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason)) {
+				return nil, nil, true
 			}
 			denied[i] = true
 		default:
 			// BeforeAct fires here (serial, outside the concurrent phase) so
-			// its mutations are part of what phase 2 executes.
-			if err := hookBeforeAct(ctx, lc, &g.act); err != nil {
-				emitError(ctx, lc, yield, err)
-				return nil, false
+			// its mutations are part of what the execution phase runs.
+			if err := hookBeforeAct(b.ctx, b.lc, &g.act); err != nil {
+				emitError(b.ctx, b.lc, b.yield, err)
+				return nil, nil, true
 			}
 			batch = append(batch, batchEntry{call: tc, act: g.act})
 		}
 	}
+	return batch, nil, false
+}
 
-	// Phase 2: parallel execution — only actWithRetry runs concurrently;
-	// results land by call index so phase 3 stays deterministic. A ctx
-	// cancellation aborts each goroutine naturally; the error flows through
-	// feedback like any other tool failure.
-	type outcome struct {
-		eff *Effect
-		err error
-	}
-	results := make([]outcome, len(batch))
+// execPhase runs one goroutine per admitted call. A ctx cancellation aborts
+// each goroutine naturally and the error flows through feedback like any other
+// tool failure. Hooks, events and loop state never enter here: the goroutines
+// read the batch's config and ports read-only.
+func (b *actBatch) execPhase(batch []batchEntry) []batchOutcome {
+	results := make([]batchOutcome, len(batch))
 	var wg sync.WaitGroup
 	for i, e := range batch {
 		wg.Go(func() {
-			eff, err := actWithRetry(ctx, lc, e.act)
-			results[i] = outcome{eff: eff, err: err}
+			eff, err := actWithRetry(b.ctx, b.lc, e.act)
+			results[i] = batchOutcome{eff: eff, err: err}
 		})
 	}
 	wg.Wait()
+	return results
+}
 
-	// Phase 3: serial feedback in call order (completion order is discarded).
-	// WaitInput wins over err (explicit intent, serial-path parity): the
-	// first such result in call order suspends the loop. The suspending call
-	// itself gets no AfterAct/EventToolResult — its result arrives via
-	// Resume — but every sibling (before AND after it) is fed back first,
-	// because phase 2 already ran the whole batch.
+// feedbackPhase finalizes executed calls in call order, discarding completion
+// order. A WaitInput wins over err (serial-path parity) and the first such
+// result suspends the loop: the suspending call gets no AfterAct/EventToolResult
+// because its result arrives via Resume, while every sibling — before AND after
+// it — is fed back first, since the execution phase already ran the whole
+// batch. That is also why the snapshot carries no remaining calls: replaying a
+// completed batch would duplicate side effects.
+func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*WaitInput, bool) {
 	suspendAt := -1
 	for j := range batch {
 		if suspendAt < 0 && results[j].eff != nil && results[j].eff.WaitInput != "" {
 			suspendAt = j
 			continue
 		}
-		if !toolFeedback(ctx, lc, batch[j].call, results[j].eff, results[j].err, yield) {
+		if !b.feedback(batch[j].call, results[j].eff, results[j].err) {
 			return nil, false
 		}
 	}
-	if suspendAt >= 0 {
-		// remaining is nil: the batch fully executed, Resume must not replay.
-		w, yOk := emitWait(lc, round, out, batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, false, yield)
-		if !yOk {
-			return nil, false
-		}
-		return w, true
+	if suspendAt < 0 {
+		return nil, true
 	}
-	return nil, true
+	w, yOk := b.suspend(batch[suspendAt].call, nil, results[suspendAt].eff.WaitInput, false)
+	if !yOk {
+		return nil, false
+	}
+	return w, true
 }

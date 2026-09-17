@@ -43,6 +43,23 @@ type Prompt struct {
 	ToolResults []ToolResult
 }
 
+// buildPrompt assembles this round's data package from the loop context. The
+// Thinker reads it as a snapshot; only the framework writes it.
+func (lc *LoopContext) buildPrompt() *Prompt {
+	return &Prompt{
+		System:      lc.System,
+		Identity:    lc.Identity,
+		Methods:     lc.Methods,
+		Tools:       lc.Tools,
+		Context:     lc.Context,
+		Bounds:      lc.Bounds,
+		Input:       lc.Input,
+		Plan:        lc.Plan,
+		Reflection:  lc.Reflection,
+		ToolResults: lc.ToolResults,
+	}
+}
+
 // ToolSpec is a tool specification (host defined, framework passthrough).
 type ToolSpec struct {
 	Name   string // Tool name
@@ -230,20 +247,6 @@ func (s Session) valid() bool { return s.round >= 1 }
 // inspect; the Session itself stays opaque.
 func (s Session) RemainingCalls() []ToolCall {
 	return slices.Clone(s.remaining)
-}
-
-// snapshot returns a deep-enough copy of the session for later resumption.
-func (s Session) snapshot(round int, input, plan string, context []string, output string, pending ToolCall, remaining []ToolCall, toolResults []ToolResult) Session {
-	return Session{
-		round:       round,
-		input:       input,
-		plan:        plan,
-		context:     slices.Clone(context),
-		output:      output,
-		pending:     pending,
-		remaining:   slices.Clone(remaining),
-		toolResults: slices.Clone(toolResults),
-	}
 }
 
 // Thinker is the LLM host port (the brain).

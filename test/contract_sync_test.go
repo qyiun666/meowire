@@ -21,7 +21,7 @@ import (
 
 const (
 	eventGoPath  = "../internal/nerve/event.go"
-	loopGoPath   = "../internal/nerve/loop.go"
+	stateGoPath  = "../internal/nerve/state.go"
 	typesGoPath  = "../api/types.go"
 	nerveAgentMD = "../internal/nerve/agent.md"
 	hostMD       = "../host-integration.md"
@@ -66,7 +66,7 @@ func eventKindsFromSource(t *testing.T) []string {
 
 // loopStatesFromSource extracts the LoopState constants from the iota block.
 func loopStatesFromSource(t *testing.T) []string {
-	return iotaConstNames(t, readContractFile(t, loopGoPath), "LoopState = iota")
+	return iotaConstNames(t, readContractFile(t, stateGoPath), "LoopState = iota")
 }
 
 // assertSameSet fails unless got and want hold the same names (order-insensitive).
