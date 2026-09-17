@@ -99,8 +99,8 @@ you can rely on.
   once. `Session.RemainingCalls()` exposes the pending calls of a
   suspension (empty when nothing is left to replay)
 - **The stream is journalable** — `EncodeEvent`/`DecodeEvent` write one versioned JSON
-  record per event, carry enums by name, restore framework errors by identity, and name anything
-  that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
+  record per event, carry enums by name, restore framework errors by identity, refuse an enum its
+  own name table cannot spell, and name anything that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
   that produced it, so one log can hold a whole colony
 - **Tri-state rulings on both sides & reflection primitives** — `Sandbox.Allow` (before a tool
   runs) and `Sandbox.Emit` (before a round's text is heard) each return a

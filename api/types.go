@@ -86,7 +86,8 @@ type (
 // EncodeEvent serializes one event; DecodeEvent restores it. A value the wire
 // cannot carry (an error the framework does not own) comes back as an equal
 // text and the event names the loss in its Dropped field — nothing is dropped
-// without saying so.
+// without saying so. The encode side refuses what the decode side could never
+// read back: an event kind, loop state or membrane ruling outside its name table.
 func EncodeEvent(e Event) ([]byte, error) { return nerve.EncodeEvent(e) }
 
 // DecodeEvent rejects malformed JSON, a foreign wire version, an unknown kind,

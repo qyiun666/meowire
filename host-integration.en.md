@@ -861,7 +861,7 @@ hooksFor := func(id string) *meowire.Hooks {
 				hub.updateTask(id, taskView{State: "failed"})
 			}
 		},
-	}
+	})
 }
 ```
 
