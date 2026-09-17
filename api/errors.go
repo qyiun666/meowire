@@ -8,7 +8,6 @@ import (
 	"errors"
 
 	"github.com/qyiun666/meowire/internal/nerve"
-	"github.com/qyiun666/meowire/internal/synapse"
 )
 
 // ErrCellClosed is returned when Stimulate is called on a closed agent.
@@ -22,11 +21,3 @@ var ErrMaxRounds = nerve.ErrMaxRounds
 // stale/misrouted" from "the organ failed" is to match the value — the loop
 // wraps it into EventError, and the event wire restores it by identity.
 var ErrForeignSession = nerve.ErrForeignSession
-
-// Synapse errors (defined in synapse, re-exported for facade users).
-var (
-	ErrNoTarget    = synapse.ErrNoTarget
-	ErrNotLinked   = synapse.ErrNotLinked
-	ErrTargetBusy  = synapse.ErrTargetBusy
-	ErrWeakSynapse = synapse.ErrWeakSynapse
-)

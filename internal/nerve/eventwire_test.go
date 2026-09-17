@@ -18,10 +18,10 @@ import (
 // assertion runs over, so a new kind is only covered once it appears here too.
 func wireEvents() []Event {
 	call := &ToolCall{ID: "t1", Name: "search", Args: `{"q":"x"}`}
-	eff := &Effect{Result: "42 hits", Err: "denied", WaitInput: "confirm?", Send: &Signal{ID: "c1/1", To: "peer", Kind: KindResponse, Status: TaskCompleted, Payload: []byte("p")}}
+	eff := &Effect{Result: "42 hits", Err: "denied", WaitInput: "confirm?"}
 	sess := Session{cell: "c1", round: 2, input: "go", plan: "p", context: []string{"a"}, output: "o",
 		pending: *call, remaining: []ToolCall{{ID: "t2"}}, toolResults: []ToolResult{{ID: "t1", Result: "r"}},
-		requests: []Signal{{ID: "c1/0", Kind: KindStimulus}}, kind: waitUtterance, utterance: "draft"}
+		kind: waitUtterance, utterance: "draft"}
 	return []Event{
 		{Kind: EventText, CellID: "c1", Text: "thinking"},
 		{Kind: EventToolCall, CellID: "c1", ToolCall: call},

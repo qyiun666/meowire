@@ -15,7 +15,7 @@ you can rely on.
   backend — it injects seven host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~5.4k lines of Go. The decision loop reads as one concern
+- **Small and readable.** ~4k lines of Go (production code; tests are another ~8.5k). The decision loop reads as one concern
   per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
@@ -34,38 +34,14 @@ you can rely on.
   "who/what/why was permitted" audit, per the Authority security model
 - **Wiring graph inspection** — `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` treat the
   assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
-- **Dynamic wiring (synaptic plasticity)** — `Agent.Replace(slot, port)` swaps
+- **Dynamic wiring (swap an organ at runtime)** — `Agent.Replace(slot, port)` swaps
   `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate`,
   an in-flight `Stimulate` keeps the ports it started with; every successful swap is
   audited as `EventReplace` at the start of the next Stimulate/Resume
 - **Runtime config updates** — `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` tune
   `MaxRounds` and the other scalar limits hot, without rebuilding the agent
-- **Agent Card (A2A-ready)** — `AgentCard(Organs)` renders the assembly as a machine-readable
-  capability card (JSON); publish it at `/.well-known/agent-card.json` for agent discovery
-- **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
-  (submitted/working/needs-input/completed/failed/cancelled) for end-to-end inter-agent tracking
-- **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Fire/Edges)
-  with reference learning rules `Hebbian`/`STDP`/`STDPFrom`/`Prune` (host-side; framework stores state,
-  never decides when to learn); each edge also carries when it last conducted, so `STDPFrom` pairs
-  spikes from graph state alone, and a host-injected `Floor` makes a connection able to exist yet
-  refuse traffic (`ErrWeakSynapse`); persistence round-trip via `Edges` export + `NewDirect` restore
-- **Colony wiring with zero host plumbing** — `Resolve(agents...)` maps every agent ID to the inbox
-  its cell already owns (capacity `InboxCapacity`), so a synapse built over it delivers to the right
-  neuron with no host channel map; each cell drains its inbox into `Prompt.Stimuli` at the Think
-  gap, and a `KindNotice` naming a tool withdraws that tool for the round (`Prompt.Inhibit`) —
-  no consumer pump, and an in-flight Act is never preempted. The card projection doubles as a
-  routing index: `NewSkillIndex(agents...)` answers "who can do X" and `FanOut` delivers to each
-  of them, reporting per target
-- **Agent-to-agent tasks are primitives, not host code** — a tool delegates by returning
-  `Effect{Send: &Signal{To: …}}`: the cell mints the id, stamps `submitted`, suspends the call, and
-  the serving cell answers at its own terminal with the state `TaskOutcome` derives (six states, one
-  writer each). The answer is paired back into `agent.Resumptions()` — the framework never resumes
-  on its own; the host continues with `Resume` and retires the pairing with `Ack`
-- **Unified composite view** — `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` merge the
-  static assembly subgraph with the live synapse graph into one picture (view unified, data separate)
-- **Seven host-injected ports, all organs required** (no stubs, no optional
-  port wiring — the one opt-in is `Organs.Colony`, the delivery organ of a
-  multi-agent wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
+- **Seven host-injected ports, all required** (no stubs, no optional organ — the kernel
+  does not know a neighbour exists; anything between instances belongs to the host): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (token
   regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens),
@@ -101,7 +77,7 @@ you can rely on.
 - **The stream is journalable** — `EncodeEvent`/`DecodeEvent` write one versioned JSON
   record per event, carry enums by name, restore framework errors by identity, refuse an enum its
   own name table cannot spell, and name anything that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
-  that produced it, so one log can hold a whole colony
+  that produced it, so one log can hold events from several agents
 - **Tri-state rulings on both sides & reflection primitives** — `Sandbox.Allow` (before a tool
   runs) and `Sandbox.Emit` (before a round's text is heard) each return a
   `Verdict`: Deny (zero value, fail-closed), Allow, or Ask — a value outside those three named
@@ -112,11 +88,11 @@ you can rely on.
   Error/Aborted); `BeforeStimulate` may write a turn-scoped self-review note onto
   `Prompt.Reflection`, carried onto every Thinker prompt of the cycle
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
-- **Flat multi-agent model** — sub-agents stay host tools (`spawn_agent`), while
-  inter-agent delegation is a framework primitive (`Effect.Send` + `Resumptions`); never
+- **Flat multi-agent model** — one `Agent` is one kernel, and a host that wants several
+  builds several instances; sub-agents stay host tools (`spawn_agent`), never
   framework-level nesting
-- **Resistance is feedback, not failure** — denied tools, tool errors, and busy targets flow back
-  into the loop as `EventToolResult` feedback; the loop continues
+- **Resistance is feedback, not failure** — denied tools and tool errors flow back into the
+  loop as `EventToolResult` feedback; the loop continues
 
 ## Upgrading to v1.2.0
 
@@ -146,8 +122,7 @@ you can rely on.
 meowire (module root)
   └── api/            facade + composition root — the sole public surface
       ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
-      ├── internal/nerve    decision loop, ports (incl. memory), hooks, events, guards
-      └── internal/synapse  inter-agent connection & delivery contract (host reference)
+      └── internal/nerve    decision loop, ports (incl. memory), hooks, events, guards
 ```
 
 | Concept | Where | Role |
@@ -161,7 +136,6 @@ meowire (module root)
 | `ContextBudget` | guard | Trims the text `Context` and the structured `ToolResults` before each Think, same limit |
 | `Memory` | port | Recalls this round's records into `Prompt.Memories`; takes the finished cycle's facts back |
 | `Event` | events | Typed observation mirror of the loop |
-| `Synapse` / `Memory` | internal | Standalone reference contracts for hosts |
 
 ## Installation
 
@@ -332,15 +306,16 @@ it is deleted stays yours (MemHop). The text track is unchanged: `Organs.Context
 
 ## Multi-agent
 
-Meowire is a **flat model**: one `Agent` = one kernel. The host owns all instances.
+Meowire is a **flat model**: one `Agent` = one kernel, and **everything between two
+agents stays with the host**.
 
-- Sub-agents: a `spawn_agent` host tool that returns results as `EventToolResult` feedback
-- Inter-agent tasks: a tool returns `Effect{Send: &Signal{To: …}}` and the framework delivers,
-  answers at the serving cell's terminal and pairs the reply into `agent.Resumptions()`;
-  resistance (busy target, unknown agent) becomes feedback, never a hard stop
-  (`Resolve(agents...)` builds the routing table; `internal/synapse` is the reference graph)
-- Capability discovery: `AgentCard` renders the A2A-style card; `Signal.Status` (A2A six-state
-  task lifecycle) tracks each inter-agent task end to end
+- Sub-agents: a `spawn_agent` host tool `New`s an instance, consumes its `Stimulate` stream and
+  returns the result as `EventToolResult` feedback — the kernel never learns a second instance exists
+- The kernel ships no inter-agent addressing, delivery, reply pairing, capability discovery or
+  synaptic graph: `Organs` has no slot addressed to a neighbour and `Prompt` has no inbound track
+  (`test/wiring_free_test.go` guards that boundary mechanically)
+- To connect agents, do it in the host: feed A's output into B's `Stimulate`, or register B as a
+  tool of A
 
 ## Development
 

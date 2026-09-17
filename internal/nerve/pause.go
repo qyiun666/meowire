@@ -67,19 +67,9 @@ func (b *actBatch) snapshot(s suspension) *WaitInput {
 		pending:     s.pending,
 		remaining:   slices.Clone(s.remaining),
 		toolResults: slices.Clone(lc.ToolResults),
-		requests:    slices.Clone(lc.Requests),
 		cell:        lc.CellID,
 		kind:        s.kind,
 		utterance:   s.utterance,
-	}
-	// A wait that exists because this cell asked a peer something is paired
-	// here: the cell keeps the handle against the request id, so the answer can
-	// find the round it belongs to after this iterator has ended.
-	if lc.awaiting != "" {
-		if lc.Await != nil {
-			lc.Await(lc.awaiting, s.pending, sess)
-		}
-		lc.awaiting = ""
 	}
 	return &WaitInput{CellID: lc.CellID, Call: s.pending, Question: s.question, Session: sess}
 }

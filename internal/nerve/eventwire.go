@@ -15,8 +15,8 @@
 //
 // Enums travel by name (event kind, loop state, membrane ruling), so a reordered
 // iota cannot silently reinterpret a stored stream. Numbers inside payload
-// structs (`Signal.Kind`) keep their existing shape — that shape is the
-// Session's, not the event's, and changing it is a Session version decision.
+// structs keep their existing shape — that shape is the Session's, not the
+// event's, and changing it is a Session version decision.
 package nerve
 
 import (

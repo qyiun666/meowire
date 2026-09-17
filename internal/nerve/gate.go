@@ -40,8 +40,7 @@ func (b *actBatch) gate(tc ToolCall) gateResult {
 }
 
 // refuse records a final refusal: the text joins the Context track (a refusal
-// is not a tool result) and is yielded as structured feedback in place. It
-// serves both refusals — a membrane denial and a notice inhibition. Returns
+// is not a tool result) and is yielded as structured feedback in place. Returns
 // false when the consumer stopped.
 func (b *actBatch) refuse(tc ToolCall, fb string) bool {
 	b.lc.Context = append(b.lc.Context, fb)

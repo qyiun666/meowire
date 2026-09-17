@@ -7,10 +7,10 @@
 
 ## 0. 心智模型（先读，30 秒）
 
-- **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间通信（channel/HTTP/Redis 任选，synapse 是参考实现）。
+- **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间的一切通信（channel/HTTP/Redis 任选，框架不持有路由表）。
 - 框架只给循环（Think → Act → yield 事件流）；**LLM、工具、权限、记忆全是宿主实现**——七端口全部必填，没有默认实现。
 - 宿主只需要掌握三个方法：`New`（装配）、`Stimulate`（跑一轮）、`Close`（关闭）。
-- **唯一需要持久化的自主变化值**：synapse 突触图的 `Weight`（学习规则改写）、`Fired`（投递计数）与 `Spiked`（最近投递时刻）——导出用 `Edges`，恢复用 `NewDirect(DirectConfig{Initial: ...})`，全程宿主在组合根手动做（§8.3）。
+- **框架侧没有任何需要宿主持久化的自主变化值**：需要落盘的全是宿主自己的东西——历史/计划（`Organs.Context`）、记忆端口后面的库、以及 §8.3 的事件 WAL。
 - 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§9）。
 
 ## 1. 步骤总览（8 步）
@@ -24,7 +24,7 @@
 | 5 | 实现 Sandbox（权限门）+ ContextBudget（两轨调节器） | `guards.go` |
 | 6 | 实现 Memory 端口（Recall/Remember）+ Hooks | `memory.go` |
 | 7 | 组装 Blueprint，New + 事件循环 | `main.go` |
-| 8 | 扩展多 agent + synapse 持久化 + 事件日志（状态外化） | `multi.go` |
+| 8 | 扩展多 agent（宿主组合多实例）+ 事件日志（状态外化） | `multi.go` |
 
 每步代码都可独立编译。最终完整代码约 500 行。
 
@@ -230,8 +230,6 @@ func (t *thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decisi
 | `Context` | 多条 `system`/`user` | 记忆基底 + 框架追加的 sandbox 裁决（工具结果不在文本轨） |
 | `ToolResults` | 追加进 `user` | 结构化工具结果（`[tool_call_id=xxx]` 标记条目，见下）——框架唯一反馈轨道，必须渲染 |
 | `Memories` | 追加进 `system` 或前置 `user` | 本轮召回结果（宿主决定编排位置；每轮整体替换，不累积） |
-| `Stimuli` | 追加进 `user` | 收件箱里的邻居来信（`[]Signal`，按 `Kind` 分类渲染；宿主不渲染就等于没收到） |
-| `Inhibit` | 追加进 `system` + 从 `tools` 剔除 | 本轮被 notice 撤回的工具名：既要说"不可用"，也不要再把它交给模型 |
 | `Reflection` | 追加进 `system` | 宿主在 `BeforeStimulate` 写的本轮复盘笔记（空 = 无） |
 | `Input` | `user` 消息 | 本次刺激 |
 | `Plan` | 追加进 `user` | 任务计划 |
@@ -339,7 +337,7 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 | `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归宿主 |
 | `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试；最终错误同样写入 `ToolResults.Err` |
 
-多 agent 工具里 `spawn_agent` 在这里实现；委托邻居不必自己持有 synapse——返回 `Effect{Send: ...}` 交给框架投递与配对，见 Step 8。
+`spawn_agent` 这类工具在这里实现：工具自己 `New` 一个 `Agent`、消费它的 `Stimulate`、把最终输出作为普通 `Effect.Result` 交回主循环，见 Step 8。
 
 ---
 
@@ -606,7 +604,7 @@ func toolRegistry() map[string]toolFn {
 
 ---
 
-## Step 8：多 agent + 持久化
+## Step 8：多 agent（宿主组合多实例）+ 事件日志
 
 ### 8.1 多 agent = 多次 New（复用同一 Blueprint）
 
@@ -627,125 +625,45 @@ func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
 
 子 agent 的创建位置：**宿主 Effector 工具内**（`spawn_agent`），对主循环完全透明（扁平模型，无框架级嵌套）。
 
-### 8.2 agent 间委托：工具只说「问谁」，投递/答复/配对归框架
+### 8.2 agent 间协作：宿主自己接，两种形状
 
-装配顺序要先建图、再装 agent、最后回填路由表（colony 本身是环形的）：
+内核不知道有第二个实例，所以「A 问 B」就是宿主写的一段普通代码。两种形状够用：
 
-```go
-// multi.go
-package main
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-
-	meowire "github.com/qyiun666/meowire/api"
-)
-
-func buildColony(bpMain, bpHelper meowire.Blueprint) (*meowire.Agent, *meowire.Agent, error) {
-	syn := meowire.NewDirect(meowire.DirectConfig{}) // 参考实现，resolver 先空着
-	bpMain.Organs.Colony, bpHelper.Organs.Colony = syn, syn
-	main, err := meowire.New(bpMain)
-	if err != nil {
-		return nil, nil, fmt.Errorf("main agent: %w", err)
-	}
-	helper, err := meowire.New(bpHelper)
-	if err != nil {
-		main.Close()
-		return nil, nil, fmt.Errorf("helper agent: %w", err)
-	}
-	r, err := meowire.Resolve(main, helper)       // ID → 各自收件箱（重复 ID 即拒）
-	if err != nil {
-		return nil, nil, err
-	}
-	syn.SetResolver(r)                            // 回填，环闭合
-	for _, e := range [][2]string{{"main", "helper"}, {"helper", "main"}} {
-		if err := syn.Link(context.Background(), e[0], e[1], 1); err != nil { // 方向要各自连
-			return nil, nil, err
-		}
-	}
-	return main, helper, nil
-}
-```
-
-**委托工具**（主 agent 侧）——只填 `To`/`Payload`，`ID`/`From`/`Kind`/`Status` 归框架：
+**① 把 B 做成 A 的一个工具**（A 同步等 B 的结果，最常见）：
 
 ```go
-// delegate 工具：把问题交给邻居，本轮挂起等回信
-func delegateTool() toolFn {
+// ask_helper 工具：主 agent 的一次工具调用 = 起一个 helper 跑一轮
+func askHelperTool(bpHelper meowire.Blueprint) toolFn {
 	return func(ctx context.Context, args string) (*meowire.Effect, error) {
-		var p struct {
-			To   string `json:"to"`
-			Text string `json:"text"`
+		helper, err := meowire.New(bpHelper)
+		if err != nil {
+			return &meowire.Effect{Err: "helper assembly: " + err.Error()}, nil
 		}
-		if err := json.Unmarshal([]byte(args), &p); err != nil {
-			return &meowire.Effect{Err: "bad args"}, nil
+		defer helper.Close()
+		var out string
+		for ev := range helper.Stimulate(ctx, args) {
+			switch ev.Kind {
+			case meowire.EventError:
+				return &meowire.Effect{Err: "helper: " + ev.Err.Error()}, nil
+			case meowire.EventDone:
+				out = ev.Output
+			}
 		}
-		// 框架铸 ID/From/Kind=submitted → 经 Colony 投递 → 挂起该调用（同 WaitInput 路径）
-		return &meowire.Effect{Send: &meowire.Signal{To: p.To, Payload: []byte(p.Text)}}, nil
+		return &meowire.Effect{Result: out}, nil // 结果走正常反馈轨
 	}
 }
 ```
 
-投不出去（没接 Colony、目标忙、未知 agent、边没连）**不挂起**，错误按普通工具反馈回流——阻力是反馈不是硬停。
+要「问哪个专家」由模型的参数决定，宿主分发器查自己那张 `名字 → Blueprint` 的表——
+这张表就是路由，框架不持有它。**B 挂起了怎么办**：B 的 `EventWaitInput` 出现在 A 的工具里，
+A 的主循环看不见那个 `Session`，所以要么在这里由宿主当场回答（自动化），要么把 B 的
+`Session` 存进宿主任务表、改判为「本次工具结果 = 等待人工」。别让一个 agent 替另一个
+agent 决定何时继续——这条判断从头到尾都是宿主的。
 
-**被委托方不需要任何代码来"回话"**：它的 `Stimulate` 在自己的终点自动向请求方发一条 `KindResponse`（载荷 = 本次调用的最终输出，状态 = `TaskOutcome`：completed / needs-input / failed / cancelled）。入站侧同样零宿主代码：框架在该 agent 的下一个 Think 间隙点排空收件箱写入 `Prompt.Stimuli`（`KindNotice` 若带工具名则本轮撤下该工具，进 `Prompt.Inhibit`）。
-
-**宿主只剩一件事：决定何时继续。**
-
-```go
-// 宿主侧回合循环里的续跑分支——框架绝不自行 Resume
-for _, r := range main.Resumptions() {
-	for ev := range main.Resume(ctx, r.Session, string(r.Response)) {
-		relay(ev) // 正常消费事件流
-	}
-	main.Ack(r.SignalID) // 销账；之后同一请求的回信按普通入站信号呈现
-}
-```
-
-一个任务可以先报 `needs-input` 再报 `completed`，两条回信配在同一次委托上；`Resumptions()` 是快照，读到 `Ack` 之前一直在。
-
-### 8.3 synapse 持久化：宿主存储，New 时带回来（自主变化值）
-
-`Weight`/`Fired`/`Spiked` 是仅有的自主变化数值。**框架只提供原语，存储由宿主做**——推荐 JSON 文件，生产换 DB/Redis 同理：
-
-```go
-// 保存（Agent.Close 时或周期性调用）
-func saveSynapse(ctx context.Context, colony meowire.Synapse, path string) error {
-	snap, err := colony.Edges(ctx, "") // 全图深拷贝快照
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(snap)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
-}
-
-// 恢复（New 之前，组合根里）
-func loadSynapse(ctx context.Context, resolver meowire.Resolver, path string) (meowire.Synapse, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}), nil // 首次启动：空图
-	}
-	var restored []meowire.Edge
-	if err := json.Unmarshal(data, &restored); err != nil {
-		return nil, err
-	}
-	// 注入初始边 = 上次的 Weight/Fired/Spiked 全部带回
-	return meowire.NewDirect(meowire.DirectConfig{Resolver: resolver, Initial: restored}), nil
-}
-```
-
-**要点：**
-- `Edges(ctx, "")` 返回深拷贝，导出后可安全序列化；恢复时 `DirectConfig{Initial: ...}` 会 clamp 负权重、去重覆盖——**幂等**
-- 时刻 `Spiked` 随快照一起回来，所以 `STDPFrom` 在重启后仍能凭图配对时间，不需要宿主补时钟
-- 恢复发生在 `New` 之前、组合根内——**不需要 `Agent.New` 感知 synapse**，它俩本来就不该耦合
-- 保存时机宿主自定：`Close` 时、每轮 `OnCycleEnd`、或定期 ticker（重负载场景防丢失）
-
-### 8.4 事件日志（状态外化：WAL）
+**② 把 A 的输出喂进 B 的 `Stimulate`**（流水线，A 不等 B）：A 的 `EventDone` 落进宿主
+队列，宿主用队列内容起 B。跨进程就把 `EncodeEvent` 的 JSON 行当传输单元（每条自带
+`CellID` 与版本闸门）。
+### 8.3 事件日志（状态外化：WAL）
 
 `Stimulate` 的事件流就是执行轨迹。宿主把它 append-only 落盘，即得 WAL——崩溃后重放日志 → 重建上下文 → 重新 `Stimulate` 续跑：
 
@@ -797,15 +715,17 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 ### 持久化（状态外化）
 
-17. **synapse 是唯一有自主变化值的组件**（`Weight`/`Fired`/`Spiked`）——`Edges` 导出 / `NewDirect` 恢复，宿主在组合根做，`Agent.New` 不参与
-18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的变异；重负载场景用周期性快照 + WAL（§8.3/§8.4）
+17. **框架不持有任何需要持久化的状态**：`Agent` 的一次运行要么跑完要么挂在 `Session` 里，后者本来就该由宿主保存；要落盘的是宿主自己的历史、记忆库和事件 WAL
+18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的进度；重负载场景用每轮 `OnCycleEnd` 快照 + WAL（§8.3）
 19. **事件日志用 `meowire.EncodeEvent` 按 JSON 行 append** 即可作 WAL（别直接 `json.Marshal(ev)`：`Err` 字段会被写成 `{}`，枚举也变成数字）；恢复流程 = 逐行 `DecodeEvent` → 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`，还原不完整的事件其 `Dropped` 字段会点名
 
-### 多 agent（colony）
+### 多 agent（宿主组合）
 
-20. **收件箱归框架**（[host-integration.md §7.2](host-integration.md)）：每个 cell 自带 `InboxCapacity` 容量的收件箱，`meowire.Resolve(agents...)` 只是把 ID 映射到它；队列满时 `Fire` 返回 `ErrTargetBusy`，从不阻塞发送方。投递只是填队列——目标 cell 在下一个 Think 间隙点、或宿主读 `Resumptions()` 时才看到它
-21. **两处「框架不决策」**：信号到了不等于跑了（框架不代为 `Stimulate`），配好了不等于续跑了（框架不代为 `Resume`，见 §8.2）——什么时候让一个 cell 干活、什么时候让挂起的轮次继续，都是宿主的调度权
-22. **两个阈值别混，两种发送别混**：`DirectConfig{Floor}` 断流（边留着、`ErrWeakSynapse`、不计数），`Prune` 的 `weightFloor` 删边；`Effect.Send` 有回程（一个收件人、一次挂起），`SkillIndex.FanOut` 没有回程（一个能力可对应零到多个 cell，逐目标报告）
+20. **路由表在宿主手里**：谁能被谁问到、以什么形态（同步工具 / 队列 / HTTP），宿主一张表决定；
+    内核只给 `Organs.ID` 给事件署名，从不按名字找另一个实例
+21. **两个「框架不决策」**：一次工具调用起子 agent 后，子 agent 挂起了不由框架续（框架从不代
+    `Resume`）；子 agent 的终态也不由框架映射成任务状态——`OnCycleEnd` 的 `CycleOutcome` 是
+    唯一判词，怎么翻成宿主任务表里的状态归宿主
 
 ## 10. 相关文档
 

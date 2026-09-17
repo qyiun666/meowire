@@ -5,113 +5,10 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **`thinker-openai-go.md`** — 把 `Thinker` 接到一个真实 LLM SDK（`openai-go/v3`）的适配文档，
-  SDK 签名逐条对 module cache 源码核实：`Prompt` 13 个字段的完整落点表、
-  `assistant(tool_calls)` 与 `tool` 必须成对这条承重约束的宿主侧做法（内核只回声 `ID/Name/Result/Err`）、
-  两层重试不要相乘（SDK 默认 2 次 × 内核 `MaxRetries` 无退避重投）、`*openai.Error` 的断言形状、
-  流式累加与**出口膜在整轮文本之后才裁决**的时序后果
-- **`ErrForeignSession` 现在在 api 层可见**：集成文档一直承诺宿主用 `errors.Is` 分辨"句柄是别的 cell 的"与
-  "器官出错了"，而那个值只存在于 `internal/nerve`——宿主 import 不到，承诺无法兑现；
-  facade 级的身份判定由一条集成测试钉住
-
-### Fixed
-
-- **一轮只有一个挂起名额，谁占住谁说清楚**：并行批次里后到的等待请求（第二个 `Effect.Send`、
-  或兄弟调用自报的 `WaitInput`）不再作为"空结果成功"回流——它在被下发之前就被明确拒绝成
-  该调用的工具反馈，反馈文本点名占住名额的那个调用
-- **`WaitInput` 优先于 `Send` 落地**：一个 Effect 同时给出两者时，委托不再被投递，
-  宿主看到的提问仍是工具自己写的那句（此前投递会覆盖它）
-- **事件线不再猜**：`kind=state` 的记录缺状态名不再被读成 `StateIdle`，状态名出现在别的种类上
-  同样拒绝；`EncodeEvent` 拒绝名字表里查不到的裁决值，而不是写出一条永远读不回的记录
-- **未知裁决不再放行**：膜返回名字表之外的 `Verdict` 时，此前 `switch` 的默认分支等于允许执行
-  ——现在循环两侧与 `GuardStack` 三个入口统一收在一处按 `Deny` 处置，拒绝文本点名那个值
-- **写侧不再吐出名之外的枚举**：`EncodeEvent` 现在拒绝名字表里没有的事件种类与循环状态——
-  此前它们被写成 `"unknown"`，是一条 Decode 必然拒绝、却已经进了日志的记录
-- **框架判词与工具自己的失败并存**：委托不可投递的四条理由（没指名目标、没有 Colony 器官、
-  本轮已有一笔在等、投递本身失败）与并行批次里后到等待的拒绝，五处此前都直接覆盖 `Effect.Err`；
-  现在两条都在，框架的理由排在前面（结构化反馈按头部截断，排在后面的先被吃掉）
-- **集成文档的"完整骨架"不再缺端口**：§8 的 `Organs` 少了第七端口 `Mem`，照抄即
-  `required port Mem not injected`；同一份文档里 `hooksFor` 只给八个回调中的三个（缺任一即装配失败），
-  示例里引用的 `TaskStatus` 还是一个从未定义、且与框架同名类型撞名的宿主结构
-- **膜的 ask 终结记录写的是宿主批复本身**：三份文档都写"批准时 `Ruling=allow` 且 `Reason` 为空"，
-  实际 `Reason` 存的就是宿主回的那句——照文档写审计日志的宿主会丢掉"谁批的、批的什么"
-
-### Changed
-
-- **`Replace` 的启动时点**：槽位先接受端口，之后才 `Boot`——写错的槽名不再消耗器官唯一一次
-  启动；已关闭的 Agent 拒绝交换并返回 `ErrCellClosed`（此前静默返回"成功且无旧端口"）
-- **枚举一律按下标取值的名表**：事件种类、循环状态、膜的裁决、挂起成因四张表同一写法，
-  由一条守卫测试钉住覆盖；`Session.Marshal` 不再把一个不认识的挂起成因写成 `pause`
-- **四张名字表共用一次实现**：越界判断与按名反查从八份同形函数收进 `internal/nerve/names.go`
-  的两个泛型 helper，写法漂移（有的返回 `"unknown"`、有的返回 `""`）随之一并消失
-- 文档里残留的版本叙述标记（`(v1.3.x)`、"1.1.1 起"、"取代旧的阻塞式等待"）清除，
-  "三种挂起/四种挂起"两处口径统一为四种，README 的行数与 `Synapse` 方法清单按实测校正
-- **组合器不代管启动**：`GuardStack` / `Fallback*` 返回的端口值不声明 `Bootable`，
-  框架只对它拿到手的那个值做能力断言——必须先启动的成员在组合之前由宿主启动，
-  这条边界由一条守卫测试与 `compose.go` 的契约注释同时钉住
-- **往返守卫长牙**：夹具必须让 `Event` 的每个字段至少在一处非零（否则"两边都加了字段却忘了
-  搬运"能静默通过），且 `WireEvent` 可达的任何结构里不得出现裸 `error` 字段；账本还要认全
-  框架自己产出的 12 种事件——挂起、暂停、审计、轮数耗尽每一条真流都要编码-解码回来，
-  写侧新加的一道拒绝若挡住合法产出，当场就红
-- 已被报告过的丢失不再重复累加：`Dropped` 过一趟线还是那一串名字
-- `SkillIndex.FanOut` 的参数收窄为只需投递能力的 `Colony`（此前要求整张五方法图）
-- 集成文档与注释只保留当前事实：全仓剥离版本变更叙述与批次编号（历史归 CHANGELOG 与 notes/），
-  并修正 `ReplaceAudit` 字段名、`Replace` 槽位列表、两处指向不存在 API 的说明
-
-### Removed
-
-- `cell.IsClosed`：仓库内除测试外零调用点，测试同包直接读该字段
-
 ## [1.3.8] - 2026-09-17
 
 ### Added
 
-- **A colony needs no host plumbing** — every cell owns its inbound queue (`InboxCapacity` = 8
-  signals, created on first use, blueprint entry `G3 Inbox`), drained at the Think gap into the new
-  `Prompt.Stimuli` track (replaced wholesale per round, never accumulated, never snapshotted), where
-  the cell first routes out any reply that answers one of its own outstanding requests.
-  `Resolve(agents...)` builds the synapse routing table from the agent list itself —
-  each ID mapped to that cell's own inbox, duplicate IDs refused — so the host names its members
-  instead of writing a channel map and a consumer pump. `Agent.ID()` exposes the address `Fire`
-  routes to. A `KindNotice` whose payload is a single tool name withdraws that tool for the round
-  that drains it (`Prompt.Inhibit`): a matching call is refused before the membrane sees it, while
-  a call already in flight is never preempted.
-- **A cell can ask another cell and get an answer back** — `Effect` gains `Send *Signal`: a tool
-  hands the framework a request (`To`, optionally `Skill` and `Payload`) and the cell stamps what
-  only it owns (`ID` minted as `<cellID>/<n>`, `From`, `Kind`, the opening task state) before
-  delivering it through `Organs.Colony` — the one optional organ of the assembly, blueprint entry
-  `G2 Egress`, whose absence makes a send tool feedback rather than a suspension. A delivered send
-  waits through the existing tool-suspension path, so no second resume machinery and no new wire
-  kind; one delegation per round, and a second send in the same round is refused instead of quietly
-  dropped. The answer reaches the host as a pairing: `Agent.Resumptions()` lists each
-  `Correlation{SignalID, CellID, Call, Session, Status, Response}` waiting to be continued without
-  consuming it, and `Agent.Ack(signalID)` ends the delegation. **The framework never resumes on its
-  own** — matching a reply to the round that asked is wiring, deciding when that round may continue
-  is not.
-- **A connection can exist and still refuse to conduct** — `DirectConfig{Floor}` is a
-  host-injected conduction threshold: an edge weighing less returns `ErrWeakSynapse` before the
-  target is resolved, so a refused signal is neither delivered nor counted, while the edge stays in
-  the graph and can be Reinforced back over the line. Zero switches gating off — strength alone
-  never decides connectivity. It is deliberately not `Prune`'s `weightFloor`: this threshold stops
-  traffic, that one deletes the connection, and merging them would let a number with two different
-  consequences be tuned as one.
-- **The graph keeps its own moments** — every successful delivery writes `Fired++` and
-  `Edge.Spiked` (Unix nanoseconds) in one step, and the `Edges` snapshot carries both, so a restored
-  colony resumes with its timing intact. `STDPFrom(ctx, s, pre, post, params)` derives `dt` from
-  those stamps (a cell's spike time is the last moment it conducted) instead of asking the host for
-  a clock; a side that never conducted is reported as an error rather than read as a zero difference.
-- **Routing by declared capability** — `Agent.Skills()` reports the names an agent declares through
-  the same `Methods` projection `AgentCard` publishes, and `NewSkillIndex(agents...)` indexes a
-  colony by them: `TargetsFor(skill)` answers "who can do X", `FanOut` fires at each of them and
-  reports **per target** (delivered list plus one wrapped error per refusal, joined), so a partial
-  delivery is visible. A skillless signal, a signal that also names a target, and a fan-out that can
-  reach nobody but the sender are errors. A capability may match many cells, so a fan-out has no
-  answer path; a round that wants one delegates (`Effect.Send`), and a send naming no target is now
-  refused as tool feedback instead of being fired at the empty ID.
 - **Many organs behind one port, without a new slot** — `GuardStack(layers...)`,
   `FallbackThinker(ports...)` and `FallbackEffector(ports...)` compose several implementations into
   the single organ the loop sees, and each returns **the port type itself**: a composed organ wires
@@ -130,16 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host `Closer`: the framework still closes nothing, so `Close` remains the one cleanup channel, and
   an organ swapped out stays the host's to retire. Blueprint gains the optional `P3b Closer.Boot`
   point, filled exactly when the host's Closer can boot.
-- **Every task state has exactly one writer, and it is the framework** — the cell opens a task
-  (`TaskSubmitted`), the inbound step marks each drained stimulus `TaskWorking`, and the four
-  closing states all come from one mapping, `TaskOutcome(CycleOutcome, ctxErr)`. Each request an
-  invocation served is answered at its terminal — before `Remember` and `OnCycleEnd`, so the memory
-  organ and the hook observe the same ending the requester does — with that outcome, which means an
-  organ never reports a lifecycle and a host never assigns `Signal.Status`. A suspended invocation
-  carries its outstanding requests inside the `Session` (wire v3 gains `requests`) and discharges
-  them when it finishes; an iterator abandoned mid-flight answers nothing, because work that
-  stopped without failing has no lifecycle to invent; an answer with no route out reaches `OnError`
-  rather than vanishing.
 - **The membrane guards the egress side** — `Sandbox` gains `Emit(ctx, Utterance) (Verdict, reason
   string, err error)`: a round's text passes a ruling before it reaches the event stream, the
   accumulated output or the next Think. `Allow` says it as generated; `Deny` replaces the draft
@@ -179,7 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   serialized form so the `Session` version guard stays the authority. Plain `json.Marshal` of an
   `Event` is not this: it writes an `error` field as `{}` and reports nothing.
   Every event additionally carries `CellID`, stamped by the cell at its boundary, so one log can hold
-  a whole colony and still say who spoke.
+  events from several agents and still say who spoke.
+- **`thinker-openai-go.md`** — 把 `Thinker` 接到一个真实 LLM SDK（`openai-go/v3`）的适配文档，
+  SDK 签名逐条对 module cache 源码核实：`Prompt` 13 个字段的完整落点表、
+  `assistant(tool_calls)` 与 `tool` 必须成对这条承重约束的宿主侧做法（内核只回声 `ID/Name/Result/Err`）、
+  两层重试不要相乘（SDK 默认 2 次 × 内核 `MaxRetries` 无退避重投）、`*openai.Error` 的断言形状、
+  流式累加与**出口膜在整轮文本之后才裁决**的时序后果
+- **`ErrForeignSession` 现在在 api 层可见**：集成文档一直承诺宿主用 `errors.Is` 分辨"句柄是别的 cell 的"与
+  "器官出错了"，而那个值只存在于 `internal/nerve`——宿主 import 不到，承诺无法兑现；
+  facade 级的身份判定由一条集成测试钉住
 
 ### Changed
 
@@ -197,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   organs would run one agent's brain with another's tools); the wait cause is stored as a
   name-encoded kind (`pause` / `tool` / `call-ask` / `utterance-ask`) so reordering an internal
   constant cannot reinterpret a saved handle, and a withheld draft travels on the wire.
-  **Breaking**: Session wire is v3 — handles marshalled by an earlier build are refused.
+  **Breaking**: Session wire is v4 — handles marshalled by an earlier build are refused.
 - **`EventUsage` is emitted before the output ruling** — token accounting describes the Think that
   produced it, so a denial or a suspension on the egress side can no longer drop it.
 - **Assembly now requires seven organs** (was six): `Organs.Mem` and `Cell.Mem` are
@@ -214,27 +109,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described only half of what reached the brain.
   **Breaking**: `TrimResults` is required — a Budget carrying only a `Trimmer`
   fails assembly (`New`) and is refused by `Replace("budget", …)`.
-- **`api.NewDirect` returns `*Direct` instead of the `Synapse` interface** — a colony's routing
-  table is built from its agents while each agent's Colony organ is that synapse, so the table can
-  only be injected after construction; the concrete return keeps `SetResolver` reachable instead of
-  adding a method to the interface that only one implementation can honour.
-- **`NewDirect` takes a `DirectConfig`** — `NewDirect(r, initial...)` becomes
-  `NewDirect(DirectConfig{Resolver: r, Floor: f, Initial: initial})`, at the facade as well as in
-  `internal/synapse`. **Breaking**: every call site changes, and the restored edges are a slice
-  rather than variadic arguments; `Floor` is the new conduction threshold (`0` = off).
-- **The composite view's weak-edge marker reads the graph instead of a constant** — the hard-coded
-  `0.3` is gone; `CompositeGraph` gains `Floor` (what that graph reports, 0 when it gates nothing)
-  and the ASCII marker becomes `! below floor (<floor>)`, rendered only for graphs that report a
-  threshold. A host router without one is no longer mislabelled.
+- **`Replace` 的启动时点**：槽位先接受端口，之后才 `Boot`——写错的槽名不再消耗器官唯一一次
+  启动；已关闭的 Agent 拒绝交换并返回 `ErrCellClosed`（此前静默返回"成功且无旧端口"）
+- **枚举一律按下标取值的名表**：事件种类、循环状态、膜的裁决、挂起成因四张表同一写法，
+  由一条守卫测试钉住覆盖；`Session.Marshal` 不再把一个不认识的挂起成因写成 `pause`
+- **四张名字表共用一次实现**：越界判断与按名反查从八份同形函数收进 `internal/nerve/names.go`
+  的两个泛型 helper，写法漂移（有的返回 `"unknown"`、有的返回 `""`）随之一并消失
+- 文档里残留的版本叙述标记（`(v1.3.x)`、"1.1.1 起"、"取代旧的阻塞式等待"）清除，
+  "三种挂起/四种挂起"两处口径统一为四种，README 的行数与 `Synapse` 方法清单按实测校正
+- **组合器不代管启动**：`GuardStack` / `Fallback*` 返回的端口值不声明 `Bootable`，
+  框架只对它拿到手的那个值做能力断言——必须先启动的成员在组合之前由宿主启动，
+  这条边界由一条守卫测试与 `compose.go` 的契约注释同时钉住
+- **往返守卫长牙**：夹具必须让 `Event` 的每个字段至少在一处非零（否则"两边都加了字段却忘了
+  搬运"能静默通过），且 `WireEvent` 可达的任何结构里不得出现裸 `error` 字段；账本还要认全
+  框架自己产出的 12 种事件——挂起、暂停、审计、轮数耗尽每一条真流都要编码-解码回来，
+  写侧新加的一道拒绝若挡住合法产出，当场就红
+- 已被报告过的丢失不再重复累加：`Dropped` 过一趟线还是那一串名字
+- 集成文档与注释只保留当前事实：全仓剥离版本变更叙述与批次编号（历史归 CHANGELOG 与 notes/），
+  并修正 `ReplaceAudit` 字段名、`Replace` 槽位列表、两处指向不存在 API 的说明
 
 ### Fixed
 
 - **`OrganFilled` reported the output membrane as unwired** — `P5c Sandbox.Emit` was missing from
   the edges an assembled `Sandbox` fills, so a wiring diagram drawn from a live agent showed the
   egress gate as a hole the host had already closed.
-- **`STDP`'s comment contradicted its own branches** — it documented `dt = tPre − tPost` while the
-  LTP/LTD arms implement `dt = tPost − tPre` (pre firing first strengthens). The comment now states
-  the implemented convention, which is also what `STDPFrom` relies on to pair graph timestamps.
+- **一轮只有一个挂起名额，谁占住谁说清楚**：并行批次里兄弟调用自报的第二个 `WaitInput` 不再作为"空结果成功"回流——它在被下发之前就被明确拒绝成
+  该调用的工具反馈，反馈文本点名占住名额的那个调用
+- **事件线不再猜**：`kind=state` 的记录缺状态名不再被读成 `StateIdle`，状态名出现在别的种类上
+  同样拒绝；`EncodeEvent` 拒绝名字表里查不到的裁决值，而不是写出一条永远读不回的记录
+- **未知裁决不再放行**：膜返回名字表之外的 `Verdict` 时，此前 `switch` 的默认分支等于允许执行
+  ——现在循环两侧与 `GuardStack` 三个入口统一收在一处按 `Deny` 处置，拒绝文本点名那个值
+- **写侧不再吐出名之外的枚举**：`EncodeEvent` 现在拒绝名字表里没有的事件种类与循环状态——
+  此前它们被写成 `"unknown"`，是一条 Decode 必然拒绝、却已经进了日志的记录
+- **框架判词与工具自己的失败并存**：并行批次里后到等待的拒绝此前直接覆盖 `Effect.Err`；
+  现在两条都在，框架的理由排在前面（结构化反馈按头部截断，排在后面的先被吃掉）
+- **集成文档的"完整骨架"不再缺端口**：§8 的 `Organs` 少了第七端口 `Mem`，照抄即
+  `required port Mem not injected`；同一份文档里 `hooksFor` 只给八个回调中的三个（缺任一即装配失败），
+  示例里引用的 `TaskStatus` 还是一个从未定义、且与框架同名类型撞名的宿主结构
+- **膜的 ask 终结记录写的是宿主批复本身**：三份文档都写"批准时 `Ruling=allow` 且 `Reason` 为空"，
+  实际 `Reason` 存的就是宿主回的那句——照文档写审计日志的宿主会丢掉"谁批的、批的什么"
 
 ### Removed
 
@@ -248,40 +161,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package had no framework consumer and no non-alias importer.
 - **Dead contract members with no producer or consumer** — `Message` /
   `MessageRole` (the conversation shape lives in `Prompt` and `ToolResult`),
-  `Signal.ErrPayload`, `Prompt.State` (the loop set it to `StateThinking` before
-  every Think, so it carried no information), and `Direct.Connected` (absent from
-  the `Synapse` interface, therefore unreachable through the public surface —
-  connectivity is read via the `Edges` snapshot).
+  `Prompt.State` (the loop set it to `StateThinking` before
+  every Think, so it carried no information).
+- **agent 间那一整套从公开面净删除**（**Breaking**）：`internal/synapse` 整包（突触图、`Hebbian`/`STDP`/`Prune` 学习规则、
+  `Floor` 传导阈值）、`Resolve(agents...)` 路由表、`SkillIndex`/`FanOut` 能力路由、`AgentCard` 能力卡、
+  `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 全群视图、`Organs.Colony` 可选器官、`Signal`/`TaskStatus`/`Correlation`
+  信封与 `Effect.Send` 委托、cell 侧的收件箱与回程配对（`Prompt.Stimuli`/`Prompt.Inhibit`、`Agent.Resumptions`/`Ack`、
+  蓝图 G2/G3 两条接线与四条投递哨兵）。判据回到一句话：**一个 `Agent` 就是一个内核，多 agent 是宿主 `New` 多个实例**，
+  跨实例的寻址、投递、发现与学习全在宿主；`Session` 快照去掉未答请求账本，wire 升到 v4。
+- `cell.IsClosed`：仓库内除测试外零调用点，测试同包直接读该字段
 
 ### Internal
 
-- The decision loop is split by concern (`state.go`, `invocation.go`, `loop.go`, `inbox.go`,
-  `correlation.go`, `task.go`, `feedback.go`, `gate.go`, `pause.go`, `retry.go`, `hooks.go`,
-  `parallel.go`): `loop.go` had grown past the file budget by accumulating the membrane, the pause
-  gate, retries and the batch path, and the colony work repeated the same pressure, so
-  `LoopContext` moved to `invocation.go` and its inbound steps to `inbox.go`. Every Act-phase step
+- The decision loop is split by concern (`state.go`, `invocation.go`, `loop.go`,
+  `feedback.go`, `gate.go`, `pause.go`, `retry.go`, `hooks.go`, `parallel.go`): `loop.go` had grown past the file budget by accumulating the membrane, the pause
+  gate, retries and the batch path, so `LoopContext` moved to `invocation.go`. Every Act-phase step
   now runs through one
   `actBatch` handle (calls, round, output accumulator, yield) instead of
   dragging a six-to-nine-argument convoy, and the parallel batch splits into
   `gatePhase` / `execPhase` / `feedbackPhase`. No contract and no event order
   changed — the sequence assertions in `internal/nerve` are the proof.
-- The cell keeps its half of an exchange in `internal/cell/colony.go` — minting ids, stamping
-  outbound signals, and pairing replies to the round that asked — leaving `cell.go` the kernel and
-  its per-invocation snapshot.
 - `size_test.go` enforces the complexity budget across the module (file
   ≤400 lines, function body ≤50, ≤4 parameters). The exemption list is closed
   and carries a reason per entry (`Connectome` is a data table,
-  `Resume`/`Hebbian`/`STDP`/`STDPFrom` are host-visible signatures); `Replace` earned its
+  `Resume` is a host-visible signature); `Replace` earned its
   exemption only until the slots became data-driven and has since been removed
   from it.
-- On the `api` side, one projection has one author: a skill *is* a `MethodSpec`, read through
-  `cardOf(Organs)` by `AgentCard` and through the same list by `Agent.Skills()`, so a peer a host can
-  discover is a peer the new `route.go` (`SkillIndex`/`FanOut`) can route to; the composite view asks
-  the graph for its own conduction floor instead of keeping a display constant of its own.
 - `api` package documentation and the oversized comments in `nerve`/`cell` were
   rewritten to the repository's current perspective; the slot table duplicated
   inside `cell.Replace`'s doc is gone (the blueprint in `nerve/wire.go` owns it).
-
 ## [1.3.7] - 2026-09-06
 
 ### Added

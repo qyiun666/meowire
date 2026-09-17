@@ -13,7 +13,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入七个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
 - **零依赖。** 仅标准库。没有需要审计的传递依赖树。
-- **小巧可读。** Go 源码约 5400 行。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
+- **小巧可读。** 生产码约 4000 行（测试另计约 8500 行）。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
   `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
 
@@ -30,34 +30,19 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   持久化事件流即得完整"谁/做了什么/为什么被允许"审计，符合 Authority 安全模型
 - **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
   图（数据对象节点 + 插槽边），供人或机器渲染
-- **动态接线（突触可塑性）** —— `Agent.Replace(slot, port)` 运行时替换
+- **动态接线（运行期换器官）** —— `Agent.Replace(slot, port)` 运行时替换
   `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
   每次成功替换以 `EventReplace` 在下次 Stimulate/Resume 开头审计产出
 - **运行期配置热更新** —— `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` 热调
   `MaxRounds` 等标量限制，免整 Agent 重建
-- **Agent Card（A2A 就绪）** —— `AgentCard(Organs)` 把装配渲染为机器可读能力卡（JSON）；
-  发布到 `/.well-known/agent-card.json` 即可被其他 agent 发现
-- **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
-  （submitted/working/needs-input/completed/failed/cancelled），端到端追踪跨 agent 任务
-- **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Fire/Edges）+
-  参考学习规则 `Hebbian`/`STDP`/`STDPFrom`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；每条边
-  还记住最近一次投递的时刻，所以 `STDPFrom` 只读图就能配对；宿主注入的 `Floor` 可以让一条边「存在但不承载流量」（`ErrWeakSynapse`）；
-  持久化往返：`Edges` 导出 + `NewDirect` 恢复
-- **多 agent 接线零宿主管道** —— `Resolve(agents...)` 把每个 agent 的 ID 映射到它的 cell 本来就自有的
-  收件箱（容量 `InboxCapacity`），建在其上的突触图无需宿主 channel 映射也能投递到正确神经元；每个
-  cell 在 Think 间隙点自行排空收件箱写入 `Prompt.Stimuli`，`KindNotice` 若为一个工具名则本轮撤下它
-  （`Prompt.Inhibit`）——没有消费泵，在途 Act 也不被抢占。能力卡的同一份投影就是路由索引：`NewSkillIndex(agents...)` 回答「谁会做 X」，`FanOut` 逐个投递并逐目标报告
-- **agent 间任务是原语，不是宿主代码** —— 工具返回 `Effect{Send: &Signal{To: …}}` 即完成委托：cell 铸信号 ID、盖 `submitted`、挂起该调用；服务方的调用在**自己的终点**回话，状态由 `TaskOutcome` 从循环终点算出（六个状态各一个写入者）。回信由框架配对进 `agent.Resumptions()`——框架绝不自行续跑，宿主 `Resume` 续上、`Ack` 销账
-- **统一合成视图** —— `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 把
-  静态装配子图与实时突触图合并为一张图（视图统一、数据分离）
-- **七个宿主注入端口，全部器官必填**（无 stub、端口无可选接线；唯一可选的是多 agent 投递器官 `Organs.Colony`）：
+- **七个宿主注入端口，全部必填**（无 stub、无可选器官——内核不认识「邻居」，跨实例的事归宿主）：
   `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
   `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）、
   `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）
 - **一个端口后面放多个器官** —— `GuardStack` / `FallbackThinker` / `FallbackEffector` 把若干实现组合成循环看到的唯一一个器官，返回的**就是端口类型本身**：组合器官与单个器官接法一致，蓝图没有多出任何插槽
 - **器官可以在被使用之前先启动** —— 任何端口都可声明 `Bootable`；`New` 按 `PortOrder()`（蓝图自己蕴含的顺序，不是在旁边另抄一份）对每个声明者调用一次，`Replace` 在提交替换之前先启动。启动失败即中止装配，本次尝试打开的东西经宿主 `Closer` 释放 —— 框架依旧不关任何器官
-- **事件流可落盘** —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，名字表里拼不出来的枚举值编码时直接拒绝，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以一份日志可以混写整个集群
+- **事件流可落盘** —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，名字表里拼不出来的枚举值编码时直接拒绝，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以宿主把多个实例的日志写进一份文件也分得清谁说的
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
@@ -85,8 +70,8 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
-- **扁平多 agent 模型** —— 子 agent 仍是宿主工具（`spawn_agent`），而 agent 间委托是框架原语
-  （`Effect.Send` + `Resumptions`），绝不做框架级嵌套
+- **扁平多 agent 模型** —— 一个 `Agent` 就是一个内核；多 agent 是宿主 `New` 出多个实例，子 agent 由宿主
+  工具（`spawn_agent`）产生并消费其事件流。内核不做 agent 间通信，也绝不做框架级嵌套
 - **阻力是反馈，不是失败** —— 被拒绝的工具、工具错误、目标繁忙都以 `EventToolResult`
   反馈回流循环，循环继续
 
@@ -115,7 +100,6 @@ meowire (模块根)
   └── api/            门面 + 组合根 —— 唯一对外表面
       ├── internal/cell     agent 内核（ID + 端口 + DecisionLoop）
       ├── internal/nerve    决策循环、端口（含记忆）、钩子、事件、守卫
-      └── internal/synapse  个体间连接与信号投递契约（宿主参考）
 ```
 
 | 概念 | 位置 | 职责 |
@@ -129,7 +113,6 @@ meowire (模块根)
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪文本轨 `Context` 与结构化反馈轨 `ToolResults`（同一额度） |
 | `Memory` | 端口 | 把本轮召回写进 `Prompt.Memories`，并把结束那一轮的事实收回去 |
 | `Event` | 事件 | 循环的类型化观察镜像 |
-| `Synapse` / `Memory` | internal | 供宿主参考的独立契约 |
 
 ## 安装
 
@@ -200,7 +183,7 @@ func (memory) Recall(context.Context, meowire.MemoryQuery) ([]meowire.Record, er
 func (memory) Remember(context.Context, meowire.CycleFacts) error { return nil }
 
 func main() {
-	// Blueprint：一次定义，多次 New（flat model 多 agent）
+	// Blueprint：一次定义，多次 New（每个实例一个独立内核）
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 		Think:   thinker{},
@@ -293,14 +276,13 @@ func main() {
 
 ## 多 agent
 
-Meowire 是**扁平模型**：一个 `Agent` = 一个内核。宿主拥有所有实例。
+Meowire 是**扁平模型**：一个 `Agent` = 一个内核，**跨 agent 的事全部归宿主**。
 
-- 子 agent：`spawn_agent` 宿主工具，结果以 `EventToolResult` 反馈回流
-- agent 间任务：工具返回 `Effect{Send: &Signal{To: …}}`，框架负责投递、在被委托方的终点回话、
-  并把回信配对进 `agent.Resumptions()`；阻力（目标繁忙、未知 agent）成为反馈，绝不是硬停止
-  （路由表由 `Resolve(agents...)` 建出，`internal/synapse` 是参考突触图）
-- 能力发现：`AgentCard` 渲染 A2A 风格卡片；`Signal.Status`（A2A 六态任务生命周期，**全部由框架写入**）
-  端到端追踪每个跨 agent 任务
+- 子 agent：宿主的 `spawn_agent` 工具里 `New` 一个实例、消费它的 `Stimulate` 事件流，结果以
+  `EventToolResult` 反馈回主循环——内核不知道有第二个实例存在
+- 内核不提供 agent 间寻址、投递、回程配对、能力发现与突触图：`Organs` 上没有面向邻居的槽，
+  `Prompt` 里没有入站信号轨（`test/wiring_free_test.go` 机械守住这条边界）
+- 要互通就在宿主里做：把 A 的输出喂进 B 的 `Stimulate`，或把 B 注册成 A 的一个工具
 
 ## 开发
 

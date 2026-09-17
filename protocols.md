@@ -32,8 +32,8 @@ meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）
 | `Sandbox.Allow` | Authority 动作级授权（每次执行前） | `Organs.Sandbox` |
 | `Sandbox.Emit` | 出口审查（该轮文本被听到前） | `Organs.Sandbox` |
 | `EventSandbox` | 审计记录（谁/什么/为什么被允许，两侧同一通道） | 事件流持久化 |
-| `Synapse` 契约 | A2A（Agent 间任务委托） | 宿主路由/消息工具 |
-| `Methods` | Agent Card 能力声明（机器可读） | `Organs.Methods` |
+| `CycleOutcome` / `OnCycleEnd` | A2A 任务终态的唯一判词（映射归宿主） | 宿主任务表 |
+| `Methods` | Agent Card 的 skills 名单（卡片由宿主渲染发布） | `Organs.Methods` |
 | `System` / `Identity` | AGENTS.md（人机协作边界） | `Organs.System` / `Identity` |
 | `ContextBudget` | 上下文工程（context rot 治理） | `Organs.Budget` |
 | `Memory` 端口 | 分层记忆的调用时点（召回进脑、终态回写） | `Organs.Mem` |
@@ -50,36 +50,23 @@ meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）
   每次操作签发范围最小、可审计的临时凭证。`Sandbox` 可叠加策略门。
 - 参考实现：[modelcontextprotocol](https://github.com/modelcontextprotocol)。
 
-## 2. A2A（Agent → Agent）
+## 2. A2A（Agent → Agent）——映射全部落在宿主域
 
-meowire 采用扁平多 agent 模型：一个 Agent 一个内核，宿主管实例（`spawn_agent`
-宿主工具）；agent 间的委托、投递、答复与配对都是框架原语（工具只需说出
-「问谁、问什么」）。映射方式：
+meowire 采用扁平模型：一个 Agent 一个内核，宿主管实例（`spawn_agent` 宿主工具）。
+**内核不携带 agent 间信封**——委托、投递、答复、配对、能力卡与路由都在宿主实现。
+框架只保证一件对 A2A 有用的事：每个 agent 的一次运行**终态可判**。
 
-- **任务委托**：工具返回 `Effect{Send: &Signal{To, Skill, Payload}}` 即完成一次 A2A
-  任务投递——框架铸 `ID`/`From`/`Status=submitted`、经 `Organs.Colony` 投递、挂起该调用；
-  被委托方在自己的终点回一条 `KindResponse`（载荷 = 最终输出，状态 = `TaskOutcome`）。
-  回信落进发起方收件箱，框架按 `ReplyTo` 配对到那次挂起，宿主 `agent.Resumptions()` →
-  `Resume` → `Ack` 决定何时继续（**配对归内核，续跑归宿主**）。路由表由
-  `Resolve(agents...)` 从 agent 列表建出，宿主不建 channel、不搬信号；目标忙/未知 agent/
-  权重低于传导阈值的边（`ErrWeakSynapse`）以 `EventToolResult` 回流（resistance is feedback）。
-- **能力发现**：A2A 用 `Agent Card`（`/.well-known/agent-card.json`）
-  声明能力。meowire 提供 `AgentCard(Organs)`：把 `ID`/`Identity`/
-  `Methods`（gene projection，只描述不消费）渲染为 A2A 风格 JSON 卡片，
-  宿主直接发布即可：
-  ```json
-  {"name": "agent", "description": "...", "skills": [{"name": "...", "description": "..."}]}
-  ```
-
-  同一份投影也是路由的键：`NewSkillIndex(agents...)` 按 skill 名索引整个 colony，
-  `TargetsFor(skill)` 回答「谁会做 X」，`FanOut` 逐个投递并**逐目标报告**。一个能力
-  可对应零到多个 agent，所以 fan-out 没有回程——需要被答复的任务走 `Effect.Send`。
-- **任务状态机**：A2A 定义 submitted → working → needs-input →
-  completed / failed / cancelled 六态。meowire 由**框架写入全部六态**，每个状态
-  只有一个生产者：`Submitted`=委托信号发出时（`Effect.Send`）、`Working`=该请求被排空进
-  某一轮时、其余四态由 `TaskOutcome` 从循环终点算出（Done/Suspended/Error|MaxRounds/
-  ctx 取消），消费者中途放弃迭代器**不产生状态也不回话**（没完成的事不编）。持久化仍
-  在宿主域（推荐外化到宿主数据库，与长时任务方案一致）。
+- **任务状态映射**：宿主把一次 `Stimulate` 当作 A2A 的一个 task 来跑，收尾时按
+  `OnCycleEnd(ctx, output, outcome)` 给的 `CycleOutcome` 写状态——
+  Done→completed、Suspended→needs-input、Error/MaxRounds→failed（ctx 被取消即
+  cancelled）、消费者中途放弃迭代器→不产生状态也不回话（没完成的事不编）。
+  六态语义归协议，写入者归宿主。
+- **能力发现**：`Organs.Methods`（gene projection，只描述不消费）就是 A2A Card 的
+  skills 名单来源，宿主自行渲染成 JSON 并发布到 `/.well-known/agent-card.json`；
+  框架不产出卡片。
+- **传输与路由**：A 怎么找到 B（channel/HTTP/Redis/gRPC）、谁能被寻址，全是宿主的事。
+  跨进程时把 `EncodeEvent` 的 JSON 记录直接当传输单元即可——每条自带产出它的
+  `CellID`、按名字编码的枚举与版本闸门，读端不认就拒读。
 - 参考实现：[A2A 官方仓库](https://github.com/a2aproject/A2A)（Linux
   Foundation）。
 
@@ -97,7 +84,7 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，宿主管实�
 - `Sandbox.Allow(ctx, Action)` 在**每次工具执行前**被调用，`Sandbox.Emit(ctx,
   Utterance)` 在**该轮文本被任何人听到前**被调用——循环两侧各一个授权点
   （对比"登录后一路放行"的会话级授权）。宿主在此结合
-  身份、被委托的 authority、组织策略、声明的 intent 与实时上下文
+  身份、被授予的权限、组织策略、声明的 intent 与实时上下文
   做决策。
 - **裁决**：两个方法各返回三态 `Verdict`——`VerdictAllow` 放行、
   `VerdictDeny`（零值，fail-closed）拒绝、`VerdictAsk` 挂起征询外部确认

@@ -50,8 +50,6 @@ type Thinker interface {
 | `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
 | `Reflection` | 上一轮的自检笔记（ Reflexion 槽位，逐字透传） | 宿主（`BeforeStimulate` 写回） |
 | `Memories` | 本轮召回的经验记录（`Memory.Recall` 输出；整轮替换，不累积、不进快照） | 框架，每次 Think 前 |
-| `Stimuli` | 邻居投递给本 agent 的信号（`Signal{From, Kind, ReplyTo, Skill, Payload}`）；整轮替换，不累积、不进快照 | 框架，每次 Think 前的间隙点排空收件箱 |
-| `Inhibit` | 本轮 `KindNotice` 撤下的工具名：匹配到的调用在被门禁之前就拒执；在途 Act 不撤销 | 框架，随 `Stimuli` |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
 | `Plan` | 任务计划/进度文本 | 宿主经 `Hooks.BeforeThink` 写 `p.Plan`（指针可改，下一轮 Think 生效）；配合宿主 `update_plan` 工具形成闭环（§7.3 ③） |
 
@@ -88,12 +86,11 @@ type Effector interface {
 | `Effect.Result` | 成功结果文本（框架截断后写入 `ToolResults.Result`，渲染归宿主） |
 | `Effect.Err` | 工具自身错误文本（框架截断后写入 `ToolResults.Err`；`Err` 非空 = 调用失败） |
 | `Effect.WaitInput` | 非空 = 请求外部输入（字段即问题文本）；框架产出 `EventWaitInput`（携带 Session）并**正常结束本轮迭代器**，宿主收集响应后调 `agent.Resume(sess, response)` 续跑（见 §6.4） |
-| `Effect.Send` | 委托邻居：宿主只填 `To`（可带 `Skill`/`Payload`），框架铸 `ID`/`From`/`Kind`/`Status=submitted` 并经 `Organs.Colony` 投递，随后**同 `WaitInput` 一样挂起该调用**；回信到达后由框架配对到这次挂起，宿主 `agent.Resumptions()` 取句柄、`Resume` 续跑、`Ack` 销账（见 §7.2）。投不出去（没接 Colony、目标忙/未知）不挂起，错误作为该调用的工具反馈回流 |
 | 返回 error | 执行层错误（同样写入 `ToolResults.Err`，循环继续） |
 
 **宿主职责：**
 - 工具注册表 + 分发器：按 `Name` 路由、反序列化 `Args`、序列化结果
-- 多 agent 工具在这里实现：`spawn_agent`（New → Stimulate → 返回结果）；跨 agent 委托**不需要工具自己持有 synapse**——返回 `Effect{Send: ...}` 让框架投递与配对（见 §7.2），旁路消息才用 `Synapse.Fire`
+- 多 agent 工具在这里实现：`spawn_agent` 这个工具自己 `New` 一个 `Agent`、消费它的 `Stimulate` 事件流、把结果作为普通 `Effect.Result` 交回主循环（见 §7.2）——内核不知道有第二个实例
 - `ask_user` 类工具：**返回 `&Effect{WaitInput: question}` 而非同步阻塞**（阻塞会拖住 Close 的等待；挂起由框架表达，UI 可见"猫在等人回答"），见 §6.4
 - 工具失败返回 `Effect{Err: ...}` 而非 error 也可，两者都会作为反馈继续循环（**阻力是反馈不是失败**）
 
@@ -229,7 +226,6 @@ o := meowire.Organs{
     Sandbox: mySandbox,                         // 必填
     Budget:  &meowire.ContextBudget{...},       // 必填
     Mem:     myMemory,                         // 必填
-    Colony:  mySynapse,                         // 可选：多 agent 投递器官（不接=不能委托/答复邻居）
 
     System:   "你是 meow agent，用中文回答",      // 固定系统指令
     Identity: "你叫 meow，角色 assistant，语气温暖", // 身份描述文本（宿主自拼）
@@ -243,7 +239,7 @@ o := meowire.Organs{
 
 | 字段 | 类型 | 内容 | 必填 |
 |------|------|------|------|
-| `ID` | string | agent 唯一标识；空 = `"agent"`。扁平多 agent 时用于 synapse 路由和日志 | 否 |
+| `ID` | string | agent 唯一标识；空 = `"agent"`。框架只用它给事件署名（`Event.CellID`），宿主拿它区分自己手里的多个实例 | 否 |
 | `Think` | Thinker | LLM 封装 | **是** |
 | `Act` | Effector | 工具执行 | **是** |
 | `Closer` | Closer | 资源清理 | **是** |
@@ -251,7 +247,6 @@ o := meowire.Organs{
 | `Sandbox` | Sandbox | 权限门（`Allow` 守工具执行、`Emit` 守该轮文本出口） | **是** |
 | `Budget` | *ContextBudget | 令牌调节器（文本轨 + 结构化反馈轨） | **是** |
 | `Mem` | Memory | 经验端口（`Recall` 每轮 Think 前，`Remember` 每次调用终点） | **是** |
-| `Colony` | Colony | 多 agent 投递器官（`Synapse` 的 `Fire` 子集）：`Effect.Send` 的委托与入站请求的答复都经它出去；不接则该 agent 不能委托也不能答复邻居（`Validate` 报 info） | 否 |
 | `System` | string | 系统指令，进 Prompt.System | 否 |
 | `Identity` | string | 身份描述文本（宿主自拼），进 Prompt.Identity | 否 |
 | `Methods` | []MethodSpec | 内置能力描述（基因投影，仅描述不执行）；`MethodSpec{Name, Desc, Input, Output}`，进 Prompt.Methods | 否 |
@@ -314,10 +309,10 @@ agent, err := meowire.New(bp)
 - **Blueprint 是一次定义、多次装配**：同一 `bp` 可 `New` 出多个独立 Agent 实例（flat model 多 agent 场景）
 - `New` 基于**装配图**校验（蓝图 = 数据对象节点 + 槽位边），只有两档：
   - `error` 级（必填端口缺失 / 回调缺失 / Budget 不完整）：**恒阻断**，返回 `meow: required port X not injected`（X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8），多缺联合报错
-  - `info` 级（空 Identity/Tools/Context、默认轮数、开了 ParallelActs 却没并发安全的 Effector、`Organs.Colony` 缺席）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
+  - `info` 级（空 Identity/Tools/Context、默认轮数、开了 ParallelActs 却没并发安全的 Effector）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
   - 不再有 `warn` 级：每个接线点都是必填，缺失即缺失器官，没有“半配放行”
 - `New` 依次做三件事：按图**校验**蓝图、逐个**启动**声明了 `Bootable` 的器官（见 §2.9）、**构造** cell。启动失败即中止，后面的步骤不再执行，本次尝试打开的东西经宿主 `Closer` 释放
-- 装配后宿主调用 `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`，并可经 `Replace` 运行时换端口、经 `AgentCard` 导出能力卡（见下）
+- 装配后宿主调用 `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`，并可经 `Replace` 运行时换端口（见下）
 - 七端口 + 八回调均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**；宿主可用 `meowire.FullHooks(...)` 把不需要的钩子声明为显式 no-op
 
 ### 5.1 动态接线：`Replace`（运行时换器官）
@@ -330,29 +325,6 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 - 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）；新器官若声明了 `Bootable`，则先由槽位断言接受、再启动、最后提交，启动失败或槽位不合时接线都保持原样
 - 并发安全；`Close` 后拒绝交换并返回 `ErrCellClosed`（换入的端口不会被启动）；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 - **审计事件**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, OldType, NewType}`（被换的端口按 Go 类型名记录、不作持有：审计在替换之后才产出，必须可序列化；被换下的端口由 `Replace` 的返回值交给宿主），在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
-
-### 5.2 能力卡：`AgentCard`（A2A 风格）
-
-```go
-card, _ := meowire.AgentCard(organs) // JSON：name/description/skills
-```
-
-由装配（`ID`/`Identity`/`Methods`）投影得到机器可读能力声明，宿主发布到 `/.well-known/agent-card.json` 即被其他 agent 发现。详见 [protocols.md](protocols.md) §2。
-
-### 5.3 合成视图：`BuildComposite`（静态装配 × 动态突触，一张图）
-
-```go
-colony := meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}) // 宿主域 Synapse（可塑突触图）
-// ...运行中 Link/Fire/Reinforce...
-
-text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII：内部节点/插槽边 + 外部 agent/突触边
-snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON：机器可读快照
-```
-
-- 内部子图：静态装配（数据对象节点 + 插槽边，来自蓝图 × 组装），外部子图：实时突触边（权重 + 传递计数 + 最近投递时刻）
-- 低于该图传导阈值（`DirectConfig{Floor}`）的边标记 `! below floor`，供宿主复查是否该 `Prune`；图没设阈值就一个都不标
-- 视图统一、数据分离：内部装配与外部连接各自存储，渲染时才合成
-- 宿主把 `RenderCompositeJSON` 快照持久化，即得整个 agent 群体的统一可观测性视图
 
 ---
 
@@ -509,62 +481,27 @@ ev, err := meowire.DecodeEvent(line)
 - 每条记录带 `WireEvent.Version`，版本不符直接拒读，不会“差不多就当能读”；Kind、状态、膜的裁决**按名字上线**，所以新版本重排枚举不会悄悄改写上周那份日志
 - `EventError` 的身份：框架自己的哨兵（`ErrMaxRounds`、`ErrForeignSession`）还原后仍是同一个值——被包装时外层文本也保住，`errors.Is` 照旧成立。其余错误（宿主自己的 `rate limited`）只回来**同样的文本**，事件会在 `Dropped` 里写 `err.identity`：丢了什么要说出来，而不是让一次比较静默地返回 false
 - `EventWaitInput` / `EventPaused` 里的恢复句柄以它自己的序列化形式内嵌，因此 `Session` 的版本闸门照常生效：过期的挂起由句柄拒绝，不是由更宽松的事件流放行
-- `Event.CellID` 说出这条事件出自哪个 cell，所以一份日志可以混写整个集群还分得清谁说的；`Dropped` 说明这条记录是否完整到达
+- `Event.CellID` 说出这条事件出自哪个 cell，所以宿主把多个实例写进一份日志也分得清谁说的；`Dropped` 说明这条记录是否完整到达
 - **别**直接 `json.Marshal` 一个 `Event`：它把 `Err` 字段写成 `{}`（文本没了）、把枚举写成数字，而且什么都不报告
 
 ---
 
-## 7. 第 6 步：`Close` 与可选扩展
+## 7. 第 6 步：`Close` 与多实例组合
 
 ### 7.1 `Close() error`
 
 幂等（CAS 保证）；依次关闭 cell + 宿主 Closer，错误用 `errors.Join` 聚合；关闭后 Stimulate/Resume 返回 `ErrCellClosed`。宿主应 `defer agent.Close()`。
 
-### 7.2 可选扩展
+### 7.2 多 agent = 宿主组合多个实例
 
-**Synapse（多 agent 消息参考实现，可塑突触图）**：
+**没有 agent 间这一层**：内核不寻址、不投递、不配对回程，也不提供突触图、能力卡与全群视图——
+`Organs` 里没有面向邻居的槽，`Prompt` 里没有入站信号轨。这条边界由 `test/wiring_free_test.go`
+机械守住（宿主侧文件出现 channel/goroutine/接收，或 `Organs` 多出一个邻居槽，即红）。
 
-```go
-type Edge struct {
-    From   string
-    To     string
-    Weight float64 // 突触强度（宿主学习规则读写）
-    Fired  int64   // 累计成功传递次数（宿主统计）
-    Spiked int64   // 最近一次成功投递的时刻（Unix 纳秒，0 = 从未）
-}
-
-type Synapse interface {
-    Link(ctx, from, to string, weight float64) error // 突触发生（幂等覆盖，clamp ≥ 0）
-    Unlink(ctx, from, to string) error               // 突触消除（不存在 → ErrNotLinked）
-    Reinforce(ctx, from, to string, delta float64) error // LTP/LTD（结果 clamp ≥ 0）
-    Fire(ctx, sig Signal) error                      // 信号传递（权重低于 Floor → ErrWeakSynapse；成功投递同次写入 Fired++ 与 Spiked）
-    Edges(ctx, from string) ([]Edge, error)          // 出边/全图快照（持久化原语）
-}
-```
-
-- `SignalKind`：`KindStimulus`（带 `ID`/`From` 的请求 = 一次任务，会被答复）/`KindResponse`（答复，`ReplyTo` 指向被答信号）/`KindNotice`（旁路通知，不进决策循环）
-- **装配顺序（colony 是环形的）**：路由表要点 agent 的名字，agent 又得带上这张表投递，所以先建图、再装 agent、最后回填：
-  ```go
-  syn := meowire.NewDirect(meowire.DirectConfig{})   // 参考实现，resolver 先空着
-  a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
-  b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
-  r, _ := meowire.Resolve(a, b)                      // ID → 各自收件箱（重复 ID 即拒）
-  syn.SetResolver(r)                                 // 回填；自定义路由宿主自己解决这一步
-  syn.Link(ctx, "a", "b", 1)                         // 只有连了边的两个方向才通
-  ```
-- **收件箱归框架**：每个 cell 自带容量 `InboxCapacity`（8）的收件箱；框架在下一个 Think 间隙点排空收件箱写入 `Prompt.Stimuli`，宿主既不维护 channel 映射也没有消费泵
-- `KindNotice` 的框架语义只有一条：Payload 若为一个工具名，则本轮该名字的调用在门禁之前就拒执（`Prompt.Inhibit`）；通知本身不触发循环，其余内容是宿主自己的约定
-- **委托 = 返回值，不是宿主调 Fire**：工具返回 `Effect{Send: &Signal{To, Skill, Payload}}`，框架铸 `ID`/`From`/`Kind`/`Status=submitted`、经 `Organs.Colony` 投递、把该调用挂起（与 `WaitInput` 同一条 Session 路径）。投不出去不挂起，错误进工具反馈（阻力是反馈）
-- **答复也是框架的账**：一次调用如果服务过带 `ID`/`From` 的请求，它结束时必定向请求方回一条 `KindResponse`，载荷 = 该次调用的最终输出，状态由 `TaskOutcome` 从循环终点算出——因此六个 `TaskStatus` 各只有一个写入者：`Submitted`=发出的请求、`Working`=被排空进本轮的请求、`NeedsInput`/`Completed`/`Failed`/`Cancelled`=终点映射（消费者中途放弃迭代器**不编状态、也不回话**）；无 Colony 可答的 agent 经 `OnError` 报出，不静默丢
-- **配对归内核，续跑归宿主**：回信落在发起方收件箱后由框架按 `ReplyTo` 配给它挂起的那一轮，进 `agent.Resumptions()`（快照式，读一次不影响下次）；宿主 `Resume(r.Session, string(r.Response))` 续跑、`Ack(r.SignalID)` 销账。一个任务可先报 `needs-input` 再报 `completed`，两条都配在同一次委托上
-- **传导阈值 `DirectConfig{Floor}`（宿主注入，0 = 关闭门控）**：权重低于阈值的边 `Fire` 直接拒（`ErrWeakSynapse`），边仍在图里、仍可被 Reinforce 回来，只是不承载流量；`Prune` 的 `weightFloor` 才是删边阈值——两个阈值不合并，因为后果不同（断流 vs 消除）
-- **图自带时刻**：每次成功投递在同一次写入里 `Fired++` 且 `Spiked=now`，于是 `STDPFrom(ctx, s, pre, post, params)` 只读图就能拿到两端的最近发放时间（一个正在发放的 cell 在这里只以「它发过什么」可见），宿主不必自带时钟；`Edges` 导出的快照把两个值一起带走，恢复即带回
-- **按能力路由是宿主的广播，不是委托**：`NewSkillIndex(agents...)` 用与 Agent Card 同一份投影（`Methods` → skills）建索引，`TargetsFor(skill)` 回答「谁会做 X」，`FanOut(ctx, syn, sig)` 逐个目标 `Fire` 并**分别报告**（`delivered` 名单 + 每个拒绝目标的包装错误，聚合返回）——一个能力可能对应零个、一个、多个 cell，所以它没有回程；要回程就用 `Effect.Send`（那时 `Signal.Skill` 只是内容）
-- 真正路由（channel/HTTP/Redis/gRPC）宿主自选；`Colony` 只是 `Synapse` 的 `Fire` 子集，旁路消息宿主仍可直接 `Fire`（阻力以 `EventToolResult` 反馈回循环，不硬停）
-- synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`/`ErrWeakSynapse`）在 api 层 re-export；`Edge`（含 `Spiked`）与 `DirectConfig` 同步 re-export
-- **持久化往返**：运行期 `Edges(ctx, "")` 导出全图 → 宿主序列化存盘；下次启动反序列化 → `NewDirect(DirectConfig{Resolver: r, Initial: restored})` 注入初始边。学习规则（赫布/STDP）宿主实现，框架只存状态不决策
-
-**扁平多 agent 模型**：一个 Agent = 一个内核；宿主管理多个实例。子 agent 在宿主 Effector 工具内 `New → Stimulate`，对主循环透明。
+**扁平模型**：一个 `Agent` = 一个内核，宿主拥有全部实例。子 agent 在宿主 Effector 工具内
+`New(bp) → Stimulate → 收事件流`，对主循环完全透明；要 A 等 B 的结果，就把 B 做成 A 的一个工具。
+同一份 `Blueprint` 可以 `New` 多次，但每个实例的 `Organs.Context` 切片与 `Hooks` 闭包是共享的，
+多实例要各自覆写（见 [reference-host.md](reference-host.md) Step 8）。
 
 ### 7.3 多 agent 状态可见性：宿主侧三件套
 
@@ -582,8 +519,7 @@ type StreamHub struct {
 ```
 
 ```go
-// taskView 是宿主自己的任务视图。框架那个 meowire.TaskStatus 字符串只出现在跨 agent 的
-// Signal.Status 上（六态、各自只有一个写入者），与这里的本地观察结构无关。
+// taskView 是宿主自己的任务视图：框架从不维护跨 agent 的任务生命周期，状态完全由宿主的 Hooks 与工具写进来。
 type taskView struct {
 	State    string
 	LastText string

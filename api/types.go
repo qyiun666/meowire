@@ -10,10 +10,7 @@
 package meowire
 
 import (
-	"context"
-
 	"github.com/qyiun666/meowire/internal/nerve"
-	"github.com/qyiun666/meowire/internal/synapse"
 )
 
 // Ports — host-provided capabilities (all required, no stubs).
@@ -94,54 +91,6 @@ func EncodeEvent(e Event) ([]byte, error) { return nerve.EncodeEvent(e) }
 // state or ruling name, and a suspension handle whose own version guard fails.
 func DecodeEvent(data []byte) (Event, error) { return nerve.DecodeEvent(data) }
 
-// Inter-agent messaging (host reference).
-type (
-	Synapse      = synapse.Synapse
-	Edge         = synapse.Edge
-	Resolver     = synapse.Resolver
-	DirectConfig = synapse.DirectConfig
-	Signal       = nerve.Signal
-	SignalKind   = nerve.SignalKind
-	TaskStatus   = nerve.TaskStatus
-	Correlation  = nerve.Correlation
-)
-
-// Colony is the delivery organ a cell sends peer signals through: the subset of
-// Synapse the kernel calls. The reference Direct satisfies it, and so does any
-// host router that can put a signal on a named cell.
-type Colony interface {
-	Fire(ctx context.Context, sig Signal) error
-}
-
-// InboxCapacity is how many signals wait in one agent's inbox before it starts
-// refusing: a delivery to a cell that is not consuming gets ErrTargetBusy, so a
-// slow neighbour is backpressure, not unbounded memory.
-const InboxCapacity = nerve.InboxCapacity
-
-// NewDirect creates the reference Direct synapse (connection-table with
-// Resolver-based delivery). The concrete type is returned so the assembly
-// order a colony requires stays available: cfg.Resolver may be nil until
-// SetResolver injects the table built by Resolve over agents that already
-// carry this graph. cfg.Initial restores a previously exported graph (host
-// persistence round-trip); cfg.Floor is the conduction threshold a host
-// injects — a connection weighing less refuses to carry a signal
-// (ErrWeakSynapse) — and zero switches gating off.
-func NewDirect(cfg DirectConfig) *synapse.Direct { return synapse.NewDirect(cfg) }
-
-// STDPParams tunes the reference STDP learning rule (host-side learning;
-// the framework never applies learning rules itself).
-type STDPParams = synapse.STDPParams
-
-// Reference learning rules (host-callable plasticity loops; the framework
-// stores state and never decides when to learn).
-var (
-	Hebbian     = synapse.Hebbian
-	STDP        = synapse.STDP
-	STDPFrom    = synapse.STDPFrom
-	Prune       = synapse.Prune
-	HebbianFire = synapse.HebbianFire
-)
-
 // Wiring blueprint types (Connectome / WiringDiagram / Validate).
 type (
 	WirePoint     = nerve.WirePoint
@@ -196,23 +145,6 @@ const (
 	OutcomeMaxRounds CycleOutcome = nerve.OutcomeMaxRounds // round budget exhausted with pending tool calls
 	OutcomeError     CycleOutcome = nerve.OutcomeError     // ended through EventError
 	OutcomeAborted   CycleOutcome = nerve.OutcomeAborted   // consumer stopped consuming mid-cycle
-)
-
-// SignalKind constants.
-const (
-	KindStimulus SignalKind = nerve.KindStimulus
-	KindResponse SignalKind = nerve.KindResponse
-	KindNotice   SignalKind = nerve.KindNotice
-)
-
-// TaskStatus constants (A2A-style task lifecycle states).
-const (
-	TaskSubmitted  TaskStatus = nerve.TaskSubmitted
-	TaskWorking    TaskStatus = nerve.TaskWorking
-	TaskNeedsInput TaskStatus = nerve.TaskNeedsInput
-	TaskCompleted  TaskStatus = nerve.TaskCompleted
-	TaskFailed     TaskStatus = nerve.TaskFailed
-	TaskCancelled  TaskStatus = nerve.TaskCancelled
 )
 
 // WireCategory constants.

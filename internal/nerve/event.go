@@ -13,8 +13,8 @@ package nerve
 type Event struct {
 	// CellID names the cell that produced this event. The cell stamps it on
 	// every event as it leaves, so an event keeps its author once it is
-	// written to a log, replayed in another process, or merged with a
-	// colony's events.
+	// written to a log, replayed in another process, or merged with another
+	// agent's events.
 	CellID   string
 	Kind     EventKind
 	Text     string          // KindText: LLM text output

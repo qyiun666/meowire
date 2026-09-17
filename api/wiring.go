@@ -61,8 +61,7 @@ func ConnectomeNodes() []WireNode {
 }
 
 // WiringDiagram returns the filled state of every blueprint slot.
-// Framework built-ins (F1 tool feedback, G1 PauseGate, G3 Inbox) always read
-// as filled; G2 Egress reads filled only when the host wired Organs.Colony.
+// Framework built-ins (F1 tool feedback, G1 PauseGate) always read as filled.
 func WiringDiagram(o Organs) []Slot {
 	bp := nerve.Connectome()
 	slots := make([]Slot, 0, len(bp))
@@ -97,10 +96,10 @@ func SlotsByTarget(o Organs, targetID string) []Slot {
 
 // organFilled answers "is this blueprint slot wired?" per slot id. Ports read
 // their own Organs field, hooks read the container plus the specific callback,
-// the framework built-in / api-injected slots are always active, the colony's
-// outbound slot follows its organ, and the optional boot slot follows whether
-// the host's Closer can boot. An unknown id is reported
-// unfilled: a slot the api does not know about cannot be assumed present.
+// and the framework built-in / api-injected slots are always active; the
+// optional boot slot follows whether the host's Closer can boot. An unknown id
+// is reported unfilled: a slot the api does not know about cannot be assumed
+// present.
 var organFilled = map[string]func(Organs) bool{
 	"P1":  func(o Organs) bool { return o.Think != nil },
 	"P2":  func(o Organs) bool { return o.Act != nil },
@@ -124,8 +123,6 @@ var organFilled = map[string]func(Organs) bool{
 	"H8":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnCycleEnd != nil },
 	"F1":  func(Organs) bool { return true },
 	"G1":  func(Organs) bool { return true },
-	"G2":  func(o Organs) bool { return o.Colony != nil },
-	"G3":  func(Organs) bool { return true },
 }
 
 // impliedSlots are sub-slots carried by a parent port (Sandbox.Bounds by
@@ -207,9 +204,6 @@ func defaultNotes(o Organs, cfg Config) []Issue {
 		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
 	} else if cfg.MaxParallelActs > 0 {
 		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "MaxParallelActs set while ParallelActs is off (no batch runs concurrently, so the ceiling binds nothing)"})
-	}
-	if o.Colony == nil {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "G2", Msg: "Colony not wired (peer delegation and answers are unavailable)"})
 	}
 	return notes
 }

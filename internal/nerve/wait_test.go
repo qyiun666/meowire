@@ -67,35 +67,6 @@ func TestParallelSecondWaitKeepsItsOwnFailure(t *testing.T) {
 	}
 }
 
-// TestWaitInputWinsOverSend: an Effect that carries both its own question and a
-// delegation asks the loop, not a peer. The port contract gives WaitInput
-// precedence, so the send never leaves and the tool's own text is what the host
-// is asked — not the delivery note of a request nobody made.
-func TestWaitInputWinsOverSend(t *testing.T) {
-	var delivered []Signal
-	lc := &LoopContext{
-		CellID: "c1", Input: "go",
-		Send: func(ctx context.Context, sig Signal) (string, error) {
-			delivered = append(delivered, sig)
-			return "c1/1", nil
-		},
-	}
-	wait, fedBack := waitHarness(t, lc,
-		[]ToolCall{{ID: "t1", Name: "both"}},
-		func(a Action) (*Effect, error) {
-			return &Effect{WaitInput: "may I?", Send: &Signal{To: "peer"}}, nil
-		})
-	if wait == nil {
-		t.Fatalf("no suspension yielded; feedback: %v", fedBack)
-	}
-	if wait.Question != "may I?" {
-		t.Errorf("question = %q, want the tool's own text", wait.Question)
-	}
-	if len(delivered) != 0 {
-		t.Errorf("delivered %v, want the delegation withheld while the call asks on its own", delivered)
-	}
-}
-
 // TestParallelSecondWaitRefused: a round has one suspension to spend, and a
 // parallel batch cannot queue a second one behind the first. The later wait is
 // refused with tool feedback naming the claimant; it never returns as an empty
@@ -125,29 +96,5 @@ func TestParallelSecondWaitRefused(t *testing.T) {
 	}
 	if !strings.Contains(second.Err, "one wait per round") || !strings.Contains(second.Err, "askFirst") {
 		t.Errorf("refused effect err = %q, want it to name the claimant", second.Err)
-	}
-}
-
-// TestDelegationFailureKeepsToolError: an undeliverable delegation is the
-// framework's answer, and the tool's own failure is the organ's — both belong in
-// the feedback, with the framework's reason first, because the structured track
-// truncates from the head (MaxToolOutput keeps the front). What a reader must
-// never lose is why nothing was delegated.
-func TestDelegationFailureKeepsToolError(t *testing.T) {
-	send := func(a Action) (*Effect, error) {
-		return &Effect{Send: &Signal{}, Err: "tool backend exploded"}, nil
-	}
-	_, fedBack := waitHarness(t, &LoopContext{CellID: "c1", Input: "go"}, []ToolCall{{ID: "t1", Name: "sendNowhere"}}, send)
-	eff := fedBack["t1"]
-	if eff == nil {
-		t.Fatal("the call produced no EventToolResult")
-	}
-	own := strings.Index(eff.Err, "tool backend exploded")
-	reason := strings.Index(eff.Err, "names one target")
-	if own < 0 || reason < 0 {
-		t.Fatalf("err = %q, want both the framework reason and the tool's own failure", eff.Err)
-	}
-	if reason > own {
-		t.Errorf("err = %q, want the framework reason ahead of the tool's text", eff.Err)
 	}
 }

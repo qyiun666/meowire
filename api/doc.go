@@ -4,7 +4,8 @@
 // Package meowire is the public facade of the meowire harness: a decision-loop
 // kernel (Think → Act event stream) plus the seven-port assembly surface. The
 // framework owns the loop, the events and the wiring contract; the host owns
-// every organ implementation and the multi-agent colony.
+// every organ implementation and, when it wants more than one agent, the extra
+// instances themselves.
 //
 // Kernel: an internal/cell Cell holds an ID, the ports and a
 // nerve.DecisionLoop, and yields iter.Seq[Event]. Every suspension — a tool
@@ -20,6 +21,5 @@
 // Dependency graph (strictly unidirectional):
 //
 //	meowire/api (facade + composition root)
-//	  ├── internal/cell → internal/nerve
-//	  └── internal/synapse → internal/nerve
+//	  └── internal/cell → internal/nerve
 package meowire

@@ -64,13 +64,6 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 	batch = make([]batchEntry, 0, len(b.calls))
 	denied := make([]bool, len(b.calls))
 	for i, tc := range b.calls {
-		if notice, blocked := b.lc.inhibited(tc.Name); blocked {
-			if !b.refuse(tc, inhibitedText(notice)) {
-				return nil, nil, true
-			}
-			denied[i] = true
-			continue // withheld by a notice: its feedback already landed
-		}
 		g := b.gate(tc)
 		if !g.ok {
 			return nil, nil, true
@@ -149,8 +142,6 @@ func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*W
 	for j := range batch {
 		if suspendAt >= 0 {
 			refuseLaterWait(results[j].eff, batch[suspendAt].call)
-		} else {
-			b.delegate(results[j].eff)
 		}
 		if suspendAt < 0 && results[j].eff != nil && results[j].eff.WaitInput != "" {
 			suspendAt = j

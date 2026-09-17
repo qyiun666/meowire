@@ -54,7 +54,7 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 
 ## 2. `Prompt` 全字段 → 请求的落点
 
-`Prompt` 是进脑的唯一数据包（`internal/nerve/port.go:24-60`）。13 个字段都有落点，
+`Prompt` 是进脑的唯一数据包（`internal/nerve/port.go:24-50`）。11 个字段都有落点，
 **漏一个字段就是一个器官静默失能**——下表是完整清单。
 
 | `Prompt` 字段 | 类型 | chat 请求落点 |
@@ -64,12 +64,10 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 | `Methods` | `[]MethodSpec{Name, Desc, Input, Output}` | 同一消息里的能力清单文本（描述性，**不是**可调用工具，别塞进 `Tools`） |
 | `Bounds` | `string` | 同一消息里的执行边界段（`Sandbox.Bounds()` 快照） |
 | `Plan` | `string` | 同一消息里的计划段，或 assistant 预填充 |
-| `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:47`）与 `[inhibited: 谁]`（`inbox.go:104`）。**被膜拒掉、被 notice 撤回的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
+| `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:44`）。**被膜拒掉的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
 | `Reflection` | `string` | 同一消息里的自查段（宿主在 `BeforeStimulate` 写、跨轮同值，框架从不写；空 = 无） |
 | `Memories` | `[]Record{Key, CellID, Kind, Content []byte, Created}` | 检索段文本；`Content` 是 `[]byte`，转字符串前自己决定解码。每轮整体替换、不进 `Session` 快照 |
 | `Input` | `string` | `openai.UserMessage(p.Input)` |
-| `Stimuli` | `[]Signal{ID, From, To, Kind, Status, ReplyTo, Skill, Payload}` | 邻居来信：渲染成文本段（角色由宿主决定），或按 `Kind` 折进背景段；同样每轮整体替换 |
-| `Inhibit` | `[]string` | 本轮被撤回的工具名：从 `Tools` 里剔除即可，"为什么不可用"框架已经用 `[inhibited: ...]` 写进 `Context` 了，不必再编一段 |
 | `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，见 §5。**这是每轮现读的数据**：`BeforeStimulate` 可以整体改写它（`internal/nerve/hooks.go:66`），缓存到启动期会静默丢掉改写 |
 | `ToolResults` | `[]ToolResult{ID, Name, Result, Err}` | `assistant(tool_calls)` + `tool` 成对消息，见 §3 |
 
@@ -165,18 +163,11 @@ func (t *chatThinker) decisionOf(c *openai.ChatCompletion) *meowire.Decision {
 ## 5. 工具定义映射
 
 ```go
-// toolParams 每轮现读 p.Tools（§2 的改写警告），并按 p.Inhibit 剔除。
+// toolParams 每轮现读 p.Tools（§2 的改写警告）：本轮哪些工具可读由 p.Tools 本身表达。
 // ToolSpec.Input 是 JSON Schema 文本，SDK 要的是 map。
 func toolParams(p *meowire.Prompt) ([]openai.ChatCompletionToolUnionParam, error) {
-    withheld := make(map[string]bool, len(p.Inhibit))
-    for _, name := range p.Inhibit {
-        withheld[name] = true
-    }
     tools := make([]openai.ChatCompletionToolUnionParam, 0, len(p.Tools))
     for _, spec := range p.Tools {
-        if withheld[spec.Name] {
-            continue
-        }
         schema := openai.FunctionParameters{}                 // = shared.FunctionParameters（aliases.go:492）
         if spec.Input != "" {
             if err := json.Unmarshal([]byte(spec.Input), &schema); err != nil {
@@ -412,16 +403,16 @@ func (t *chatThinker) transcript(results []meowire.ToolResult) []openai.ChatComp
 }
 ```
 
-`render` 拼 §2 表里全部标"同一消息"的段（含 `Memories` / `Stimuli` 的渲染），
+`render` 拼 §2 表里全部标"同一消息"的段（含 `Memories` 的渲染），
 `decisionOf` 就是 §4 的代码。工具表**必须每轮现建**（`toolParams(p)`）：
 `BeforeStimulate` 可以整体改写 `p.Tools`，缓存到启动期会静默丢掉改写，
 代价只是一次 JSON 反序列化。固定段与动态段分开的收益（前缀缓存）在 §2 末。
 
 ## 10. 交付前自检
 
-- [ ] `Prompt` 13 个字段各有落点，特别是 `Memories` / `Stimuli` / `Reflection` / `Inhibit`
+- [ ] `Prompt` 11 个字段各有落点，特别是 `Memories` / `Reflection` / `Bounds`
 - [ ] assistant 里每个 `tool_call_id` 都有一条 `tool` 消息回话，**包括被膜拒掉的**
-- [ ] `Tools` 每轮从 `p.Tools` 现建并剔除 `p.Inhibit`（没有启动期缓存）
+- [ ] `Tools` 每轮从 `p.Tools` 现建（没有启动期缓存）
 - [ ] Thinker 的共享缓存有锁，`Reset` 的触发点由宿主定（不是 `BeforeStimulate`）
 - [ ] 只有一层重试（`option.WithMaxRetries(0)` + `Config.MaxRetries`，或反之）
 - [ ] `ctx` 一路透传，`Think` 内没有 `WithoutCancel`

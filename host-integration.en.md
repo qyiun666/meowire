@@ -57,8 +57,6 @@ type Thinker interface {
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Reflection` | Self-review note from the previous round (Reflexion slot, passed through verbatim) | Host (write-back in `BeforeStimulate`) |
 | `Memories` | This round's recalled experience records (`Memory.Recall` output; replaced wholesale per round, never accumulated, never enters a Session snapshot) | Framework, before each Think |
-| `Stimuli` | Signals neighbours delivered to this agent (`Signal{From, Kind, ReplyTo, Skill, Payload}`); replaced wholesale per round, never accumulated, never enters a Session snapshot | Framework, draining the inbox at the Think gap before each Think |
-| `Inhibit` | Tool names withdrawn this round by a `KindNotice`: a matching call is refused before it ever reaches the gate; an in-flight Act is not preempted | Framework, alongside `Stimuli` |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
 | `Plan` | Task plan/progress text | Host, updatable via Hooks |
 
@@ -97,16 +95,13 @@ type Effector interface {
 | `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the host's call) |
 | `Effect.Err` | Tool-side error text (truncated into `ToolResults.Err`; non-empty `Err` = the call failed) |
 | `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the response and calls `agent.Resume(sess, response)` (see §6.4) |
-| `Effect.Send` | Delegate to a peer: the host names `To` (optionally `Skill`/`Payload`), the framework mints `ID`/`From`/`Kind`/`Status=submitted`, delivers through `Organs.Colony` and **suspends that call exactly like `WaitInput` does**; when the answer arrives the framework pairs it back to that suspension — the host takes the handle from `agent.Resumptions()`, continues with `Resume`, then `Ack`s it (see §7.2). An undeliverable request (no Colony, busy or unknown target) never suspends: its error flows back as that call's tool feedback |
 | return error | Execution-layer error (also written to `ToolResults.Err`; the loop continues) |
 
 **Host responsibilities:**
 - Tool registry + dispatcher: route by `Name`, deserialize `Args`, serialize results
-- Multi-agent tools live here: `spawn_agent` (New → Stimulate → return result);
-  cross-agent delegation **needs no synapse inside the tool** — return
-  `Effect{Send: ...}` and the framework delivers and pairs (see §7.2); only
-  side-channel messages call `Synapse.Fire` directly
-- `ask_user`-style tools: **return `&Effect{WaitInput: question}` instead of blocking synchronously**
+- Multi-agent tools live here: the `spawn_agent` tool itself `New`s an `Agent`, consumes
+  its `Stimulate` stream and hands the result back as an ordinary `Effect.Result`
+  (see §7.2) — the kernel never learns a second instance exists
   (blocking drags the Close wait; the suspension is expressed by the framework so the
   UI can show "the cat is waiting for an answer"), see §6.4
 - Tool failures can be returned as `Effect{Err: ...}` instead of an error; both
@@ -307,7 +302,6 @@ o := meowire.Organs{
     Sandbox: mySandbox,                         // required
     Budget:  &meowire.ContextBudget{...},       // required
     Mem:     myMemory,                         // required
-    Colony:  mySynapse,                         // optional: multi-agent delivery organ (absent = cannot ask or answer peers)
 
     System:   "You are a meow agent, answer in English", // fixed system instructions
     Identity: "You are meow, role assistant, warm tone",   // identity description text (host composed)
@@ -321,7 +315,7 @@ o := meowire.Organs{
 
 | Field | Type | Content | Required |
 |-------|------|---------|----------|
-| `ID` | string | Unique agent ID; empty = `"agent"`. Used for synapse routing and logging in the flat multi-agent model | no |
+| `ID` | string | Unique agent ID; empty = `"agent"`. The framework only uses it to author events (`Event.CellID`); the host uses it to tell its own instances apart | no |
 | `Think` | Thinker | LLM wrapper | **yes** |
 | `Act` | Effector | Tool execution | **yes** |
 | `Closer` | Closer | Resource cleanup | **yes** |
@@ -329,7 +323,6 @@ o := meowire.Organs{
 | `Sandbox` | Sandbox | Permission gate (`Allow` guards execution, `Emit` guards the round's text egress) | **yes** |
 | `Budget` | *ContextBudget | Token regulator (text track + structured-feedback track) | **yes** |
 | `Mem` | Memory | Experience port (`Recall` before each Think, `Remember` at the invocation terminal) | **yes** |
-| `Colony` | Colony | Multi-agent delivery organ (the `Fire` subset of `Synapse`): peer delegations and answers to inbound requests go out through it; without it the agent can be asked but cannot ask or answer (`Validate` reports info) | no |
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
 | `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
@@ -395,13 +388,13 @@ agent, err := meowire.New(bp)
   - `error` (missing required port / missing hook callback / incomplete Budget): **always blocks**, returns `meow: required port X not injected`
     (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
   - `info` (empty Identity/Tools/Context, default rounds, ParallelActs without a concurrency-safe
-    Effector, `Organs.Colony` absent): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
+    Effector): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
   - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
 - `New` runs three steps in order: **validate** the blueprint against the graph, **boot** every
   organ that declared `Bootable` (§2.9), then **construct** the cell. Nothing after a failing boot
   is reached, and the failed attempt is released through the host `Closer`
 - After assembly the host calls `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`, and may
-  swap ports at runtime via `Replace` and export the capability card via `AgentCard` (below)
+  swap ports at runtime via `Replace` (below)
 - All seven ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
 
 ### 5.1 Dynamic wiring: `Replace` (runtime organ swap)
@@ -427,34 +420,6 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at
   takes effect — same level as `EventSandbox`, persistable); failed swaps record nothing;
   zero output without swaps. The host closes its model-switch audit loop from the event
   stream instead of maintaining a hand-rolled state machine
-
-### 5.2 Capability card: `AgentCard` (A2A style)
-
-```go
-card, _ := meowire.AgentCard(organs) // JSON: name/description/skills
-```
-
-Projected from the assembly (`ID`/`Identity`/`Methods`) as a machine-readable capability
-declaration; publish it at `/.well-known/agent-card.json` so other agents can discover
-this agent. See [protocols.md](protocols.md) §2.
-
-### 5.3 Composite view: `BuildComposite` (static assembly × live synapses, one picture)
-
-```go
-colony := meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}) // host-domain Synapse (plastic synapse graph)
-// ...runtime Link/Fire/Reinforce...
-
-text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII: internal nodes/slots + external agents/synapses
-snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON: machine-readable snapshot
-```
-
-- Internal subgraph: static assembly (data-object nodes + slot edges, blueprint ×
-  assembly); external subgraph: live synaptic edges (weight + delivery count + last conduct time)
-- Edges below the graph's own conduction floor (`DirectConfig{Floor}`) are flagged
-  `! below floor` for `Prune` review; a graph with no floor flags nothing
-- View unified, data separate: internal assembly and external connections store
-  independently, merged only at render time
-- Persist `RenderCompositeJSON` snapshots for a unified observability view of the whole colony
 
 ---
 
@@ -699,14 +664,14 @@ ev, err := meowire.DecodeEvent(line)
 - A suspension handle inside `EventWaitInput` / `EventPaused` is embedded in its own serialized
   form, so the `Session` version guard still applies: a stale suspension is rejected by the handle,
   not by a looser event wire
-- `Event.CellID` names the producing cell, so one log can carry a whole colony and still say who
-  spoke; `Dropped` says whether the record arrived complete
+- `Event.CellID` names the producing cell, so a host that writes several agents into one log can
+  still tell who spoke; `Dropped` says whether the record arrived complete
 - Do **not** `json.Marshal` an `Event`: it writes the `Err` field as `{}` (the text is gone) and
   numbers the enums, all without reporting anything
 
 ---
 
-## 7. Step 6: `Close` and Optional Extensions
+## 7. Step 6: `Close` and composing instances
 
 ### 7.1 `Close() error`
 
@@ -714,56 +679,19 @@ Idempotent (CAS); closes the cell then the host Closer; errors are joined
 with `errors.Join`. Stimulate/Resume after Close returns `ErrCellClosed`. The host
 should `defer agent.Close()`.
 
-### 7.2 Optional extensions
+### 7.2 Multi-agent = the host composes instances
 
-**Synapse (inter-agent messaging reference, a plastic synapse graph)**:
+**There is no inter-agent layer**: the kernel does not address, deliver, pair replies, keep a
+synapse graph, publish capability cards or render a colony-wide view. `Organs` has no slot
+addressed to a neighbour and `Prompt` has no inbound track. `test/wiring_free_test.go` guards
+that boundary mechanically (a host-side file containing a channel, a goroutine or a receive,
+or an extra neighbour-facing field on `Organs`, fails the build).
 
-```go
-type Edge struct {
-    From   string
-    To     string
-    Weight float64 // synaptic strength (host learning rules read/write)
-    Fired  int64   // cumulative successful deliveries (host statistics)
-    Spiked int64   // last successful conduct, Unix nanoseconds (0 = never)
-}
-
-type Synapse interface {
-    Link(ctx, from, to string, weight float64) error // synaptogenesis (idempotent overwrite, clamp ≥ 0)
-    Unlink(ctx, from, to string) error               // synapse elimination (missing → ErrNotLinked)
-    Reinforce(ctx, from, to string, delta float64) error // LTP/LTD (result clamp ≥ 0)
-    Fire(ctx, sig Signal) error                      // delivery (weight below Floor → ErrWeakSynapse; a success writes Fired++ and Spiked together)
-    Edges(ctx, from string) ([]Edge, error)          // out-edge / whole-graph snapshot (persistence primitive)
-}
-```
-
-- `SignalKind`: `KindStimulus` (a request carrying `ID`/`From` is a task, and a task gets an answer) / `KindResponse` (the answer, `ReplyTo` names the request) / `KindNotice` (side-channel notice, runs no DecisionLoop)
-- **Assembly order (a colony is circular)**: the routing table names the agents while each agent carries that table, so build the graph first, create the members, then hand it the table:
-  ```go
-  syn := meowire.NewDirect(meowire.DirectConfig{})   // reference graph, no resolver yet
-  a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
-  b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
-  r, _ := meowire.Resolve(a, b)                      // ID → each cell's own inbox (duplicate IDs refused)
-  syn.SetResolver(r)                                 // close the circle; custom routers do this their own way
-  syn.Link(ctx, "a", "b", 1)                         // only a linked direction conducts
-  ```
-- **The inbox belongs to the framework**: every cell carries an inbox of capacity `InboxCapacity` (8); the framework drains it into `Prompt.Stimuli` at the next Think gap, so the host maintains no channel map and runs no consumer pump
-- The one framework-read meaning of `KindNotice`: if its Payload is a tool name, calls to that name are refused this round before the gate even sees them (`Prompt.Inhibit`); a notice never starts a loop itself, and everything else it carries is the host's own convention
-- **Delegation is a return value, not a Fire call**: a tool returns `Effect{Send: &Signal{To, Skill, Payload}}`; the framework mints `ID`/`From`/`Kind`/`Status=submitted`, delivers through `Organs.Colony` and suspends that call on the same Session path `WaitInput` uses. An undeliverable request never suspends — its error is that call's tool feedback (resistance is feedback)
-- **The answer is the framework's debt too**: an invocation that served a request (one carrying `ID`/`From`) replies to the requester when it ends, with its final output as the payload and the state computed by `TaskOutcome` from how the loop terminated. That gives each of the six `TaskStatus` values exactly one writer: `Submitted` = the request going out, `Working` = the request drained into a round, and `NeedsInput`/`Completed`/`Failed`/`Cancelled` = the terminal mapping (a consumer that abandons the iterator invents no state and sends no answer). A cell with no Colony that owed an answer reports it through `OnError` instead of dropping it
-- **Pairing is the kernel's, continuation is the host's**: a reply landing in the sender's inbox is matched by `ReplyTo` to the round that delegated and queued; the host reads `agent.Resumptions()` (a snapshot — reading does not consume), calls `Resume(r.Session, string(r.Response))`, then `Ack(r.SignalID)`. One task may report `needs-input` before it reports `completed`; both pair against the same delegation
-- **Conduction floor `DirectConfig{Floor}` (host-injected; 0 switches gating off)**: an edge weighing less refuses `Fire` outright (`ErrWeakSynapse`) while staying in the graph — still linkable, still Reinforce-able back over the line, carrying nothing meanwhile. `Prune`'s `weightFloor` is the elimination threshold; the two are never merged because their consequences differ (traffic stopped vs. connection deleted)
-- **The graph keeps its own moments**: every successful delivery writes `Fired++` and `Spiked = now` in one step, so `STDPFrom(ctx, s, pre, post, params)` pairs spikes from graph state alone (a firing cell is observable here only through what it sent) and the host carries no clock; `Edges` exports both, so a restored snapshot remembers them
-- **Routing by capability is a host broadcast, not a delegation**: `NewSkillIndex(agents...)` indexes the same projection the Agent Card publishes (`Methods` → skills); `TargetsFor(skill)` answers "who can do X", and `FanOut(ctx, syn, sig)` fires at each target and **reports per target** (the delivered list plus one wrapped error per refusal, joined) — a capability may match zero, one or many cells, so it has no return path; a round that wants an answer delegates with `Effect.Send` instead (where `Signal.Skill` is content, not an address)
-- Real routing (channel/HTTP/Redis/gRPC) is host-chosen; `Colony` is only the `Fire` subset of `Synapse`, and a host tool may still call `Fire` directly for side-channel messages (resistance flows back as `EventToolResult` feedback, never a hard stop)
-- Synapse errors (`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`/`ErrWeakSynapse`) are re-exported at the api layer, along with `Edge` (now carrying `Spiked`) and `DirectConfig`
-- **Persistence round-trip**: export the whole graph via `Edges(ctx, "")` at
-  runtime, serialize it host-side; on restart deserialize and inject via
-  `NewDirect(DirectConfig{Resolver: r, Initial: restored})`. Learning rules
-  (Hebbian/STDP) are host-side — the framework stores state, never decides
-
-**Flat multi-agent model**: one Agent = one kernel; the host owns all
-instances. Sub-agents are created inside host Effector tools
-(`New → Stimulate`), transparent to the main loop.
+**Flat model**: one `Agent` = one kernel, and the host owns every instance. Sub-agents are
+created inside host Effector tools (`New(bp) → Stimulate → consume the stream`), transparent to
+the main loop; if A must wait for B, make B a tool of A. One `Blueprint` can `New` many times,
+but each instance shares its `Organs.Context` slice and `Hooks` closures, so a second agent
+overrides them per instance (see [reference-host.md](reference-host.md) Step 8).
 
 ### 7.3 Multi-agent state visibility: the host-side trio
 
@@ -785,9 +713,8 @@ type StreamHub struct {
 ```
 
 ```go
-// taskView is the host's own task projection. The framework's meowire.TaskStatus
-// strings live only on cross-agent Signal.Status (six states, one writer each) and
-// are not this local observation.
+// taskView is the host's own task projection: the framework keeps no inter-agent task
+// lifecycle — the states here are written by the host's own hooks and tools.
 type taskView struct {
 	State    string
 	LastText string

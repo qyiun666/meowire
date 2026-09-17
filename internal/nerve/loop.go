@@ -65,7 +65,6 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
-	lc.Requests = slices.Clone(sess.requests)
 	// A tool wait consumes the response as the pending tool's structured result
 	// (rendering is the host's call). A pause injects nothing: the loop just
 	// continues. Both membrane asks resolve through the tri-state grammar below.
@@ -121,19 +120,16 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 }
 
 // cycleGuarantees returns the deferred cleanup shared by Cycle and Resume:
-// answers to served peer requests, Remember, OnCycleEnd and AfterStimulate are
-// guaranteed exactly once per invocation — on normal completion, error path,
-// suspension, or early consumer stop (yield=false). Answers go first so the
-// memory organ and the hooks observe the same terminal the requester does.
-// Remember runs next so the organ sees the same terminal the hooks do and its
-// own failure cannot rewrite it. AfterStimulate is
+// Remember, OnCycleEnd and AfterStimulate are guaranteed exactly once per
+// invocation — on normal completion, error path, suspension, or early consumer
+// stop (yield=false). Remember runs first so the organ sees the same terminal
+// the hooks do and its own failure cannot rewrite it. AfterStimulate is
 // protected from an OnCycleEnd panic via a nested defer. finalOutput is
 // dereferenced at cleanup time.
 func cycleGuarantees(ctx context.Context, lc *LoopContext, finalOutput *string) func() {
 	return func() {
 		defer func() { lc.Hooks.AfterStimulate(ctx, *finalOutput) }()
 		lc.endWith(OutcomeAborted) // no terminal reached: consumer stopped early
-		lc.answer(ctx, *finalOutput)
 		lc.remember(ctx, *finalOutput)
 		lc.Hooks.OnCycleEnd(ctx, *finalOutput, lc.outcome)
 	}
@@ -297,11 +293,11 @@ func (b *actBatch) think() (*Decision, bool) {
 	return dec, true
 }
 
-// prepare reads the three inbound tracks a round starts from, before its prompt
-// is assembled: the regulator trims what accumulated, memory fills this round's
-// recall, and the inbox yields what the colony sent since the last Think. Doing
-// all three here is what lets the BeforeThink hook see (and rewrite) the round
-// as the Thinker will. It returns false when a failing recall ends the cycle.
+// prepare reads the two tracks a round starts from before its prompt is
+// assembled: the regulator trims what accumulated, and memory fills this round's
+// recall. Doing both here is what lets the BeforeThink hook see (and rewrite)
+// the round as the Thinker will. It returns false when a failing recall ends the
+// cycle.
 func (b *actBatch) prepare() bool {
 	lc := b.lc
 	lc.metabolize()
@@ -309,6 +305,5 @@ func (b *actBatch) prepare() bool {
 		emitError(b.ctx, lc, b.yield, err)
 		return false
 	}
-	lc.ingest()
 	return true
 }
