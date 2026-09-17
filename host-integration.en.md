@@ -395,16 +395,17 @@ this agent. See [protocols.md](protocols.md) §2.
 ### 5.3 Composite view: `BuildComposite` (static assembly × live synapses, one picture)
 
 ```go
-colony := meowire.NewDirect(resolver) // host-domain Synapse (plastic synapse graph)
+colony := meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}) // host-domain Synapse (plastic synapse graph)
 // ...runtime Link/Fire/Reinforce...
 
 text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII: internal nodes/slots + external agents/synapses
 snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON: machine-readable snapshot
 ```
 
-- Internal subgraph: static assembly (12 data nodes + 18 slot edges); external subgraph:
-  live synaptic edges (weight + delivery count)
-- Weak synapses (weight < 0.3) are flagged `! weak` for periodic `Prune` review
+- Internal subgraph: static assembly (data-object nodes + slot edges, blueprint ×
+  assembly); external subgraph: live synaptic edges (weight + delivery count + last conduct time)
+- Edges below the graph's own conduction floor (`DirectConfig{Floor}`) are flagged
+  `! below floor` for `Prune` review; a graph with no floor flags nothing
 - View unified, data separate: internal assembly and external connections store
   independently, merged only at render time
 - Persist `RenderCompositeJSON` snapshots for a unified observability view of the whole colony
@@ -645,13 +646,14 @@ type Edge struct {
     To     string
     Weight float64 // synaptic strength (host learning rules read/write)
     Fired  int64   // cumulative successful deliveries (host statistics)
+    Spiked int64   // last successful conduct, Unix nanoseconds (0 = never)
 }
 
 type Synapse interface {
     Link(ctx, from, to string, weight float64) error // synaptogenesis (idempotent overwrite, clamp ≥ 0)
     Unlink(ctx, from, to string) error               // synapse elimination (missing → ErrNotLinked)
     Reinforce(ctx, from, to string, delta float64) error // LTP/LTD (result clamp ≥ 0)
-    Fire(ctx, sig Signal) error                      // signal delivery (success increments Fired)
+    Fire(ctx, sig Signal) error                      // delivery (weight below Floor → ErrWeakSynapse; a success writes Fired++ and Spiked together)
     Edges(ctx, from string) ([]Edge, error)          // out-edge / whole-graph snapshot (persistence primitive)
 }
 ```
@@ -659,7 +661,7 @@ type Synapse interface {
 - `SignalKind`: `KindStimulus` (a request carrying `ID`/`From` is a task, and a task gets an answer) / `KindResponse` (the answer, `ReplyTo` names the request) / `KindNotice` (side-channel notice, runs no DecisionLoop)
 - **Assembly order (a colony is circular)**: the routing table names the agents while each agent carries that table, so build the graph first, create the members, then hand it the table:
   ```go
-  syn := meowire.NewDirect(nil)                      // reference graph, no resolver yet
+  syn := meowire.NewDirect(meowire.DirectConfig{})   // reference graph, no resolver yet
   a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
   b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
   r, _ := meowire.Resolve(a, b)                      // ID → each cell's own inbox (duplicate IDs refused)
@@ -671,12 +673,15 @@ type Synapse interface {
 - **Delegation is a return value, not a Fire call**: a tool returns `Effect{Send: &Signal{To, Skill, Payload}}`; the framework mints `ID`/`From`/`Kind`/`Status=submitted`, delivers through `Organs.Colony` and suspends that call on the same Session path `WaitInput` uses. An undeliverable request never suspends — its error is that call's tool feedback (resistance is feedback)
 - **The answer is the framework's debt too**: an invocation that served a request (one carrying `ID`/`From`) replies to the requester when it ends, with its final output as the payload and the state computed by `TaskOutcome` from how the loop terminated. That gives each of the six `TaskStatus` values exactly one writer: `Submitted` = the request going out, `Working` = the request drained into a round, and `NeedsInput`/`Completed`/`Failed`/`Cancelled` = the terminal mapping (a consumer that abandons the iterator invents no state and sends no answer). A cell with no Colony that owed an answer reports it through `OnError` instead of dropping it
 - **Pairing is the kernel's, continuation is the host's**: a reply landing in the sender's inbox is matched by `ReplyTo` to the round that delegated and queued; the host reads `agent.Resumptions()` (a snapshot — reading does not consume), calls `Resume(r.Session, string(r.Response))`, then `Ack(r.SignalID)`. One task may report `needs-input` before it reports `completed`; both pair against the same delegation
+- **Conduction floor `DirectConfig{Floor}` (host-injected; 0 switches gating off)**: an edge weighing less refuses `Fire` outright (`ErrWeakSynapse`) while staying in the graph — still linkable, still Reinforce-able back over the line, carrying nothing meanwhile. `Prune`'s `weightFloor` is the elimination threshold; the two are never merged because their consequences differ (traffic stopped vs. connection deleted)
+- **The graph keeps its own moments**: every successful delivery writes `Fired++` and `Spiked = now` in one step, so `STDPFrom(ctx, s, pre, post, params)` pairs spikes from graph state alone (a firing cell is observable here only through what it sent) and the host carries no clock; `Edges` exports both, so a restored snapshot remembers them
+- **Routing by capability is a host broadcast, not a delegation**: `NewSkillIndex(agents...)` indexes the same projection the Agent Card publishes (`Methods` → skills); `TargetsFor(skill)` answers "who can do X", and `FanOut(ctx, syn, sig)` fires at each target and **reports per target** (the delivered list plus one wrapped error per refusal, joined) — a capability may match zero, one or many cells, so it has no return path; a round that wants an answer delegates with `Effect.Send` instead (where `Signal.Skill` is content, not an address)
 - Real routing (channel/HTTP/Redis/gRPC) is host-chosen; `Colony` is only the `Fire` subset of `Synapse`, and a host tool may still call `Fire` directly for side-channel messages (resistance flows back as `EventToolResult` feedback, never a hard stop)
-- Synapse errors (`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`) are re-exported at the api layer; `Edge` re-exported too
+- Synapse errors (`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`/`ErrWeakSynapse`) are re-exported at the api layer, along with `Edge` (now carrying `Spiked`) and `DirectConfig`
 - **Persistence round-trip**: export the whole graph via `Edges(ctx, "")` at
   runtime, serialize it host-side; on restart deserialize and inject via
-  `NewDirect(resolver, restored...)`. Learning rules (Hebbian/STDP) are
-  host-side — the framework stores state, never decides
+  `NewDirect(DirectConfig{Resolver: r, Initial: restored})`. Learning rules
+  (Hebbian/STDP) are host-side — the framework stores state, never decides
 
 **Flat multi-agent model**: one Agent = one kernel; the host owns all
 instances. Sub-agents are created inside host Effector tools

@@ -26,7 +26,7 @@ func fakeResolver(inboxes map[string]chan nerve.Signal) Resolver {
 func TestFireDelivered(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 1)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestFireDelivered(t *testing.T) {
 func TestFireCarriesTaskStatus(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 1)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestFireCarriesTaskStatus(t *testing.T) {
 
 // TestFireUnlinked verifies Fire on an unlinked direction returns ErrNotLinked.
 func TestFireUnlinked(t *testing.T) {
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{})})
 	sig := nerve.Signal{ID: "s", From: "a", To: "b", Kind: nerve.KindNotice}
 	if err := d.Fire(context.Background(), sig); !errors.Is(err, ErrNotLinked) {
 		t.Fatalf("err = %v, want ErrNotLinked", err)
@@ -84,7 +84,7 @@ func TestFireUnlinked(t *testing.T) {
 
 // TestFireNoTarget verifies Fire returns ErrNoTarget when linked but the target is unknown.
 func TestFireNoTarget(t *testing.T) {
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{})})
 	if err := d.Link(context.Background(), "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -96,9 +96,9 @@ func TestFireNoTarget(t *testing.T) {
 
 // TestFireClosedTarget verifies a closed target (resolver returns false) yields ErrNoTarget, never a silent drop.
 func TestFireClosedTarget(t *testing.T) {
-	d := NewDirect(func(id string) (chan<- nerve.Signal, bool) {
+	d := NewDirect(DirectConfig{Resolver: func(id string) (chan<- nerve.Signal, bool) {
 		return nil, false // resolver rejects a closed Cell
-	})
+	}})
 	if err := d.Link(context.Background(), "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestFireTargetBusy(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 1) // buffer 1, fill it first
 	inbox <- nerve.Signal{ID: "occupied"}
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestFireTargetBusy(t *testing.T) {
 func TestFireCtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	inbox := make(chan nerve.Signal, 1)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestFireCtxCancel(t *testing.T) {
 // TestSetResolver verifies Fire fails without a resolver and succeeds after SetResolver injects one.
 func TestSetResolver(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil) // resolver injected later at assembly
+	d := NewDirect(DirectConfig{}) // resolver injected later at assembly
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -184,7 +184,7 @@ func conducts(t *testing.T, d *Direct, from, to string) bool {
 // snapshot and that the connection is directed.
 func TestLinkShowsInSnapshot(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{})})
 
 	if conducts(t, d, "a", "b") {
 		t.Fatal("a->b should not be connected initially")
@@ -214,7 +214,7 @@ func findEdge(edges []Edge, from, to string) (Edge, bool) {
 // re-Link (idempotent), and clamps negative weights to 0.
 func TestLinkWeightAndClamp(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 2.5); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestLinkWeightAndClamp(t *testing.T) {
 // ErrNotLinked; empty rows are dropped.
 func TestUnlinkRemoves(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestUnlinkRemoves(t *testing.T) {
 // (LTD), the result clamps at 0, and a missing connection errors.
 func TestReinforceAdjusts(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestReinforceAdjusts(t *testing.T) {
 func TestFireIncrementsFired(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 3)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestFireIncrementsFired(t *testing.T) {
 // leak back; unknown from yields an empty snapshot, not an error.
 func TestEdgesSnapshotIsolated(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -333,12 +333,12 @@ func TestEdgesSnapshotIsolated(t *testing.T) {
 	}
 }
 
-// TestSnapshotRoundTrip: Edges(全图) → NewDirect(initial) → Edges(全图) is
-// edge-equivalent including Weight and Fired — the persistence loop.
+// TestSnapshotRoundTrip: Edges(全图) → NewDirect(cfg with Initial) → Edges(全图)
+// is edge-equivalent including Weight, Fired and Spiked — the persistence loop.
 func TestSnapshotRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 2)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	_ = d.Link(ctx, "a", "b", 1.0)
 	_ = d.Link(ctx, "a", "c", 0.5)
 	_ = d.Fire(ctx, nerve.Signal{ID: "s1", From: "a", To: "b", Kind: nerve.KindNotice})
@@ -352,7 +352,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("exported edges = %d, want 2", len(snap))
 	}
 
-	d2 := NewDirect(nil, snap...)
+	d2 := NewDirect(DirectConfig{Initial: snap})
 	restored, err := d2.Edges(ctx, "")
 	if err != nil {
 		t.Fatalf("restore export: %v", err)
@@ -371,17 +371,17 @@ func TestSnapshotRoundTrip(t *testing.T) {
 // TestNewDirectInitialEdges: constructor-injected edges restore the graph;
 // negative weights clamp at 0.
 func TestNewDirectInitialEdges(t *testing.T) {
-	d := NewDirect(nil,
-		Edge{From: "a", To: "b", Weight: 1.5, Fired: 7},
-		Edge{From: "a", To: "c", Weight: -1},
-	)
+	d := NewDirect(DirectConfig{Initial: []Edge{
+		{From: "a", To: "b", Weight: 1.5, Fired: 7, Spiked: 42},
+		{From: "a", To: "c", Weight: -1},
+	}})
 	if !conducts(t, d, "a", "b") || !conducts(t, d, "a", "c") {
 		t.Fatal("initial edges should be connected")
 	}
 	edges, _ := d.Edges(context.Background(), "a")
 	b, _ := findEdge(edges, "a", "b")
-	if b.Weight != 1.5 || b.Fired != 7 {
-		t.Fatalf("a->b = %+v, want weight 1.5 fired 7", b)
+	if b.Weight != 1.5 || b.Fired != 7 || b.Spiked != 42 {
+		t.Fatalf("a->b = %+v, want weight 1.5 fired 7 spiked 42", b)
 	}
 	c, _ := findEdge(edges, "a", "c")
 	if c.Weight != 0.0 {
@@ -394,7 +394,7 @@ func TestNewDirectInitialEdges(t *testing.T) {
 func TestPlasticConcurrent(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 8)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	var wg sync.WaitGroup
 	for i := range 8 {
 		wg.Add(1)

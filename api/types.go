@@ -74,13 +74,14 @@ func UnmarshalSession(data []byte) (Session, error) {
 
 // Inter-agent messaging (host reference).
 type (
-	Synapse     = synapse.Synapse
-	Edge        = synapse.Edge
-	Resolver    = synapse.Resolver
-	Signal      = nerve.Signal
-	SignalKind  = nerve.SignalKind
-	TaskStatus  = nerve.TaskStatus
-	Correlation = nerve.Correlation
+	Synapse      = synapse.Synapse
+	Edge         = synapse.Edge
+	Resolver     = synapse.Resolver
+	DirectConfig = synapse.DirectConfig
+	Signal       = nerve.Signal
+	SignalKind   = nerve.SignalKind
+	TaskStatus   = nerve.TaskStatus
+	Correlation  = nerve.Correlation
 )
 
 // Colony is the delivery organ a cell sends peer signals through: the subset of
@@ -97,11 +98,13 @@ const InboxCapacity = nerve.InboxCapacity
 
 // NewDirect creates the reference Direct synapse (connection-table with
 // Resolver-based delivery). The concrete type is returned so the assembly
-// order a colony requires stays available: r may be nil until SetResolver
-// injects the table built by Resolve over agents that already carry this
-// graph. initial restores a previously exported graph (host persistence
-// round-trip).
-func NewDirect(r Resolver, initial ...Edge) *synapse.Direct { return synapse.NewDirect(r, initial...) }
+// order a colony requires stays available: cfg.Resolver may be nil until
+// SetResolver injects the table built by Resolve over agents that already
+// carry this graph. cfg.Initial restores a previously exported graph (host
+// persistence round-trip); cfg.Floor is the conduction threshold a host
+// injects — a connection weighing less refuses to carry a signal
+// (ErrWeakSynapse) — and zero switches gating off.
+func NewDirect(cfg DirectConfig) *synapse.Direct { return synapse.NewDirect(cfg) }
 
 // STDPParams tunes the reference STDP learning rule (host-side learning;
 // the framework never applies learning rules itself).
@@ -112,6 +115,7 @@ type STDPParams = synapse.STDPParams
 var (
 	Hebbian     = synapse.Hebbian
 	STDP        = synapse.STDP
+	STDPFrom    = synapse.STDPFrom
 	Prune       = synapse.Prune
 	HebbianFire = synapse.HebbianFire
 )

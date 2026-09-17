@@ -31,7 +31,7 @@ func TestColonyDeliversWithoutHostPump(t *testing.T) {
 	// A colony is circular: the routing table names the agents while each agent
 	// carries the table. The reference graph breaks the circle at assembly —
 	// created with no resolver, injected once the members exist.
-	syn := meowire.NewDirect(nil)
+	syn := meowire.NewDirect(meowire.DirectConfig{})
 
 	agentA, err := testNew(colonyOrgans("a", meowire.Organs{
 		Colony: syn,
@@ -115,7 +115,7 @@ func colonyOrgans(id string, o meowire.Organs) meowire.Organs {
 // report a task state or pump a queue.
 func TestCrossCellChainWithoutHostCode(t *testing.T) {
 	ctx := context.Background()
-	syn := meowire.NewDirect(nil)
+	syn := meowire.NewDirect(meowire.DirectConfig{})
 
 	agentA, err := testNew(colonyOrgans("a", meowire.Organs{
 		Colony: syn,
@@ -287,13 +287,52 @@ func TestDelegationWithoutColonyIsFeedback(t *testing.T) {
 	}
 }
 
+// TestDelegationWithoutTargetIsFeedback: a send naming no target is refused
+// before the colony is asked, and above all does not suspend. Asking "whoever
+// can do X" is a host fan-out (SkillIndex.FanOut), not a delegation an answer
+// can return to — a round that waited on it would wait forever.
+func TestDelegationWithoutTargetIsFeedback(t *testing.T) {
+	agent, err := testNew(colonyOrgans("vague", meowire.Organs{
+		Think: testutil.Thinker{Fn: func(_ context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			if len(p.ToolResults) > 0 {
+				return &meowire.Decision{Text: "improvised"}, nil
+			}
+			return &meowire.Decision{Text: "asking", ToolCalls: []meowire.ToolCall{{ID: "c1", Name: "delegate"}}}, nil
+		}},
+		Act: testutil.Effector{Fn: func(_ context.Context, _ meowire.Action) (*meowire.Effect, error) {
+			return &meowire.Effect{Send: &meowire.Signal{Skill: "anything"}}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	defer agent.Close()
+
+	var failed string
+	for ev := range agent.Stimulate(context.Background(), "solve it") {
+		switch ev.Kind {
+		case meowire.EventWaitInput:
+			t.Fatal("an unaddressable delegation suspended the round")
+		case meowire.EventError:
+			t.Fatalf("a refused delegation must not end the cycle: %v", ev.Err)
+		case meowire.EventToolResult:
+			if ev.Effect != nil {
+				failed = ev.Effect.Err
+			}
+		}
+	}
+	if !strings.Contains(failed, "To") {
+		t.Fatalf("tool feedback = %q, want the missing target named", failed)
+	}
+}
+
 // TestUnanswerableRequestIsReported: a cell that was asked something but has no
 // way to answer says so out loud. The alternative — dropping the reply because
 // the organ is missing — would leave the requester waiting on a question nobody
 // admits to having received.
 func TestUnanswerableRequestIsReported(t *testing.T) {
 	ctx := context.Background()
-	syn := meowire.NewDirect(nil)
+	syn := meowire.NewDirect(meowire.DirectConfig{})
 
 	asker, err := testNew(colonyOrgans("asker", meowire.Organs{
 		Colony: syn,
@@ -411,7 +450,7 @@ func TestIdleAgentAppliesBackpressure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	syn := meowire.NewDirect(r)
+	syn := meowire.NewDirect(meowire.DirectConfig{Resolver: r})
 	if err := syn.Link(ctx, "sender", "listener", 1); err != nil {
 		t.Fatalf("Link: %v", err)
 	}

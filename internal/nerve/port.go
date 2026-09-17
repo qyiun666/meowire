@@ -149,10 +149,11 @@ type Effect struct {
 	// and delivers through its colony. A successful send suspends this call
 	// exactly like WaitInput does, and the reply arrives as the call's
 	// structured result once the host resumes it (see Agent.Resumptions). A
-	// send that cannot be delivered (no colony wired, busy or unknown target)
-	// never suspends: its error becomes this call's tool feedback, like any
-	// other resistance. WaitInput wins over Send when both are set; a second
-	// Send in the same round is refused rather than silently dropped.
+	// send that cannot be delivered (names no target, no colony wired, busy or
+	// unknown target) never suspends: its error becomes this call's tool
+	// feedback, like any other resistance. WaitInput wins over Send when both
+	// are set; a second Send in the same round is refused rather than silently
+	// dropped.
 	Send *Signal
 }
 

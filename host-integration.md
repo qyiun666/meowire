@@ -320,15 +320,15 @@ card, _ := meowire.AgentCard(organs) // JSON：name/description/skills
 ### 5.3 合成视图：`BuildComposite`（静态装配 × 动态突触，一张图）
 
 ```go
-colony := meowire.NewDirect(resolver) // 宿主域 Synapse（可塑突触图）
+colony := meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}) // 宿主域 Synapse（可塑突触图）
 // ...运行中 Link/Fire/Reinforce...
 
 text, _ := meowire.RenderComposite(ctx, organs, colony) // ASCII：内部节点/插槽边 + 外部 agent/突触边
 snap, _ := meowire.RenderCompositeJSON(ctx, organs, colony) // JSON：机器可读快照
 ```
 
-- 内部子图：静态装配（12 数据节点 + 18 插槽边），外部子图：实时突触边（权重 + 传递计数）
-- 弱突触（权重 < 0.3）标记 `! weak`，供宿主周期性 `Prune` 修剪审查
+- 内部子图：静态装配（数据对象节点 + 插槽边，来自蓝图 × 组装），外部子图：实时突触边（权重 + 传递计数 + 最近投递时刻）
+- 低于该图传导阈值（`DirectConfig{Floor}`）的边标记 `! below floor`，供宿主复查是否该 `Prune`；图没设阈值就一个都不标
 - 视图统一、数据分离：内部装配与外部连接各自存储，渲染时才合成
 - 宿主把 `RenderCompositeJSON` 快照持久化，即得整个 agent 群体的统一可观测性视图
 
@@ -488,13 +488,14 @@ type Edge struct {
     To     string
     Weight float64 // 突触强度（宿主学习规则读写）
     Fired  int64   // 累计成功传递次数（宿主统计）
+    Spiked int64   // 最近一次成功投递的时刻（Unix 纳秒，0 = 从未）
 }
 
 type Synapse interface {
     Link(ctx, from, to string, weight float64) error // 突触发生（幂等覆盖，clamp ≥ 0）
     Unlink(ctx, from, to string) error               // 突触消除（不存在 → ErrNotLinked）
     Reinforce(ctx, from, to string, delta float64) error // LTP/LTD（结果 clamp ≥ 0）
-    Fire(ctx, sig Signal) error                      // 信号传递（成功投递累计 Fired）
+    Fire(ctx, sig Signal) error                      // 信号传递（权重低于 Floor → ErrWeakSynapse；成功投递同次写入 Fired++ 与 Spiked）
     Edges(ctx, from string) ([]Edge, error)          // 出边/全图快照（持久化原语）
 }
 ```
@@ -502,7 +503,7 @@ type Synapse interface {
 - `SignalKind`：`KindStimulus`（带 `ID`/`From` 的请求 = 一次任务，会被答复）/`KindResponse`（答复，`ReplyTo` 指向被答信号）/`KindNotice`（旁路通知，不进决策循环）
 - **装配顺序（colony 是环形的）**：路由表要点 agent 的名字，agent 又得带上这张表投递，所以先建图、再装 agent、最后回填：
   ```go
-  syn := meowire.NewDirect(nil)                      // 参考实现，resolver 先空着
+  syn := meowire.NewDirect(meowire.DirectConfig{})   // 参考实现，resolver 先空着
   a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
   b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
   r, _ := meowire.Resolve(a, b)                      // ID → 各自收件箱（重复 ID 即拒）
@@ -514,9 +515,12 @@ type Synapse interface {
 - **委托 = 返回值，不是宿主调 Fire**：工具返回 `Effect{Send: &Signal{To, Skill, Payload}}`，框架铸 `ID`/`From`/`Kind`/`Status=submitted`、经 `Organs.Colony` 投递、把该调用挂起（与 `WaitInput` 同一条 Session 路径）。投不出去不挂起，错误进工具反馈（阻力是反馈）
 - **答复也是框架的账**：一次调用如果服务过带 `ID`/`From` 的请求，它结束时必定向请求方回一条 `KindResponse`，载荷 = 该次调用的最终输出，状态由 `TaskOutcome` 从循环终点算出——因此六个 `TaskStatus` 各只有一个写入者：`Submitted`=发出的请求、`Working`=被排空进本轮的请求、`NeedsInput`/`Completed`/`Failed`/`Cancelled`=终点映射（消费者中途放弃迭代器**不编状态、也不回话**）；无 Colony 可答的 agent 经 `OnError` 报出，不静默丢
 - **配对归内核，续跑归宿主**：回信落在发起方收件箱后由框架按 `ReplyTo` 配给它挂起的那一轮，进 `agent.Resumptions()`（快照式，读一次不影响下次）；宿主 `Resume(r.Session, string(r.Response))` 续跑、`Ack(r.SignalID)` 销账。一个任务可先报 `needs-input` 再报 `completed`，两条都配在同一次委托上
+- **传导阈值 `DirectConfig{Floor}`（宿主注入，0 = 关闭门控）**：权重低于阈值的边 `Fire` 直接拒（`ErrWeakSynapse`），边仍在图里、仍可被 Reinforce 回来，只是不承载流量；`Prune` 的 `weightFloor` 才是删边阈值——两个阈值不合并，因为后果不同（断流 vs 消除）
+- **图自带时刻**：每次成功投递在同一次写入里 `Fired++` 且 `Spiked=now`，于是 `STDPFrom(ctx, s, pre, post, params)` 只读图就能拿到两端的最近发放时间（一个正在发放的 cell 在这里只以「它发过什么」可见），宿主不必自带时钟；`Edges` 导出的快照把两个值一起带走，恢复即带回
+- **按能力路由是宿主的广播，不是委托**：`NewSkillIndex(agents...)` 用与 Agent Card 同一份投影（`Methods` → skills）建索引，`TargetsFor(skill)` 回答「谁会做 X」，`FanOut(ctx, syn, sig)` 逐个目标 `Fire` 并**分别报告**（`delivered` 名单 + 每个拒绝目标的包装错误，聚合返回）——一个能力可能对应零个、一个、多个 cell，所以它没有回程；要回程就用 `Effect.Send`（那时 `Signal.Skill` 只是内容）
 - 真正路由（channel/HTTP/Redis/gRPC）宿主自选；`Colony` 只是 `Synapse` 的 `Fire` 子集，旁路消息宿主仍可直接 `Fire`（阻力以 `EventToolResult` 反馈回循环，不硬停）
-- synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`）在 api 层 re-export；`Edge` 同步 re-export
-- **持久化往返**：运行期 `Edges(ctx, "")` 导出全图 → 宿主序列化存盘；下次启动反序列化 → `NewDirect(resolver, restored...)` 注入初始边。学习规则（赫布/STDP）宿主实现，框架只存状态不决策
+- synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`/`ErrWeakSynapse`）在 api 层 re-export；`Edge`（含 `Spiked`）与 `DirectConfig` 同步 re-export
+- **持久化往返**：运行期 `Edges(ctx, "")` 导出全图 → 宿主序列化存盘；下次启动反序列化 → `NewDirect(DirectConfig{Resolver: r, Initial: restored})` 注入初始边。学习规则（赫布/STDP）宿主实现，框架只存状态不决策
 
 **扁平多 agent 模型**：一个 Agent = 一个内核；宿主管理多个实例。子 agent 在宿主 Effector 工具内 `New → Stimulate`，对主循环透明。
 

@@ -12,12 +12,16 @@ import (
 
 // Edge is one synaptic edge: a from→to connection with its strength.
 // Weight is the synaptic strength (read/written by host learning rules);
-// Fired is the cumulative successful delivery count (host statistics).
+// Fired is the cumulative successful delivery count (host statistics);
+// Spiked is the last moment the connection conducted (Unix nanoseconds,
+// 0 = never), which is what lets a learning rule read pairing times off
+// the graph instead of asking the host to carry them.
 type Edge struct {
 	From   string
 	To     string
 	Weight float64 // synaptic strength (host learning rules read/write)
 	Fired  int64   // cumulative successful deliveries (host statistics)
+	Spiked int64   // last conduct time in Unix nanoseconds (0 = never)
 }
 
 // Synapse is the inter-agent connectivity contract: a plastic synapse graph.

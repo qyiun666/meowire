@@ -41,12 +41,14 @@ var repoDirs = []string{
 //	Connectome  static data table — its length is the blueprint, not logic
 //	Hebbian     host-visible learning-rule signature: (s, from, to, rate)
 //	STDP        host-visible learning-rule signature: (s, from, to, dt, params)
+//	STDPFrom    host-visible learning-rule signature: (s, pre, post, params)
 //	Resume      host-visible resume entry point: ctx, loop context, session,
 //	            response and the consumer's yield
 var complexityExempt = map[string]bool{
 	"Connectome": true,
 	"Hebbian":    true,
 	"STDP":       true,
+	"STDPFrom":   true,
 	"Resume":     true,
 }
 

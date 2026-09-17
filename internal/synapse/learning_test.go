@@ -34,7 +34,7 @@ func weightOf(t *testing.T, d *Direct, from, to string) float64 {
 // by the learning rate.
 func TestHebbianReinforces(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestHebbianReinforces(t *testing.T) {
 // (LTP), dt < 0 weakens (LTD), |dt| far outside tau changes little.
 func TestSTDPDirectionAndMagnitude(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestSTDPDirectionAndMagnitude(t *testing.T) {
 // TestSTDPZeroDelta: simultaneous spikes produce no change.
 func TestSTDPZeroDelta(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestSTDPZeroDelta(t *testing.T) {
 // TestSTDPParamValidation: non-positive tau or negative magnitudes error.
 func TestSTDPParamValidation(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestSTDPParamValidation(t *testing.T) {
 // TestSTDPMissingConnection: STDP on an unlinked pair returns ErrNotLinked.
 func TestSTDPMissingConnection(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	p := STDPParams{APlus: 0.5, AMinus: 0.4, Tau: 20 * time.Millisecond}
 	if err := STDP(ctx, d, "a", "b", time.Millisecond, p); !errors.Is(err, ErrNotLinked) {
 		t.Fatalf("err = %v, want ErrNotLinked", err)
@@ -128,7 +128,7 @@ func TestSTDPMissingConnection(t *testing.T) {
 // strong edges survive; the count is exact.
 func TestPruneRemovesWeak(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil)
+	d := NewDirect(DirectConfig{})
 	// weak + never fired → prune
 	if err := d.Link(ctx, "a", "b", 0.1); err != nil {
 		t.Fatalf("link: %v", err)
@@ -182,7 +182,7 @@ func TestPruneRemovesWeak(t *testing.T) {
 func TestHebbianFireLearnsOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	inbox := make(chan nerve.Signal, 1)
-	d := NewDirect(fakeResolver(map[string]chan nerve.Signal{"b": inbox}))
+	d := NewDirect(DirectConfig{Resolver: fakeResolver(map[string]chan nerve.Signal{"b": inbox})})
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestHebbianFireLearnsOnSuccess(t *testing.T) {
 // untouched (no learning on failure).
 func TestHebbianFireNoLearningOnFailure(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil) // no resolver → delivery fails
+	d := NewDirect(DirectConfig{}) // no resolver → delivery fails
 	if err := d.Link(ctx, "a", "b", 1.0); err != nil {
 		t.Fatalf("link: %v", err)
 	}

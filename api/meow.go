@@ -110,6 +110,17 @@ func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.
 // that was left empty.
 func (a *Agent) ID() string { return a.cell.ID }
 
+// Skills reports the capability names this agent declares — the same Methods
+// projection AgentCard publishes, and what NewSkillIndex routes by. Fixed at
+// assembly (a declared capability set is not a swappable port).
+func (a *Agent) Skills() []string {
+	names := make([]string, 0, len(a.cell.Methods))
+	for _, m := range a.cell.Methods {
+		names = append(names, m.Name)
+	}
+	return names
+}
+
 // UpdateConfig swaps the scalar loop configuration wholesale (zero-value
 // semantics identical to New). It takes effect at the next Stimulate/Resume
 // — an in-flight loop keeps the values it started with. Every call records a

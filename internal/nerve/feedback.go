@@ -102,6 +102,8 @@ func (b *actBatch) delegate(eff *Effect) {
 	sig := *eff.Send
 	eff.Send = nil
 	switch {
+	case sig.To == "":
+		eff.Err = "a delegation names one target (Signal.To)"
 	case b.lc.Send == nil:
 		eff.Err = "no Colony organ: cannot ask " + sig.To
 	case b.lc.awaiting != "":

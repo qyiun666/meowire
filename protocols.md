@@ -61,8 +61,8 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，宿主管实�
   被委托方在自己的终点回一条 `KindResponse`（载荷 = 最终输出，状态 = `TaskOutcome`）。
   回信落进发起方收件箱，框架按 `ReplyTo` 配对到那次挂起，宿主 `agent.Resumptions()` →
   `Resume` → `Ack` 决定何时继续（**配对归内核，续跑归宿主**）。路由表由
-  `Resolve(agents...)` 从 agent 列表建出，宿主不建 channel、不搬信号；目标忙/未知 agent
-  以 `EventToolResult` 回流（resistance is feedback）。
+  `Resolve(agents...)` 从 agent 列表建出，宿主不建 channel、不搬信号；目标忙/未知 agent/
+  权重低于传导阈值的边（`ErrWeakSynapse`）以 `EventToolResult` 回流（resistance is feedback）。
 - **能力发现**：A2A 用 `Agent Card`（`/.well-known/agent-card.json`）
   声明能力。meowire 提供 `AgentCard(Organs)`：把 `ID`/`Identity`/
   `Methods`（gene projection，只描述不消费）渲染为 A2A 风格 JSON 卡片，
@@ -70,6 +70,10 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，宿主管实�
   ```json
   {"name": "agent", "description": "...", "skills": [{"name": "...", "description": "..."}]}
   ```
+
+  同一份投影也是路由的键：`NewSkillIndex(agents...)` 按 skill 名索引整个 colony，
+  `TargetsFor(skill)` 回答「谁会做 X」，`FanOut` 逐个投递并**逐目标报告**。一个能力
+  可对应零到多个 agent，所以 fan-out 没有回程——需要被答复的任务走 `Effect.Send`。
 - **任务状态机**：A2A 定义 submitted → working → needs-input →
   completed / failed / cancelled 六态。meowire 由**框架写入全部六态**，每个状态
   只有一个生产者：`Submitted`=委托信号发出时（`Effect.Send`）、`Working`=该请求被排空进

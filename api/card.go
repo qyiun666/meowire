@@ -32,12 +32,10 @@ type skillCard struct {
 	Output      string `json:"output,omitempty"`
 }
 
-// AgentCard renders the host assembly as an A2A-style capability card
-// (indented JSON): the agent ID, its identity description, and the built-in
-// Methods projection as the skills list. Hosts publish the output at
-// /.well-known/agent-card.json so other agents can discover this agent's
-// capabilities without calling it.
-func AgentCard(o Organs) ([]byte, error) {
+// cardOf projects an assembly into its capability card. It is the single
+// source of what counts as a skill: the Methods projection, read the same way
+// by Agent.Skills and by the skill routing index.
+func cardOf(o Organs) agentCard {
 	card := agentCard{
 		Name:        cmp.Or(o.ID, "agent"),
 		Description: o.Identity,
@@ -51,5 +49,14 @@ func AgentCard(o Organs) ([]byte, error) {
 			Output:      m.Output,
 		})
 	}
-	return json.MarshalIndent(card, "", "  ")
+	return card
+}
+
+// AgentCard renders the host assembly as an A2A-style capability card
+// (indented JSON): the agent ID, its identity description, and the built-in
+// Methods projection as the skills list. Hosts publish the output at
+// /.well-known/agent-card.json so other agents can discover this agent's
+// capabilities without calling it.
+func AgentCard(o Organs) ([]byte, error) {
+	return json.MarshalIndent(cardOf(o), "", "  ")
 }

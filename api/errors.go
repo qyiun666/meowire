@@ -19,7 +19,8 @@ var ErrMaxRounds = nerve.ErrMaxRounds
 
 // Synapse errors (defined in synapse, re-exported for facade users).
 var (
-	ErrNoTarget   = synapse.ErrNoTarget
-	ErrNotLinked  = synapse.ErrNotLinked
-	ErrTargetBusy = synapse.ErrTargetBusy
+	ErrNoTarget    = synapse.ErrNoTarget
+	ErrNotLinked   = synapse.ErrNotLinked
+	ErrTargetBusy  = synapse.ErrTargetBusy
+	ErrWeakSynapse = synapse.ErrWeakSynapse
 )

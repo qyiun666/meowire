@@ -31,6 +31,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consuming it, and `Agent.Ack(signalID)` ends the delegation. **The framework never resumes on its
   own** — matching a reply to the round that asked is wiring, deciding when that round may continue
   is not.
+- **A connection can exist and still refuse to conduct** — `DirectConfig{Floor}` is a
+  host-injected conduction threshold: an edge weighing less returns `ErrWeakSynapse` before the
+  target is resolved, so a refused signal is neither delivered nor counted, while the edge stays in
+  the graph and can be Reinforced back over the line. Zero switches gating off — strength alone
+  never decides connectivity. It is deliberately not `Prune`'s `weightFloor`: this threshold stops
+  traffic, that one deletes the connection, and merging them would let a number with two different
+  consequences be tuned as one.
+- **The graph keeps its own moments** — every successful delivery writes `Fired++` and
+  `Edge.Spiked` (Unix nanoseconds) in one step, and the `Edges` snapshot carries both, so a restored
+  colony resumes with its timing intact. `STDPFrom(ctx, s, pre, post, params)` derives `dt` from
+  those stamps (a cell's spike time is the last moment it conducted) instead of asking the host for
+  a clock; a side that never conducted is reported as an error rather than read as a zero difference.
+- **Routing by declared capability** — `Agent.Skills()` reports the names an agent declares through
+  the same `Methods` projection `AgentCard` publishes, and `NewSkillIndex(agents...)` indexes a
+  colony by them: `TargetsFor(skill)` answers "who can do X", `FanOut` fires at each of them and
+  reports **per target** (delivered list plus one wrapped error per refusal, joined), so a partial
+  delivery is visible. A skillless signal, a signal that also names a target, and a fan-out that can
+  reach nobody but the sender are errors. A capability may match many cells, so a fan-out has no
+  answer path; a round that wants one delegates (`Effect.Send`), and a send naming no target is now
+  refused as tool feedback instead of being fired at the empty ID.
 - **Every task state has exactly one writer, and it is the framework** — the cell opens a task
   (`TaskSubmitted`), the inbound step marks each drained stimulus `TaskWorking`, and the four
   closing states all come from one mapping, `TaskOutcome(CycleOutcome, ctxErr)`. Each request an
@@ -96,12 +116,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table is built from its agents while each agent's Colony organ is that synapse, so the table can
   only be injected after construction; the concrete return keeps `SetResolver` reachable instead of
   adding a method to the interface that only one implementation can honour.
+- **`NewDirect` takes a `DirectConfig`** — `NewDirect(r, initial...)` becomes
+  `NewDirect(DirectConfig{Resolver: r, Floor: f, Initial: initial})`, at the facade as well as in
+  `internal/synapse`. **Breaking**: every call site changes, and the restored edges are a slice
+  rather than variadic arguments; `Floor` is the new conduction threshold (`0` = off).
+- **The composite view's weak-edge marker reads the graph instead of a constant** — the hard-coded
+  `0.3` is gone; `CompositeGraph` gains `Floor` (what that graph reports, 0 when it gates nothing)
+  and the ASCII marker becomes `! below floor (<floor>)`, rendered only for graphs that report a
+  threshold. A host router without one is no longer mislabelled.
 
 ### Fixed
 
 - **`OrganFilled` reported the output membrane as unwired** — `P5c Sandbox.Emit` was missing from
   the edges an assembled `Sandbox` fills, so a wiring diagram drawn from a live agent showed the
   egress gate as a hole the host had already closed.
+- **`STDP`'s comment contradicted its own branches** — it documented `dt = tPre − tPost` while the
+  LTP/LTD arms implement `dt = tPost − tPre` (pre firing first strengthens). The comment now states
+  the implemented convention, which is also what `STDPFrom` relies on to pair graph timestamps.
 
 ### Removed
 
@@ -138,9 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `size_test.go` enforces the complexity budget across the module (file
   ≤400 lines, function body ≤50, ≤4 parameters). The exemption list is closed
   and carries a reason per entry (`Connectome` is a data table,
-  `Resume`/`Hebbian`/`STDP` are host-visible signatures); `Replace` earned its
+  `Resume`/`Hebbian`/`STDP`/`STDPFrom` are host-visible signatures); `Replace` earned its
   exemption only until the slots became data-driven and has since been removed
   from it.
+- On the `api` side, one projection has one author: a skill *is* a `MethodSpec`, read through
+  `cardOf(Organs)` by `AgentCard` and through the same list by `Agent.Skills()`, so a peer a host can
+  discover is a peer the new `route.go` (`SkillIndex`/`FanOut`) can route to; the composite view asks
+  the graph for its own conduction floor instead of keeping a display constant of its own.
 - `api` package documentation and the oversized comments in `nerve`/`cell` were
   rewritten to the repository's current perspective; the slot table duplicated
   inside `cell.Replace`'s doc is gone (the blueprint in `nerve/wire.go` owns it).

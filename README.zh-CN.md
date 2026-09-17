@@ -40,12 +40,13 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
   （submitted/working/needs-input/completed/failed/cancelled），端到端追踪跨 agent 任务
 - **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Edges）+
-  参考学习规则 `Hebbian`/`STDP`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；
+  参考学习规则 `Hebbian`/`STDP`/`STDPFrom`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；每条边
+  还记住最近一次投递的时刻，所以 `STDPFrom` 只读图就能配对；宿主注入的 `Floor` 可以让一条边「存在但不承载流量」（`ErrWeakSynapse`）；
   持久化往返：`Edges` 导出 + `NewDirect` 恢复
 - **多 agent 接线零宿主管道** —— `Resolve(agents...)` 把每个 agent 的 ID 映射到它的 cell 本来就自有的
   收件箱（容量 `InboxCapacity`），建在其上的突触图无需宿主 channel 映射也能投递到正确神经元；每个
   cell 在 Think 间隙点自行排空收件箱写入 `Prompt.Stimuli`，`KindNotice` 若为一个工具名则本轮撤下它
-  （`Prompt.Inhibit`）——没有消费泵，在途 Act 也不被抢占
+  （`Prompt.Inhibit`）——没有消费泵，在途 Act 也不被抢占。能力卡的同一份投影就是路由索引：`NewSkillIndex(agents...)` 回答「谁会做 X」，`FanOut` 逐个投递并逐目标报告
 - **agent 间任务是原语，不是宿主代码** —— 工具返回 `Effect{Send: &Signal{To: …}}` 即完成委托：cell 铸信号 ID、盖 `submitted`、挂起该调用；服务方的调用在**自己的终点**回话，状态由 `TaskOutcome` 从循环终点算出（六个状态各一个写入者）。回信由框架配对进 `agent.Resumptions()`——框架绝不自行续跑，宿主 `Resume` 续上、`Ack` 销账
 - **统一合成视图** —— `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 把
   静态装配子图与实时突触图合并为一张图（视图统一、数据分离）

@@ -47,9 +47,11 @@ func TestBuildCompositeInternalOnly(t *testing.T) {
 // synapses; agent ids are deduplicated and sorted.
 func TestBuildCompositeWithSynapse(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil, Edge{From: "b", To: "c", Weight: 0.9, Fired: 2},
-		Edge{From: "a", To: "b", Weight: 1.5, Fired: 3},
-		Edge{From: "a", To: "b", Weight: 0.1, Fired: 0}) // duplicate from->to: last wins
+	d := NewDirect(DirectConfig{Initial: []Edge{
+		{From: "b", To: "c", Weight: 0.9, Fired: 2},
+		{From: "a", To: "b", Weight: 1.5, Fired: 3},
+		{From: "a", To: "b", Weight: 0.1, Fired: 0}, // duplicate from->to: last wins
+	}})
 	g, err := BuildComposite(ctx, fullOrgans(), d)
 	if err != nil {
 		t.Fatalf("BuildComposite: %v", err)
@@ -76,12 +78,15 @@ func TestBuildCompositeError(t *testing.T) {
 	}
 }
 
-// TestRenderComposite: ASCII output carries both subgraphs and flags weak
-// synapses.
+// TestRenderComposite: ASCII output carries both subgraphs, and flags exactly
+// the edges the graph itself would refuse to conduct.
 func TestRenderComposite(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil, Edge{From: "a", To: "b", Weight: 1.5, Fired: 3},
-		Edge{From: "b", To: "c", Weight: 0.1, Fired: 0})
+	initial := []Edge{
+		{From: "a", To: "b", Weight: 1.5, Fired: 3},
+		{From: "b", To: "c", Weight: 0.1, Fired: 0},
+	}
+	d := NewDirect(DirectConfig{Floor: 0.3, Initial: initial})
 	out, err := RenderComposite(ctx, fullOrgans(), d)
 	if err != nil {
 		t.Fatalf("RenderComposite: %v", err)
@@ -94,11 +99,19 @@ func TestRenderComposite(t *testing.T) {
 		"a  b  c",
 		"external synapses:",
 		"a -> b  w=1.500  fired=3",
-		"b -> c  w=0.100  fired=0  ! weak",
+		"b -> c  w=0.100  fired=0  ! below floor (0.300)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q", want)
 		}
+	}
+
+	ungated, err := RenderComposite(ctx, fullOrgans(), NewDirect(DirectConfig{Initial: initial}))
+	if err != nil {
+		t.Fatalf("RenderComposite (no floor): %v", err)
+	}
+	if strings.Contains(ungated, "! below floor") {
+		t.Error("a graph that gates nothing flagged an edge as weak")
 	}
 }
 
@@ -124,7 +137,7 @@ func TestRenderCompositeInternalOnly(t *testing.T) {
 // both subgraphs.
 func TestRenderCompositeJSON(t *testing.T) {
 	ctx := context.Background()
-	d := NewDirect(nil, Edge{From: "a", To: "b", Weight: 1.5, Fired: 3})
+	d := NewDirect(DirectConfig{Initial: []Edge{{From: "a", To: "b", Weight: 1.5, Fired: 3}}})
 	doc, err := RenderCompositeJSON(ctx, fullOrgans(), d)
 	if err != nil {
 		t.Fatalf("RenderCompositeJSON: %v", err)

@@ -27,7 +27,15 @@ type CompositeGraph struct {
 	Slots    []Slot     // internal slot edges with filled state
 	Agents   []string   // external agent nodes (deduplicated, sorted)
 	Synapses []Edge     // external synaptic edges (sorted, deep-copied)
+	// Floor is the conduction threshold the graph reports — the weight below
+	// which Fire refuses to carry a signal. 0 when the graph gates nothing
+	// (or reports no threshold at all).
+	Floor float64
 }
+
+// floorReporter is the optional capability of a synapse that gates delivery by
+// weight; the reference Direct does, a host router need not.
+type floorReporter interface{ Floor() float64 }
 
 // BuildComposite assembles the composite graph: the static assembly
 // subgraph plus a snapshot of the dynamic synapse graph. syn == nil renders
@@ -51,6 +59,9 @@ func BuildComposite(ctx context.Context, o Organs, syn Synapse) (CompositeGraph,
 		return cmp.Or(cmp.Compare(a.From, b.From), cmp.Compare(a.To, b.To))
 	})
 	g.Synapses = edges
+	if r, ok := syn.(floorReporter); ok {
+		g.Floor = r.Floor()
+	}
 
 	seen := make(map[string]struct{})
 	for _, e := range edges {
@@ -63,8 +74,9 @@ func BuildComposite(ctx context.Context, o Organs, syn Synapse) (CompositeGraph,
 
 // RenderComposite renders the composite graph as ASCII: the internal nodes
 // and slot edges first, then the external agents and synaptic edges with
-// weight and delivery count. Weak synapses (weight below 0.3) are flagged
-// for pruning review.
+// weight and delivery count. An edge the graph would refuse to conduct (its
+// weight sits below the floor that graph reports) is flagged; a graph that
+// gates nothing flags nothing.
 func RenderComposite(ctx context.Context, o Organs, syn Synapse) (string, error) {
 	g, err := BuildComposite(ctx, o, syn)
 	if err != nil {
@@ -99,8 +111,8 @@ func RenderComposite(ctx context.Context, o Organs, syn Synapse) (string, error)
 	b.WriteString("external synapses:\n")
 	for _, e := range g.Synapses {
 		flag := ""
-		if e.Weight < 0.3 {
-			flag = "  ! weak"
+		if g.Floor > 0 && e.Weight < g.Floor {
+			flag = fmt.Sprintf("  ! below floor (%.3f)", g.Floor)
 		}
 		fmt.Fprintf(&b, "  %s -> %s  w=%.3f  fired=%d%s\n",
 			e.From, e.To, e.Weight, e.Fired, flag)

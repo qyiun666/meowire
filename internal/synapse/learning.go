@@ -37,13 +37,14 @@ type STDPParams struct {
 }
 
 // STDP applies spike-timing-dependent plasticity to the from→to
-// connection based on the spike-time difference dt = tPre − tPost:
+// connection based on the spike-time difference dt = tPost − tPre:
 //
-//	dt > 0 (pre before post) → LTP:  Δw =  APlus · exp(−dt/τ)
-//	dt < 0 (post before pre) → LTD:  Δw = −AMinus · exp(dt/τ)
+//	dt > 0 (pre fired before post) → LTP:  Δw =  APlus · exp(−dt/τ)
+//	dt < 0 (post fired before pre) → LTD:  Δw = −AMinus · exp(dt/τ)
 //
 // |dt| ≫ τ yields a negligible change (the pairing window closes).
-// A missing connection returns ErrNotLinked.
+// A missing connection returns ErrNotLinked. This is the explicit-dt
+// primitive; STDPFrom derives dt from the graph instead.
 func STDP(ctx context.Context, s Synapse, from, to string, dt time.Duration, p STDPParams) error {
 	if p.Tau <= 0 {
 		return fmt.Errorf("synapse.STDP: tau must be positive")
@@ -64,11 +65,50 @@ func STDP(ctx context.Context, s Synapse, from, to string, dt time.Duration, p S
 	return s.Reinforce(ctx, from, to, delta)
 }
 
+// STDPFrom runs the STDP rule on the pre→post connection with dt read off the
+// graph: each side's spike time is the last moment it conducted toward
+// another cell (a firing neuron is observable here only through what it sent),
+// so a host carrying no clock of its own still strengthens the causal order —
+// pre fired first, post answered after. A side that has never conducted has no
+// spike to pair with, which is reported rather than learned away.
+func STDPFrom(ctx context.Context, s Synapse, pre, post string, p STDPParams) error {
+	tpre, err := spikeTime(ctx, s, pre)
+	if err != nil {
+		return err
+	}
+	tpost, err := spikeTime(ctx, s, post)
+	if err != nil {
+		return err
+	}
+	return STDP(ctx, s, pre, post, time.Duration(tpost-tpre), p)
+}
+
+// spikeTime reports when id last conducted toward anyone, in Unix
+// nanoseconds — the timestamp Fire writes on each outgoing edge.
+func spikeTime(ctx context.Context, s Synapse, id string) (int64, error) {
+	edges, err := s.Edges(ctx, id)
+	if err != nil {
+		return 0, fmt.Errorf("synapse.STDPFrom: %w", err)
+	}
+	var last int64
+	for _, e := range edges {
+		last = max(last, e.Spiked)
+	}
+	if last == 0 {
+		return 0, fmt.Errorf("synapse.STDPFrom: no spike recorded for %s", id)
+	}
+	return last, nil
+}
+
 // Prune removes weak connections — the periodic pruning counterpart of
 // synaptic elimination. A connection is pruned when its weight is below
 // weightFloor AND its cumulative deliveries are below minFired (young and
 // weak; a weak but heavily used connection survives). Returns the number
 // of removed edges.
+//
+// weightFloor is the elimination threshold; Direct's conduction floor is a
+// different line: the floor stops traffic while the connection survives, this
+// one deletes it.
 func Prune(ctx context.Context, s Synapse, weightFloor float64, minFired int64) (int, error) {
 	edges, err := s.Edges(ctx, "")
 	if err != nil {

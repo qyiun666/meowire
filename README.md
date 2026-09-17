@@ -45,13 +45,17 @@ you can rely on.
 - **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
   (submitted/working/needs-input/completed/failed/cancelled) for end-to-end inter-agent tracking
 - **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Edges)
-  with reference learning rules `Hebbian`/`STDP`/`Prune` (host-side; framework stores state, never
-  decides when to learn); persistence round-trip via `Edges` export + `NewDirect` restore
+  with reference learning rules `Hebbian`/`STDP`/`STDPFrom`/`Prune` (host-side; framework stores state,
+  never decides when to learn); each edge also carries when it last conducted, so `STDPFrom` pairs
+  spikes from graph state alone, and a host-injected `Floor` makes a connection able to exist yet
+  refuse traffic (`ErrWeakSynapse`); persistence round-trip via `Edges` export + `NewDirect` restore
 - **Colony wiring with zero host plumbing** — `Resolve(agents...)` maps every agent ID to the inbox
   its cell already owns (capacity `InboxCapacity`), so a synapse built over it delivers to the right
   neuron with no host channel map; each cell drains its inbox into `Prompt.Stimuli` at the Think
   gap, and a `KindNotice` naming a tool withdraws that tool for the round (`Prompt.Inhibit`) —
-  no consumer pump, and an in-flight Act is never preempted
+  no consumer pump, and an in-flight Act is never preempted. The card projection doubles as a
+  routing index: `NewSkillIndex(agents...)` answers "who can do X" and `FanOut` delivers to each
+  of them, reporting per target
 - **Agent-to-agent tasks are primitives, not host code** — a tool delegates by returning
   `Effect{Send: &Signal{To: …}}`: the cell mints the id, stamps `submitted`, suspends the call, and
   the serving cell answers at its own terminal with the state `TaskOutcome` derives (six states, one

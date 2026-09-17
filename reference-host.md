@@ -10,7 +10,7 @@
 - **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间通信（channel/HTTP/Redis 任选，synapse 是参考实现）。
 - 框架只给循环（Think → Act → yield 事件流）；**LLM、工具、权限、记忆全是宿主实现**——七端口全部必填，没有默认实现。
 - 宿主只需要掌握三个方法：`New`（装配）、`Stimulate`（跑一轮）、`Close`（关闭）。
-- **唯一需要持久化的自主变化值**：synapse 突触图的 `Weight`（学习规则改写）与 `Fired`（投递计数）——导出用 `Edges`，恢复用 `NewDirect(initial...)`，全程宿主在组合根手动做（§8.3）。
+- **唯一需要持久化的自主变化值**：synapse 突触图的 `Weight`（学习规则改写）、`Fired`（投递计数）与 `Spiked`（最近投递时刻）——导出用 `Edges`，恢复用 `NewDirect(DirectConfig{Initial: ...})`，全程宿主在组合根手动做（§8.3）。
 - 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§9）。
 
 ## 1. 步骤总览（8 步）
@@ -636,7 +636,7 @@ import (
 )
 
 func buildColony(bpMain, bpHelper meowire.Blueprint) (*meowire.Agent, *meowire.Agent, error) {
-	syn := meowire.NewDirect(nil)                 // 参考实现，resolver 先空着
+	syn := meowire.NewDirect(meowire.DirectConfig{}) // 参考实现，resolver 先空着
 	bpMain.Organs.Colony, bpHelper.Organs.Colony = syn, syn
 	main, err := meowire.New(bpMain)
 	if err != nil {
@@ -700,7 +700,7 @@ for _, r := range main.Resumptions() {
 
 ### 8.3 synapse 持久化：宿主存储，New 时带回来（自主变化值）
 
-`Weight`/`Fired` 是仅有的自主变化数值。**框架只提供原语，存储由宿主做**——推荐 JSON 文件，生产换 DB/Redis 同理：
+`Weight`/`Fired`/`Spiked` 是仅有的自主变化数值。**框架只提供原语，存储由宿主做**——推荐 JSON 文件，生产换 DB/Redis 同理：
 
 ```go
 // 保存（Agent.Close 时或周期性调用）
@@ -720,18 +720,20 @@ func saveSynapse(ctx context.Context, colony meowire.Synapse, path string) error
 func loadSynapse(ctx context.Context, resolver meowire.Resolver, path string) (meowire.Synapse, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return meowire.NewDirect(resolver), nil // 首次启动：空图
+		return meowire.NewDirect(meowire.DirectConfig{Resolver: resolver}), nil // 首次启动：空图
 	}
 	var restored []meowire.Edge
 	if err := json.Unmarshal(data, &restored); err != nil {
 		return nil, err
 	}
-	return meowire.NewDirect(resolver, restored...), nil // 注入初始边 = 上次的 Weight/Fired 全部带回
+	// 注入初始边 = 上次的 Weight/Fired/Spiked 全部带回
+	return meowire.NewDirect(meowire.DirectConfig{Resolver: resolver, Initial: restored}), nil
 }
 ```
 
 **要点：**
-- `Edges(ctx, "")` 返回深拷贝，导出后可安全序列化；恢复时 `NewDirect(initial...)` 会 clamp 负权重、去重覆盖——**幂等**
+- `Edges(ctx, "")` 返回深拷贝，导出后可安全序列化；恢复时 `DirectConfig{Initial: ...}` 会 clamp 负权重、去重覆盖——**幂等**
+- 时刻 `Spiked` 随快照一起回来，所以 `STDPFrom` 在重启后仍能凭图配对时间，不需要宿主补时钟
 - 恢复发生在 `New` 之前、组合根内——**不需要 `Agent.New` 感知 synapse**，它俩本来就不该耦合
 - 保存时机宿主自定：`Close` 时、每轮 `OnCycleEnd`、或定期 ticker（重负载场景防丢失）
 
@@ -787,11 +789,15 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 ### 持久化（状态外化）
 
-17. **synapse 是唯一有自主变化值的组件**（`Weight`/`Fired`）——`Edges` 导出 / `NewDirect` 恢复，宿主在组合根做，`Agent.New` 不参与
+17. **synapse 是唯一有自主变化值的组件**（`Weight`/`Fired`/`Spiked`）——`Edges` 导出 / `NewDirect` 恢复，宿主在组合根做，`Agent.New` 不参与
 18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的变异；重负载场景用周期性快照 + WAL（§8.3/§8.4）
 19. **事件日志按 JSON 行 append** 即可作 WAL；恢复流程 = 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`
+
+### 多 agent（colony）
+
 20. **收件箱归框架**（[host-integration.md §7.2](host-integration.md)）：每个 cell 自带 `InboxCapacity` 容量的收件箱，`meowire.Resolve(agents...)` 只是把 ID 映射到它；队列满时 `Fire` 返回 `ErrTargetBusy`，从不阻塞发送方。投递只是填队列——目标 cell 在下一个 Think 间隙点、或宿主读 `Resumptions()` 时才看到它
 21. **两处「框架不决策」**：信号到了不等于跑了（框架不代为 `Stimulate`），配好了不等于续跑了（框架不代为 `Resume`，见 §8.2）——什么时候让一个 cell 干活、什么时候让挂起的轮次继续，都是宿主的调度权
+22. **两个阈值别混，两种发送别混**：`DirectConfig{Floor}` 断流（边留着、`ErrWeakSynapse`、不计数），`Prune` 的 `weightFloor` 删边；`Effect.Send` 有回程（一个收件人、一次挂起），`SkillIndex.FanOut` 没有回程（一个能力可对应零到多个 cell，逐目标报告）
 
 ## 10. 相关文档
 
