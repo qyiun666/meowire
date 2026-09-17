@@ -103,21 +103,36 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 	return batch, nil, false
 }
 
-// execPhase runs one goroutine per admitted call. A ctx cancellation aborts
-// each goroutine naturally and the error flows through feedback like any other
-// tool failure. Hooks, events and loop state never enter here: the goroutines
-// read the batch's config and ports read-only.
+// execPhase runs one goroutine per admitted call, at most lc.MaxParallelActs of
+// them at once. A ctx cancellation aborts each goroutine naturally and the
+// error flows through feedback like any other tool failure. Hooks, events and
+// loop state never enter here: the goroutines read the batch's config and ports
+// read-only. The ceiling changes when a call runs, never whether it runs or
+// where its feedback lands.
 func (b *actBatch) execPhase(batch []batchEntry) []batchOutcome {
 	results := make([]batchOutcome, len(batch))
+	window := make(chan struct{}, b.execWindow(len(batch)))
 	var wg sync.WaitGroup
 	for i, e := range batch {
 		wg.Go(func() {
+			window <- struct{}{}
+			defer func() { <-window }()
 			eff, err := actWithRetry(b.ctx, b.lc, e.act)
 			results[i] = batchOutcome{eff: eff, err: err}
 		})
 	}
 	wg.Wait()
 	return results
+}
+
+// execWindow is how many calls may execute simultaneously: the configured
+// ceiling when it binds, the whole batch otherwise (no ceiling set, or a batch
+// smaller than one).
+func (b *actBatch) execWindow(n int) int {
+	if limit := b.lc.MaxParallelActs; limit > 0 && limit < n {
+		return limit
+	}
+	return n
 }
 
 // feedbackPhase finalizes executed calls in call order, discarding completion

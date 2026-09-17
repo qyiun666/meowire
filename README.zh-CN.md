@@ -57,6 +57,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）
 - **一个端口后面放多个器官** —— `GuardStack` / `FallbackThinker` / `FallbackEffector` 把若干实现组合成循环看到的唯一一个器官，返回的**就是端口类型本身**：组合器官与单个器官接法一致，蓝图没有多出任何插槽
 - **器官可以在被使用之前先启动** —— 任何端口都可声明 `Bootable`；`New` 按 `PortOrder()`（蓝图自己蕴含的顺序，不是在旁边另抄一份）对每个声明者调用一次，`Replace` 在提交替换之前先启动。启动失败即中止装配，本次尝试打开的东西经宿主 `Closer` 释放 —— 框架依旧不关任何器官
+- **事件流可落盘** (v1.3.8) —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以一份日志可以混写整个集群
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）

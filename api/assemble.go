@@ -79,7 +79,8 @@ func FullHooks(h Hooks) *Hooks {
 // LoopConfig — the single source of truth for config semantics).
 // Zero-value semantics: MaxRounds<=0 uses DefaultMaxRounds(8);
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables retry;
-// ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool retry.
+// ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
+// retry; MaxParallelActs<=0 runs a whole parallel batch at once.
 // UpdateConfig swaps it wholesale at runtime; the next Stimulate/Resume
 // snapshots the new values.
 type Config = nerve.LoopConfig

@@ -204,6 +204,8 @@ func defaultNotes(o Organs, cfg Config) []Issue {
 	}
 	if cfg.ParallelActs {
 		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
+	} else if cfg.MaxParallelActs > 0 {
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "MaxParallelActs set while ParallelActs is off (no batch runs concurrently, so the ceiling binds nothing)"})
 	}
 	if o.Colony == nil {
 		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "G2", Msg: "Colony not wired (peer delegation and answers are unavailable)"})

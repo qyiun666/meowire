@@ -43,6 +43,17 @@ func (s LoopState) String() string {
 	}
 }
 
+// loopStateOf resolves a state name; an unknown name is reported as not-a-state
+// so a stored stream is rejected instead of read as some other state.
+func loopStateOf(name string) (LoopState, bool) {
+	for s := StateIdle; s <= StateError; s++ {
+		if s.String() == name {
+			return s, true
+		}
+	}
+	return 0, false
+}
+
 // DefaultMaxRounds is the default round limit when MaxRounds <= 0.
 const DefaultMaxRounds = 8
 
@@ -51,8 +62,10 @@ const DefaultMaxRounds = 8
 // MaxToolOutput<=0 disables truncation; MaxRetries<=0 disables Think retry;
 // ToolTimeout<=0 disables per-tool timeouts; ToolMaxRetries<=0 disables tool
 // retry; ParallelActs=false keeps strict serial tool execution (v1.3.2
-// behavior). UpdateConfig swaps it wholesale; the next Stimulate/Resume snapshots
-// the new values (an in-flight loop keeps the values it started with).
+// behavior), and MaxParallelActs<=0 places no ceiling on a parallel batch
+// (every admitted call runs at once). UpdateConfig swaps it wholesale; the next
+// Stimulate/Resume snapshots the new values (an in-flight loop keeps the values
+// it started with).
 type LoopConfig struct {
 	MaxRounds      int
 	MaxToolOutput  int
@@ -64,4 +77,9 @@ type LoopConfig struct {
 	// single call always keeps the serial path. Opt-in prerequisite: the
 	// Effector implementation must be safe for concurrent Act calls.
 	ParallelActs bool
+	// MaxParallelActs caps how many calls of one batch execute at the same
+	// time (<=0 = the whole batch at once). It only narrows ParallelActs:
+	// a host that may run tools concurrently but not all at once (a rate
+	// limit, a connection pool) sets the ceiling it owes someone else.
+	MaxParallelActs int
 }

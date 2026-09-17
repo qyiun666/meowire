@@ -95,8 +95,13 @@ you can rely on.
 - **Parallel tool batches (v1.3.3, opt-in)** — `Config.ParallelActs` executes a round's
   multiple independent tool calls concurrently (serial gating → parallel Act → serial
   feedback in call order); events and hooks stay serial. Off by default; requires a
-  concurrency-safe Effector. `Session.RemainingCalls()` exposes the pending calls of a
+  concurrency-safe Effector. `MaxParallelActs` (v1.3.8) caps how many calls of a batch run at
+  once. `Session.RemainingCalls()` exposes the pending calls of a
   suspension (empty when nothing is left to replay)
+- **The stream is journalable** (v1.3.8) — `EncodeEvent`/`DecodeEvent` write one versioned JSON
+  record per event, carry enums by name, restore framework errors by identity, and name anything
+  that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
+  that produced it, so one log can hold a whole colony
 - **Tri-state rulings on both sides & reflection primitives** — `Sandbox.Allow` (before a tool
   runs) and `Sandbox.Emit` (before a round's text is heard) each return a
   `Verdict`: Deny (zero value, fail-closed), Allow, or Ask; an ask suspends via the same

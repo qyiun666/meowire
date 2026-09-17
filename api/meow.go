@@ -72,7 +72,7 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 		closed := a.closed.Load()
 		c := a.cell
 		if closed {
-			yield(Event{Kind: EventError, Err: ErrCellClosed})
+			yield(Event{Kind: EventError, Err: ErrCellClosed, CellID: c.ID})
 			return
 		}
 		for ev := range c.Stimulate(ctx, text) {
@@ -98,7 +98,7 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.Seq[Event] {
 	return func(yield func(Event) bool) {
 		if a.closed.Load() {
-			yield(Event{Kind: EventError, Err: ErrCellClosed})
+			yield(Event{Kind: EventError, Err: ErrCellClosed, CellID: a.cell.ID})
 			return
 		}
 		// Resuming is the intent to continue — clear any stale pause request

@@ -344,6 +344,7 @@ type Config struct {
     ToolTimeout    time.Duration
     ToolMaxRetries int
     ParallelActs   bool
+    MaxParallelActs int
 }
 ```
 
@@ -355,6 +356,7 @@ type Config struct {
 | `ToolTimeout` | Per-tool execution timeout (each attempt timed independently; timeout-derived errors are not retried and are written to `ToolResults.Err`) | no timeout |
 | `ToolMaxRetries` | Tool retry count on effector errors (**executor err only**; `Effect.Err` is never retried — avoids duplicate side effects) | no retry |
 | `ParallelActs` | **Parallel execution of a round's multi-tool batch (v1.3.3, opt-in)**: serial gating (per-call events/sandbox verdicts/BeforeAct) → parallel Act (timeout/retry included) → serial feedback in call order (never completion order). A single call always keeps the serial path; **prerequisite: the Effector must be safe for concurrent Act calls** | strict serial |
+| `MaxParallelActs` | Ceiling on how many calls of one batch execute at the same time (v1.3.8). It only narrows `ParallelActs` — same calls, same call-order feedback — for a host that owes a rate limit or a connection pool somewhere else | whole batch at once |
 
 **Runtime hot update (v1.3.0):**
 
@@ -508,6 +510,11 @@ EventState(error) → EventError(Err)
 
 ### 6.2 `Event` fields (only the fields for the Kind are set; the rest are zero values)
 
+Two fields are not kind-specific: `CellID` names the cell that produced the event (stamped on every
+event at the cell boundary, including the error a closed agent raises), and `Dropped` names values
+that could not cross the event wire (§6.5) — the loop itself never fills it, so a non-empty
+`Dropped` means "this event was restored from a log".
+
 | Kind | Active field | Content |
 |------|--------------|---------|
 | `EventText` | `Text` | This round's text, **already through the output membrane** (`[sandbox-denied: reason]` when `Emit` denied) |
@@ -520,7 +527,7 @@ EventState(error) → EventError(Err)
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
 | `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — three causes (a tool's own request: `Call` + question; a pre-execution confirmation: `Call` + question; an utterance confirmation: zero `Call` + question); the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
 | `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (the same channel every suspension uses) |
-| `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, Old, New}`; emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
+| `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, OldType, NewType}` — the swapped ports named by Go type, not held (the record outlives the swap and must stay serializable; `Replace` returns the previous port to the caller); emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
 | `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace (v1.3.2), persistable |
 
 `SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`: one record per ruling on
@@ -662,6 +669,33 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   dies on host restart (treat as timeout-deny)
 - **Division of labor with Say injection**: `Say`/`BeforeThink` inject new messages
   (`p.Input`); `Resume` injects the suspension response (structured result in `ToolResults`) — no overlap
+
+### 6.5 Journaling the stream: `EncodeEvent` / `DecodeEvent`
+
+```go
+for ev := range agent.Stimulate(ctx, text) {
+    line, err := meowire.EncodeEvent(ev) // one JSON record per event: append it to a log
+    ...
+}
+
+// later, or in another process
+ev, err := meowire.DecodeEvent(line)
+```
+
+- Every record carries `WireEvent.Version`; a mismatch is rejected, never read as a close enough
+  match. Kinds, states and membrane rulings travel **by name**, so reordering an enum in a new
+  release cannot silently reinterpret a log written by the last one
+- `EventError` identity: a framework sentinel (`ErrMaxRounds`, `ErrForeignSession`) comes back as
+  the identical value — wrapped text included, so `errors.Is` still holds. Any other error (a host's
+  own `rate limited`) returns as the same **text** only, and the event lists `err.identity` in
+  `Dropped` — the loss is reported instead of hiding behind a false comparison
+- A suspension handle inside `EventWaitInput` / `EventPaused` is embedded in its own serialized
+  form, so the `Session` version guard still applies: a stale suspension is rejected by the handle,
+  not by a looser event wire
+- `Event.CellID` names the producing cell, so one log can carry a whole colony and still say who
+  spoke; `Dropped` says whether the record arrived complete
+- Do **not** `json.Marshal` an `Event`: it writes the `Err` field as `{}` (the text is gone) and
+  numbers the enums, all without reporting anything
 
 ---
 

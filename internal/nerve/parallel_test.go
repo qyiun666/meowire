@@ -89,6 +89,80 @@ func TestParallelActsPeakConcurrency(t *testing.T) {
 	}
 }
 
+// TestParallelActsCeilingBoundsInFlight: MaxParallelActs narrows the execution
+// window without changing what runs — four admitted calls under a ceiling of
+// two means the third waits for a slot, and every call still executes.
+func TestParallelActsCeilingBoundsInFlight(t *testing.T) {
+	const ceiling = 2
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	calls := 0
+	lc := &LoopContext{
+		CellID:          "c1",
+		Input:           "throttle",
+		MaxRounds:       2,
+		ParallelActs:    true,
+		MaxParallelActs: ceiling,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "run", ToolCalls: []ToolCall{
+					{ID: "t1", Name: "tool1"}, {ID: "t2", Name: "tool2"},
+					{ID: "t3", Name: "tool3"}, {ID: "t4", Name: "tool4"},
+				}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: blockingEffector{started: started, release: release},
+	}
+
+	done := make(chan []Event, 1)
+	fillRequired(lc)
+	go func() {
+		var events []Event
+		(DecisionLoop{}).Cycle(context.Background(), lc, func(e Event) bool {
+			events = append(events, e)
+			return true
+		})
+		done <- events
+	}()
+
+	inFlight := map[string]bool{}
+	for range ceiling {
+		select {
+		case name := <-started:
+			inFlight[name] = true
+		case <-time.After(2 * time.Second):
+			close(release)
+			<-done
+			t.Fatalf("timed out filling the window of %d (started: %v)", ceiling, inFlight)
+		}
+	}
+	// The ceiling holds: a third call does not enter while two are blocked.
+	select {
+	case extra := <-started:
+		close(release)
+		<-done
+		t.Fatalf("%s started beside the ceiling of %d (in flight: %v)", extra, ceiling, inFlight)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	for len(inFlight) < 4 {
+		select {
+		case name := <-started:
+			inFlight[name] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of 4 calls ever started", len(inFlight))
+		}
+	}
+
+	events := <-done
+	if last := events[len(events)-1]; last.Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone; kinds: %v", last, kindsOf(events))
+	}
+}
+
 // TestParallelActsFeedbackOrderIsCallOrder: acceptance 3 — the slow call is
 // announced first and finishes last, yet ToolResults and EventToolResult
 // follow call order, never completion order.

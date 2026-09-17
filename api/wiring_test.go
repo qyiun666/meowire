@@ -223,6 +223,26 @@ func TestValidateParallelActsInfo(t *testing.T) {
 	}
 }
 
+// TestValidateCeilingWithoutConcurrency: a ceiling that binds nothing is
+// reported rather than assumed intentional — but once the batch really runs
+// concurrently the same number is a plain setting, not a finding.
+func TestValidateCeilingWithoutConcurrency(t *testing.T) {
+	reported := func(cfg Config) bool {
+		for _, is := range Validate(fullOrgans(), cfg) {
+			if strings.Contains(is.Msg, "binds nothing") {
+				return true
+			}
+		}
+		return false
+	}
+	if !reported(Config{MaxRounds: 4, MaxParallelActs: 2}) {
+		t.Error("a ceiling set without concurrency should be reported")
+	}
+	if reported(Config{MaxRounds: 4, MaxParallelActs: 2, ParallelActs: true}) {
+		t.Error("a ceiling that binds a real batch is not a finding")
+	}
+}
+
 // TestRenderDiagram: the ASCII graph lists nodes first, then every slot
 // (edge) with a fill mark and its target node.
 func TestRenderDiagram(t *testing.T) {

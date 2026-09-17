@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -531,8 +532,8 @@ func TestDecisionLoopPendingReplaceEvents(t *testing.T) {
 		return &Decision{Text: "new"}, nil
 	}}
 	lc.PendingReplace = []ReplaceAudit{
-		{CellID: "c1", Slot: "think", Old: oldThink, New: newThink},
-		{CellID: "c1", Slot: "budget", Old: lc.Budget, New: lc.Budget},
+		{CellID: "c1", Slot: "think", OldType: typeName(oldThink), NewType: typeName(newThink)},
+		{CellID: "c1", Slot: "budget", OldType: typeName(lc.Budget), NewType: typeName(lc.Budget)},
 	}
 	events := collectEvents(context.Background(), lc)
 	if len(events) < 2 || events[0].Kind != EventReplace || events[1].Kind != EventReplace {
@@ -541,12 +542,14 @@ func TestDecisionLoopPendingReplaceEvents(t *testing.T) {
 	if events[0].Replace.Slot != "think" || events[1].Replace.Slot != "budget" {
 		t.Fatalf("replace slots = %q/%q, want think/budget (in order)", events[0].Replace.Slot, events[1].Replace.Slot)
 	}
-	if _, ok := events[0].Replace.Old.(mockThinker); !ok {
-		t.Fatalf("think audit old = %T, want mockThinker", events[0].Replace.Old)
+	if events[0].Replace.OldType != typeName(oldThink) || events[0].Replace.NewType != typeName(newThink) {
+		t.Fatalf("think audit = %+v, want both port names", events[0].Replace)
 	}
-	if _, ok := events[0].Replace.New.(mockThinker); !ok {
-		t.Fatalf("think audit new = %T, want mockThinker", events[0].Replace.New)
-	}
+}
+
+// typeName is what an audit record stores for a port value.
+func typeName(v any) string {
+	return reflect.TypeOf(v).String()
 }
 
 // slicesEqual reports whether two EventKind slices are equal in order.

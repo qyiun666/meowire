@@ -72,6 +72,27 @@ func UnmarshalSession(data []byte) (Session, error) {
 	return nerve.UnmarshalSession(data)
 }
 
+// Event wire format — the portable shape of the event stream, for a host that
+// journals events or replays them in another process. Kinds, states and
+// rulings travel by name and every record names its version, so a stale stream
+// is rejected rather than reinterpreted.
+type (
+	WireEvent   = nerve.WireEvent
+	WireErr     = nerve.WireErr
+	WireVerdict = nerve.WireVerdict
+	WireWait    = nerve.WireWait
+)
+
+// EncodeEvent serializes one event; DecodeEvent restores it. A value the wire
+// cannot carry (an error the framework does not own) comes back as an equal
+// text and the event names the loss in its Dropped field — nothing is dropped
+// without saying so.
+func EncodeEvent(e Event) ([]byte, error) { return nerve.EncodeEvent(e) }
+
+// DecodeEvent rejects malformed JSON, a foreign wire version, an unknown kind,
+// state or ruling name, and a suspension handle whose own version guard fails.
+func DecodeEvent(data []byte) (Event, error) { return nerve.DecodeEvent(data) }
+
 // Inter-agent messaging (host reference).
 type (
 	Synapse      = synapse.Synapse

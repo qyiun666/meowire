@@ -202,7 +202,7 @@ func TestAgentReplaceAuditEvent(t *testing.T) {
 	if got.Slot != "think" {
 		t.Fatalf("audit = %+v, want slot think", got)
 	}
-	if _, ok := got.New.(testutil.Thinker); !ok {
-		t.Fatalf("audit new port = %T, want the swapped-in Thinker", got.New)
+	if got.NewType != "testutil.Thinker" {
+		t.Fatalf("audit new type = %q, want the swapped-in Thinker", got.NewType)
 	}
 }

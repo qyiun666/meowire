@@ -45,8 +45,8 @@ func TestCellReplaceEmitsAuditAtNextStimulate(t *testing.T) {
 	if ra.Slot != "think" || ra.CellID != "test-cell" {
 		t.Fatalf("audit = %+v, want slot think / cell test-cell", ra)
 	}
-	if _, ok := ra.New.(testutil.Thinker); !ok {
-		t.Fatalf("audit new port = %T, want the swapped-in testutil.Thinker", ra.New)
+	if ra.NewType != "testutil.Thinker" {
+		t.Fatalf("audit new type = %q, want the swapped-in testutil.Thinker", ra.NewType)
 	}
 
 	// Second Stimulate: audits were drained — no more EventReplace.

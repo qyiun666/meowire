@@ -102,9 +102,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`internal/cell/slots_sync_test.go`, `api/slots_sync_test.go`), so a port
   added to the blueprint cannot silently miss a `Replace` slot or an `Organs`
   field. New blueprint entry `P6b Budget.TrimResults` (optional, implied by P6).
+- **A ceiling on a parallel batch** — `Config.MaxParallelActs` caps how many of a round's admitted
+  tool calls execute at the same time (`<=0` = the whole batch at once, today's behavior). It only
+  narrows `ParallelActs`: the same calls run, feedback still lands in call order, and a host that
+  owes a rate limit or a connection pool elsewhere can finally say how much of a batch to release at
+  once. Setting it while `ParallelActs` is off binds nothing, and `Validate` says so instead of
+  letting the number look configured.
+- **The event stream can leave the process** — `EncodeEvent`/`DecodeEvent` write one versioned JSON
+  record per event (`eventVersion = 1`) for a host that journals a run or replays it in another
+  process. Enums travel **by name** (kind, loop state, membrane ruling), so a reordered `iota` cannot
+  silently reinterpret last week's log, and an unrecognized name is rejected instead of defaulting.
+  Framework errors come back as the identical value — wrapped text included, so `errors.Is` still
+  holds — while any other error returns as its text and the event names the loss in
+  `Dropped` (`err.identity`, `verdict.err.identity`); a suspension handle is embedded in its own
+  serialized form so the `Session` version guard stays the authority. Plain `json.Marshal` of an
+  `Event` is not this: it writes an `error` field as `{}` and reports nothing.
+  Every event additionally carries `CellID`, stamped by the cell at its boundary, so one log can hold
+  a whole colony and still say who spoke.
 
 ### Changed
 
+- **An audit record describes, it does not possess** — `ReplaceAudit` carries `OldType`/`NewType`
+  (the swapped ports' Go type names) instead of `Old`/`New`. The record is emitted at a later
+  Stimulate than the swap it documents, so holding the values kept a retired organ alive, made the
+  event unserializable, and duplicated what `Replace` already returns to its caller.
+  **Breaking**: hosts reading `ReplaceAudit.Old`/`.New` switch to the type names (or to `Replace`'s
+  return value, which is where a port can still be acted on).
 - **`Sandbox` is a three-method port** — `Allow`, `Emit` and `Bounds`; the membrane is one organ
   holding both sides of the loop rather than a permission gate plus a filter.
   **Breaking**: every host membrane must implement `Emit` (an inert one returns `VerdictAllow`).

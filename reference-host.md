@@ -791,7 +791,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 17. **synapse 是唯一有自主变化值的组件**（`Weight`/`Fired`/`Spiked`）——`Edges` 导出 / `NewDirect` 恢复，宿主在组合根做，`Agent.New` 不参与
 18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的变异；重负载场景用周期性快照 + WAL（§8.3/§8.4）
-19. **事件日志按 JSON 行 append** 即可作 WAL；恢复流程 = 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`
+19. **事件日志用 `meowire.EncodeEvent` 按 JSON 行 append** 即可作 WAL（别直接 `json.Marshal(ev)`：`Err` 字段会被写成 `{}`，枚举也变成数字）；恢复流程 = 逐行 `DecodeEvent` → 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`，还原不完整的事件其 `Dropped` 字段会点名
 
 ### 多 agent（colony）
 

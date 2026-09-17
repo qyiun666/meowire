@@ -42,12 +42,13 @@ type LoopContext struct {
 	Await func(signalID string, call ToolCall, sess Session)
 
 	// Config
-	MaxRounds      int           // Hard round limit (<=0 uses DefaultMaxRounds)
-	MaxToolOutput  int           // Tool output truncation length (<=0 = no truncation)
-	MaxRetries     int           // Think retry count (<=0 = no retry)
-	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = no timeout)
-	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
-	ParallelActs   bool          // Parallel batch execution (requires a concurrency-safe Effector)
+	MaxRounds       int           // Hard round limit (<=0 uses DefaultMaxRounds)
+	MaxToolOutput   int           // Tool output truncation length (<=0 = no truncation)
+	MaxRetries      int           // Think retry count (<=0 = no retry)
+	ToolTimeout     time.Duration // Per-tool execution timeout (<=0 = no timeout)
+	ToolMaxRetries  int           // Tool retry count on effector error (<=0 = no retry)
+	ParallelActs    bool          // Parallel batch execution (requires a concurrency-safe Effector)
+	MaxParallelActs int           // Ceiling on concurrently executing batch calls (<=0 = none)
 
 	// Dynamic state
 	State   LoopState

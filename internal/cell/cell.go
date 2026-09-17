@@ -95,6 +95,7 @@ func (c *Cell) inboxChan() chan nerve.Signal {
 // LoopContext and emitted as EventReplace before any other event.
 func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
+		yield = c.authored(yield)
 		closed := c.closed.Load()
 		if closed {
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
@@ -116,6 +117,7 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 // mid-flight.
 func (c *Cell) Resume(ctx context.Context, sess nerve.Session, response string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
+		yield = c.authored(yield)
 		closed := c.closed.Load()
 		if closed {
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
@@ -127,6 +129,16 @@ func (c *Cell) Resume(ctx context.Context, sess nerve.Session, response string) 
 			return
 		}
 		nerve.DecisionLoop{}.Resume(ctx, lc, sess, response, yield)
+	}
+}
+
+// authored returns a yield that stamps every event with this cell's ID. The
+// loop yields many events from many places; authorship is the cell's fact, so
+// the cell owns it once at its boundary instead of every producer repeating it.
+func (c *Cell) authored(yield func(nerve.Event) bool) func(nerve.Event) bool {
+	return func(e nerve.Event) bool {
+		e.CellID = c.ID
+		return yield(e)
 	}
 }
 
@@ -150,28 +162,29 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 		return nil
 	}
 	lc := &nerve.LoopContext{
-		CellID:         c.ID,
-		Identity:       c.Identity,
-		Methods:        slices.Clone(c.Methods),
-		Think:          think,
-		Act:            act,
-		Hooks:          hooks,
-		Sandbox:        sandbox,
-		Budget:         budget,
-		Mem:            mem,
-		MaxRounds:      cfg.MaxRounds,
-		MaxToolOutput:  cfg.MaxToolOutput,
-		MaxRetries:     cfg.MaxRetries,
-		ToolTimeout:    cfg.ToolTimeout,
-		ToolMaxRetries: cfg.ToolMaxRetries,
-		ParallelActs:   cfg.ParallelActs,
-		State:          nerve.StateIdle,
-		Input:          text,
-		System:         c.System,
-		Tools:          slices.Clone(c.Tools),
-		Context:        slices.Clone(c.Context),
-		PendingReplace: pendingReplace,
-		PendingConfig:  pendingConfig,
+		CellID:          c.ID,
+		Identity:        c.Identity,
+		Methods:         slices.Clone(c.Methods),
+		Think:           think,
+		Act:             act,
+		Hooks:           hooks,
+		Sandbox:         sandbox,
+		Budget:          budget,
+		Mem:             mem,
+		MaxRounds:       cfg.MaxRounds,
+		MaxToolOutput:   cfg.MaxToolOutput,
+		MaxRetries:      cfg.MaxRetries,
+		ToolTimeout:     cfg.ToolTimeout,
+		ToolMaxRetries:  cfg.ToolMaxRetries,
+		ParallelActs:    cfg.ParallelActs,
+		MaxParallelActs: cfg.MaxParallelActs,
+		State:           nerve.StateIdle,
+		Input:           text,
+		System:          c.System,
+		Tools:           slices.Clone(c.Tools),
+		Context:         slices.Clone(c.Context),
+		PendingReplace:  pendingReplace,
+		PendingConfig:   pendingConfig,
 	}
 	if pauseGate != nil {
 		lc.Pause = pauseGate()
@@ -313,7 +326,22 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 // emitted as EventReplace at the start of the next Stimulate/Resume (the
 // moment the swap takes effect). wireMu must be held by the caller.
 func (c *Cell) recordReplace(slot string, old, new any) {
-	c.pendingReplace = append(c.pendingReplace, nerve.ReplaceAudit{CellID: c.ID, Slot: slot, Old: old, New: new})
+	c.pendingReplace = append(c.pendingReplace, nerve.ReplaceAudit{
+		CellID:  c.ID,
+		Slot:    slot,
+		OldType: portTypeName(old),
+		NewType: portTypeName(new),
+	})
+}
+
+// portTypeName names a port by its Go type. The audit record outlives the swap
+// and is written to a log, so the value itself is not what it can carry; the
+// host that wants the displaced organ still has it (`Replace` returns it).
+func portTypeName(port any) string {
+	if port == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", port)
 }
 
 // completeHooks reports whether all eight hook callbacks are non-nil.

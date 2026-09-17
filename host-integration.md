@@ -269,6 +269,7 @@ type Config struct {
     ToolTimeout    time.Duration
     ToolMaxRetries int
     ParallelActs   bool
+    MaxParallelActs int
 }
 ```
 
@@ -280,6 +281,7 @@ type Config struct {
 | `ToolTimeout` | 单个工具执行超时（每次尝试独立计时；超时错误不重试，写入 `ToolResults.Err` 继续循环） | 无超时 |
 | `ToolMaxRetries` | 工具执行失败重试次数（**仅执行器 error**；`Effect.Err` 不重试，防重复副作用） | 不重试 |
 | `ParallelActs` | **同轮多工具批次并行（v1.3.3，opt-in）**：串行门控（逐条事件/沙箱裁决/BeforeAct）→ 并行 Act（含超时/重试）→ 串行反馈（按调用序，与完成顺序无关）。单调用恒走串行路径；**前提：Effector 实现并发安全** | 严格串行 |
+| `MaxParallelActs` | 一个批次同时执行的工具调用上限（v1.3.8）。只收窄 `ParallelActs`——跑哪些调用、反馈顺序都不变——给一个「能并发但不能一起上」的宿主（别处有限流、连接池） | 整批一起跑 |
 
 **运行期热更新（v1.3.0）**：
 
@@ -324,7 +326,7 @@ oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulat
 - 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
 - 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）；新器官若声明了 `Bootable` 则先启动再提交，启动失败时接线保持原样
 - 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
-- **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, Old, New}`，在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
+- **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, OldType, NewType}`（被换的端口按 Go 类型名记录、不作持有：审计在替换之后才产出，必须可序列化；被换下的端口由 `Replace` 的返回值交给宿主），在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
 
 ### 5.2 能力卡：`AgentCard`（A2A 风格）
 
@@ -409,6 +411,8 @@ EventState(error) → EventError(Err)
 
 ### 6.2 `Event` 字段（按 Kind 生效，其余为零值）
 
+有两个字段与 Kind 无关：`CellID` 说出这条事件出自哪个 cell（在 cell 边界上逐条盖章，连关闭后的错误事件也带），`Dropped` 列出没能跨过事件流的值（见 §6.5）——循环自己从不写它，所以非空就意味着「这条是从日志里还原出来的」。
+
 | Kind | 有效字段 | 内容 |
 |------|---------|------|
 | `EventText` | `Text` | 该轮文本，**已过出口膜**（`Emit` 拒绝时为 `[sandbox-denied: reason]`） |
@@ -421,7 +425,7 @@ EventState(error) → EventError(Err)
 | `EventUsage` | `Usage *Usage` | 最近一次 Think 的 token 用量 |
 | `EventWaitInput` | `Wait *WaitInput` | 循环等外部输入：`WaitInput{CellID, Call, Question, Session}`——三种成因（工具自请求 `Call`+`Question`、执行前征询 `Call`+问题、文本征询 `Call` 零值+问题）；宿主**保存 Session**、展示问题，取得响应后调 `agent.Resume(sess, response)` |
 | `EventPaused` | `Wait *WaitInput` | 暂停请求生效：`WaitInput{CellID, Session}`（Call 零值、Question 空）——宿主保存 Session，调 `agent.Resume(sess, "")` 续跑（与其他挂起同一条通道） |
-| `EventReplace` | `Replace *ReplaceAudit` | 端口替换审计：`ReplaceAudit{CellID, Slot, Old, New}`；下一次 Stimulate/Resume 开头（生效时刻）按序产出，可持久化 |
+| `EventReplace` | `Replace *ReplaceAudit` | 端口替换审计：`ReplaceAudit{CellID, Slot, OldType, NewType}`（端口按 Go 类型名记录，不持有值）；下一次 Stimulate/Resume 开头（生效时刻）按序产出，可持久化 |
 | `EventConfig` | `Config *ConfigAudit` | 配置整包替换审计：`ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`；下一次 Stimulate/Resume 开头在 EventReplace 之后按序产出，可持久化 |
 
 `SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`：膜在循环两侧的每一次裁决各产出一条（`Ruling` 三态：Deny 为零值，fail-closed），`Call` 为工具侧被门禁的调用、零值即文本侧。ask 裁决再产出终结记录闭合审计链（拒绝含拒绝文本，批准 Ruling=allow 且 Reason 空）。宿主持久化事件流即得到审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
@@ -486,6 +490,24 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 - **剩余工具**：挂起发生在多工具轮中间时，恢复后先执行该轮剩余工具，再进入 Think
 - **Resume 的 hooks 与 Stimulate 完全一致**（`BeforeStimulate` 照常触发，宿主 append 语义下 `Session.Context` 与检索结果自然合并）；`Close` 后 Resume 产出 `ErrCellClosed`；`Session` 为内存态句柄，宿主重启后失效（按超时拒绝处理）
 - **与 Say 注入分工**：`Say`/`BeforeThink` 注入的是新消息（`p.Input`），`Resume` 注入的是挂起响应（作为挂起工具的结构化结果进 `ToolResults`）——两者无重叠
+
+### 6.5 事件流落盘：`EncodeEvent` / `DecodeEvent`
+
+```go
+for ev := range agent.Stimulate(ctx, text) {
+    line, err := meowire.EncodeEvent(ev) // 一条事件一条 JSON 记录：追加进日志即可
+    ...
+}
+
+// 稍后，或在另一个进程里
+ev, err := meowire.DecodeEvent(line)
+```
+
+- 每条记录带 `WireEvent.Version`，版本不符直接拒读，不会“差不多就当能读”；Kind、状态、膜的裁决**按名字上线**，所以新版本重排枚举不会悄悄改写上周那份日志
+- `EventError` 的身份：框架自己的哨兵（`ErrMaxRounds`、`ErrForeignSession`）还原后仍是同一个值——被包装时外层文本也保住，`errors.Is` 照旧成立。其余错误（宿主自己的 `rate limited`）只回来**同样的文本**，事件会在 `Dropped` 里写 `err.identity`：丢了什么要说出来，而不是让一次比较静默地返回 false
+- `EventWaitInput` / `EventPaused` 里的恢复句柄以它自己的序列化形式内嵌，因此 `Session` 的版本闸门照常生效：过期的挂起由句柄拒绝，不是由更宽松的事件流放行
+- `Event.CellID` 说出这条事件出自哪个 cell，所以一份日志可以混写整个集群还分得清谁说的；`Dropped` 说明这条记录是否完整到达
+- **别**直接 `json.Marshal` 一个 `Event`：它把 `Err` 字段写成 `{}`（文本没了）、把枚举写成数字，而且什么都不报告
 
 ---
 
