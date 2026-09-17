@@ -12,9 +12,10 @@
 
 版本差异会咬人，先记三条：
 
-- `openai.F(...)`、`openai.O[T]`、`param.Field[T]` 在 v3.61 已移除
-  （`MIGRATION.md:7`、`:76`）。可选值改用 `param.Opt[T]`，构造用
-  `openai.String/Int/Bool/Float`（`field.go:9-12`）；必填字段是裸值。
+- `openai.F(...)` 与 `param.Field[T]` 在 v3.61 已移除（`MIGRATION.md:7`、`:76`）。
+  可选值现在是 `param.Opt[T]`（零值 = 省略，靠 Go 1.24 的 `json:",omitzero"`），
+  构造用 `openai.String/Int/Bool/Float`（`field.go:9-12`）或通用的 `openai.Opt[T]`（`:15`）；
+  必填字段是裸值。
 - 流式类型在 `packages/ssestream`，不叫 `packages/sse`。
 - 累加器是零值可用的 `openai.ChatCompletionAccumulator`（`streamaccumulator.go:20`），
   方法叫 `AddChunk`，没有 `accumulator` 子包。
@@ -23,6 +24,7 @@
 
 本文出现的每段 Go 代码都在**仓库外**的临时模块里编译过：`go build` / `go vet` 对着
 `openai-go/v3@v3.61.0` 与本仓当前 HEAD 通过（离线，proxy 指向本地 module cache）。
+唯一的占位是 §9 引用的 `render(p)`——把 §2 的段落拼成文本是宿主的表达力，不是形状问题。
 本仓自身依然零三方依赖——这些代码属于宿主。
 
 ## 1. 两端形状
@@ -62,13 +64,13 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 | `Methods` | `[]MethodSpec{Name, Desc, Input, Output}` | 同一消息里的能力清单文本（描述性，**不是**可调用工具，别塞进 `Tools`） |
 | `Bounds` | `string` | 同一消息里的执行边界段（`Sandbox.Bounds()` 快照） |
 | `Plan` | `string` | 同一消息里的计划段，或 assistant 预填充 |
-| `Context` | `[]string` | 同一消息里的背景段（宿主基线 + 框架追加的 `[sandbox-denied: ...]`，工具结果**不在**这里） |
-| `Reflection` | `string` | 同一消息里的自查段（上一轮复盘；空 = 无） |
-| `Memories` | `[]Record{Key, Kind, Content []byte, ...}` | 检索段文本；如何编排（放 system 还是 user 前置）归宿主 |
+| `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:47`）与 `[inhibited: 谁]`（`inbox.go:104`）。**被膜拒掉、被 notice 撤回的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
+| `Reflection` | `string` | 同一消息里的自查段（宿主在 `BeforeStimulate` 写、跨轮同值，框架从不写；空 = 无） |
+| `Memories` | `[]Record{Key, CellID, Kind, Content []byte, Created}` | 检索段文本；`Content` 是 `[]byte`，转字符串前自己决定解码。每轮整体替换、不进 `Session` 快照 |
 | `Input` | `string` | `openai.UserMessage(p.Input)` |
-| `Stimuli` | `[]Signal` | 邻居来信：渲染成文本段（角色由宿主决定），或按 `Kind` 折进背景段 |
-| `Inhibit` | `[]string` | 本轮被撤回的工具名：**同时**从 `Tools` 里剔除并在消息里说明为什么不可用（只剔不说是让模型猜） |
-| `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，见 §5 |
+| `Stimuli` | `[]Signal{ID, From, To, Kind, Status, ReplyTo, Skill, Payload}` | 邻居来信：渲染成文本段（角色由宿主决定），或按 `Kind` 折进背景段；同样每轮整体替换 |
+| `Inhibit` | `[]string` | 本轮被撤回的工具名：从 `Tools` 里剔除即可，"为什么不可用"框架已经用 `[inhibited: ...]` 写进 `Context` 了，不必再编一段 |
+| `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，见 §5。**这是每轮现读的数据**：`BeforeStimulate` 可以整体改写它（`internal/nerve/hooks.go:66`），缓存到启动期会静默丢掉改写 |
 | `ToolResults` | `[]ToolResult{ID, Name, Result, Err}` | `assistant(tool_calls)` + `tool` 成对消息，见 §3 |
 
 固定段与动态段分开拼，是这份表最重要的用法：内核每轮只换动态段，
@@ -85,64 +87,114 @@ OpenAI 的消息序列要求每个 `role:"tool"` 消息前面有一条内容匹�
 
 ```go
 type chatThinker struct {
-    client  openai.Client
-    model   openai.ChatModel
-    tools   []openai.ChatCompletionToolUnionParam
-    issued  map[string]meowire.ToolCall // call id -> 模型当时的调用
+    client openai.Client
+    model  openai.ChatModel
+
+    mu    sync.Mutex      // Think 会被并发调用，见下
+    turns []turn          // 本会话的模型轮次：文本 + 那一轮发出的 tool_calls
 }
 ```
 
-`Think` 返回 `Decision` 时写入 `issued`，下一次 `Think` 按 `p.ToolResults` 的 ID 取出配对。
-这不是"接线缺口"，是器官的内部状态：内核给的是**语义**（哪个调用 resulted in 什么），
-角色编排是宿主的责任（`ToolResult` 的文档注释就写着"渲染归宿主 Thinker 决定"）。
+`Think` 返回 `Decision` 时把这一轮记进 `turns`，下一次 `Think` 用它重建
+`assistant`/`tool` 段（§9 的 `transcript`）。这不是"接线缺口"，是器官的内部状态：
+内核给的是**语义**（哪个调用 resulted in 什么），角色编排是宿主的责任
+（`ToolResult` 的文档注释就写着"渲染归宿主 Thinker 决定"）。
+
+三件事由适配器自己负责，内核不代管：
+
+- **并发**：cell 没有运行锁（`internal/cell/cell.go:96-111` 只在 `wireMu` 下快照端口），
+  同一 Agent 上并发跑两次 `Stimulate`/`Resume` 就会并发调用同一个 Thinker 实例，
+  一个 Thinker 服务多个 Agent 时同理。所以缓存必须加锁——并发写 `map`/`slice` 是直接
+  fatal，不是慢一点。（`Act` 只有在框架开了 `ParallelActs` 时才要求并发安全；
+  `Think` 的并发来自宿主怎么用。）
+- **初始化**：实例由构造器建（§9），零值 `chatThinker` 能跑但客户端是空的。
+- **边界与长度**：这份缓存是"一次对话"的量级，宿主知道自己何时开新对话，
+  由宿主触发重置（§9 的 `Reset`）；跨进程的 `Session` 恢复只带回内核那半份状态，
+  要保真就得把 `turns` 一起持久化。
 
 两个边界情况要有明确处理，否则会发出非法请求：
-- `issued[ID]` 查不到（宿主重启、`Session` 从旧进程恢复）→ 退化路径：把这条结果作为文本
-  并入背景段，不要发孤立的 `tool` 消息。
-- 一轮多个调用 → 一条 assistant 消息带多个 `tool_calls`，随后逐个 `tool` 消息，顺序与
-  `p.ToolResults` 一致（内核保证它按调用序累积）。
+
+- **被膜拒掉的调用**：它不进 `ToolResults`（§2），但模型确实发出过那个 `tool_call`。
+  assistant 消息里列出的每个 `tool_call_id` 都必须有对应的 `tool` 消息，缺一条整个请求
+  就非法——所以要补一条占位结果，拒绝原因已经由 `[sandbox-denied: ...]` 在 `Context`
+  里给过模型了。
+- **一轮多个调用 / 跨轮累积**：一个 turn 一条 assistant 带多个 `tool_calls`，随后按同序
+  各跟一条 `tool` 消息；`ToolResults` 在一次 `Stimulate` 内跨轮累积，所以分组按自己记的
+  turn 走，不要按结果切片的长度猜。
 
 ## 4. `Decision` 回流
 
 ```go
-choice := complete.Choices[0]                                  // chatcompletion.go:272 起
-dec := &meowire.Decision{Text: choice.Message.Content}
-for _, tc := range choice.Message.ToolCalls {                  // :3038，union 是扁平字段
-    dec.ToolCalls = append(dec.ToolCalls, meowire.ToolCall{
-        ID:   tc.ID,
-        Name: tc.Function.Name,
-        Args: tc.Function.Arguments,   // 全程是 JSON 文本，原样交给 Effector
-    })
-    t.issued[tc.ID] = dec.ToolCalls[len(dec.ToolCalls)-1]
+func (t *chatThinker) decisionOf(c *openai.ChatCompletion) *meowire.Decision {
+    ch := c.Choices[0]                        // Choices: chatcompletion.go:188
+    dec := &meowire.Decision{Text: ch.Message.Content}
+
+    t.mu.Lock()                                // 与 transcript 共享 turns
+    t.turns = append(t.turns, turn{text: ch.Message.Content})
+    mine := &t.turns[len(t.turns)-1]
+    for _, tc := range ch.Message.ToolCalls {  // []ChatCompletionMessageToolCallUnion：union 是扁平字段
+        call := meowire.ToolCall{
+            ID:   tc.ID,
+            Name: tc.Function.Name,
+            Args: tc.Function.Arguments,       // 全程是 JSON 文本，原样交给 Effector
+        }
+        dec.ToolCalls = append(dec.ToolCalls, call)
+        mine.calls = append(mine.calls, call)
+    }
+    t.mu.Unlock()
+
+    if u := c.Usage; u.TotalTokens != 0 || u.PromptTokens != 0 || u.CompletionTokens != 0 {
+        dec.Usage = &meowire.Usage{                                // Usage: chatcompletion.go:238
+            Prompt: int(u.PromptTokens), Completion: int(u.CompletionTokens), Total: int(u.TotalTokens),
+        }                                                          // 三字段是 int64：completion.go:173-179
+    }
+    return dec
 }
 ```
 
-`FinishReason` 在本版本是裸 `string`（`"stop" | "length" | "tool_calls" | ...`，
-`chatcompletion.go:271`），别指望枚举常量。`Usage` 三字段是 `int64`
-（`completion.go:173-179`），落成 `meowire.Usage` 的 `int` 时自己转；
-拿到零值 `Usage` 时返回 `nil`，事件流就不会发一条假的 `EventUsage`。
+记的是**整轮**（文本 + 该轮全部调用）而不是一张 call id 表：被膜拒掉的调用永远不会有
+`ToolResult`，重建 assistant 消息时仍要出现它（§3 的第一个边界）。
+
+`FinishReason` 在本版本是裸 `string`（`ChatCompletionChoice` 在 `chatcompletion.go:262`，
+字段在 `:272`），别指望枚举常量。`Usage` 保持零值时返回 `nil`，事件流就不会发一条假的
+`EventUsage`。反方向（宿主 → SDK）的请求侧 `Type` 字段是 `constant.Function`，
+省略即按 `"function"` 序列化，不必手写。
 
 `Args` 不做 JSON 校验：那是 Effector 与 `Sandbox` 的事，Thinker 改了会把模型的意图变成宿主的意图。
 
 ## 5. 工具定义映射
 
 ```go
-// ToolSpec.Input 是 JSON Schema 文本，SDK 要的是 map
-var schema openai.FunctionParameters                     // = shared.FunctionParameters（aliases.go:492）
-if spec.Input != "" {
-    if err := json.Unmarshal([]byte(spec.Input), &schema); err != nil {
-        return nil, fmt.Errorf("tool %s schema: %w", spec.Name, err)
+// toolParams 每轮现读 p.Tools（§2 的改写警告），并按 p.Inhibit 剔除。
+// ToolSpec.Input 是 JSON Schema 文本，SDK 要的是 map。
+func toolParams(p *meowire.Prompt) ([]openai.ChatCompletionToolUnionParam, error) {
+    withheld := make(map[string]bool, len(p.Inhibit))
+    for _, name := range p.Inhibit {
+        withheld[name] = true
     }
+    tools := make([]openai.ChatCompletionToolUnionParam, 0, len(p.Tools))
+    for _, spec := range p.Tools {
+        if withheld[spec.Name] {
+            continue
+        }
+        schema := openai.FunctionParameters{}                 // = shared.FunctionParameters（aliases.go:492）
+        if spec.Input != "" {
+            if err := json.Unmarshal([]byte(spec.Input), &schema); err != nil {
+                return nil, fmt.Errorf("openai thinker: tool %s schema: %w", spec.Name, err)
+            }
+        }
+        tools = append(tools, openai.ChatCompletionToolUnionParam{
+            OfFunction: &openai.ChatCompletionFunctionToolParam{
+                Function: openai.FunctionDefinitionParam{     // shared/shared.go:877
+                    Name:        spec.Name,
+                    Description: openai.String(spec.Desc),
+                    Parameters:  schema,
+                },
+            },
+        })
+    }
+    return tools, nil
 }
-tools = append(tools, openai.ChatCompletionToolUnionParam{
-    OfFunction: &openai.ChatCompletionFunctionToolParam{
-        Function: openai.FunctionDefinitionParam{          // shared/shared.go:877
-            Name:        spec.Name,
-            Description: openai.String(spec.Desc),
-            Parameters:  schema,
-        },
-    },
-})
 ```
 
 三处形状落差要认：
@@ -170,16 +222,19 @@ tools = append(tools, openai.ChatCompletionToolUnionParam{
 ```go
 client := openai.NewClient(option.WithMaxRetries(0))   // 传输重试只留一层
 ```
-并把 `Config.MaxRetries` 当作**唯一**的重试策略（它会立即重投，所以幂等性由模型请求本身保证）。
+并把 `Config.MaxRetries` 当作**唯一**的重试预算。两层相乘会把一次故障变成
+`MaxRetries × SDK 重试` 次请求。
 
 错误形状只有一个：非 2xx 是 `*openai.Error`（= `apierror.Error` 别名，`aliases.go:17`），
 字段 `StatusCode/Code/Message/Type`，方法是指针接收者，所以
 `var apiErr *openai.Error; errors.As(err, &apiErr)`。网络错误**不被包装**，原样透出
-（`apierror.go:12-14`）——别去 `errors.Is` 一个 SDK sentinel。`*openai.Error` 没有 `Unwrap`。
+（`internal/apierror/apierror.go:12-14`："Other errors are not wrapped by this SDK"）
+——别去 `errors.Is` 一个 SDK sentinel。`*openai.Error` 没有 `Unwrap`。
 
-永久错误（400/401/403 配额与参数类）要在 Thinker 内**快速失败并把 `StatusCode` 拼进错误文本**：
-内核会重投，但重投同一请求不会成功，唯一能少花的是尽早让这一轮以 `EventError` 结束
-（`MaxRetries=0` 时即第一次就结束）。
+重投**不是幂等的**：同一个 `*Prompt` 再交给你一次，就是再发一次真实请求、再花一次 token、
+再可能得到一个不同的答案。所以永久性错误（400/401/403 与参数类）要在 Thinker 内
+**快速失败并把 `StatusCode` 拼进错误文本**：唯一能少花的是尽早让这一轮以 `EventError`
+结束（`MaxRetries=0` 时即第一次就结束）。瞬态错误（429/5xx/连接）才值得让内核重投。
 
 `ctx` 必须透传给 SDK 调用（`New(ctx, ...)`），并且**不要**在 `Think` 里用
 `context.WithoutCancel`：`Close` 与宿主取消正是靠这条链落地的。
@@ -190,8 +245,12 @@ client := openai.NewClient(option.WithMaxRetries(0))   // 传输重试只留一�
 要拿 usage 必须显式开：
 
 ```go
+tools, err := toolParams(p)                                    // §5：每轮现读
+if err != nil {
+    return nil, err
+}
 params := openai.ChatCompletionNewParams{
-    Messages: msgs, Model: t.model, Tools: t.tools,
+    Messages: msgs, Model: t.model, Tools: tools,
     StreamOptions: openai.ChatCompletionStreamOptionsParam{
         IncludeUsage: openai.Bool(true),                   // :3381
     },
@@ -206,7 +265,8 @@ for stream.Next() {
     // 只在这里做 UI 推流，见下面的膜约束
 }
 if err := stream.Err(); err != nil { return nil, fmt.Errorf("openai thinker: %w", err) }
-// acc 内嵌 ChatCompletion：acc.Choices / acc.Usage 直接用
+// 累加器内嵌 ChatCompletion（streamaccumulator.go:20），§4 的决策回收直接复用：
+return t.decisionOf(&acc.ChatCompletion), nil
 ```
 
 工具调用的分片按 `chunk.Choices[0].Delta.ToolCalls[i].Index`（`int64`，`:1173`）归并，
@@ -230,14 +290,14 @@ UI 推流通道属于 Thinker 的内部事，**不要**把它伪装成事件流�
 ## 8. `Bootable`：客户端什么时候建
 
 `openai.NewClient(opts ...option.RequestOption)` 不做网络握手（`client.go:111`），所以
-**没有必须提前打开的东西就别声明 `Boot`**。要校验密钥、预热模型目录、准备连接池时才声明：
+**没有必须提前打开的东西就别声明 `Boot`**：客户端交给 §9 的构造器，`Boot` 只承载真正的
+fail-fast（校验密钥、预热模型目录、准备连接池）。
 
 ```go
 func (t *chatThinker) Boot(ctx context.Context) error {
     if os.Getenv("OPENAI_API_KEY") == "" {
         return errors.New("openai thinker: OPENAI_API_KEY is empty")
     }
-    t.client = openai.NewClient(option.WithMaxRetries(0))
     return nil
 }
 ```
@@ -246,69 +306,128 @@ func (t *chatThinker) Boot(ctx context.Context) error {
 （`api/assemble.go`），`Replace` 换入时同样先启动再提交。**一次装配只启动一次**，
 所以这个 Thinker 实例属于一个 agent，不跨 `New` 复用（`internal/nerve/lifecycle.go`）。
 
+用 `nerve.FallbackThinker` 包多个脑时要记住：组合器**不转发 Boot**（框架对交进来的端口值
+做能力断言，`internal/nerve/compose.go:29`）。成员各自需要启动就在组合前自己启动，
+或者只把 `Boot` 声明在最外层实际使用的那个实例上。
+
 ## 9. 参考实现（非流式，可直接改）
 
 ```go
+type turn struct {
+    text  string             // 模型这一轮说的话（重建历史时插回）
+    calls []meowire.ToolCall // 它这一轮发出的调用（含被膜拒掉的）
+}
+
 type chatThinker struct {
-    client  openai.Client
-    model   openai.ChatModel
-    tools   []openai.ChatCompletionToolUnionParam
-    issued  map[string]meowire.ToolCall
+    client openai.Client
+    model  openai.ChatModel
+
+    mu    sync.Mutex             // Think 会被并发调用，见 §3
+    turns []turn                 // 本 invocation 的模型轮次，按序
+}
+
+func newChatThinker(model openai.ChatModel) *chatThinker {
+    return &chatThinker{
+        client: openai.NewClient(option.WithMaxRetries(0)),   // §6：重试只留一层
+        model:  model,
+    }
+}
+
+// Reset 开一次新对话，由宿主在自己的调用侧触发——只有它知道哪一次是新的。
+// 别拿 BeforeStimulate 当这个信号：它是 Cycle 与 Resume 共享的序言
+// （internal/nerve/loop.go:142-151），挂起-恢复也会走它，一 Reset 就把
+// 正在恢复的那份对话抹掉了。Resume 不调 Reset，turns 原样留着，
+// 这正是恢复后还要能重建 assistant/tool 配对的原因。
+func (t *chatThinker) Reset() {
+    t.mu.Lock()
+    t.turns = nil
+    t.mu.Unlock()
 }
 
 func (t *chatThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-    msgs := []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(renderFixed(p))}
-
-    for _, tr := range p.ToolResults {
-        call, ok := t.issued[tr.ID]
-        if !ok {                                   // 无配对的退路：并进文本轨
-            msgs = append(msgs, openai.UserMessage("tool "+tr.Name+" result: "+firstNonEmpty(tr.Result, tr.Err)))
-            continue
-        }
-        msgs = append(msgs, openai.ChatCompletionMessageParamUnion{
-            OfAssistant: &openai.ChatCompletionAssistantMessageParam{
-                ToolCalls: []openai.ChatCompletionMessageToolCallUnionParam{{
-                    OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-                        ID:   call.ID,
-                        Type: "function",
-                        Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-                            Name:      call.Name,
-                            Arguments: call.Args,
-                        },
-                    },
-                }},
-            },
-        })
-        msgs = append(msgs, openai.ToolMessage(firstNonEmpty(tr.Err, tr.Result), tr.ID))
+    tools, err := toolParams(p)                       // §5：每轮现读 p.Tools
+    if err != nil {
+        return nil, err
     }
+    msgs := []openai.ChatCompletionMessageParamUnion{
+        openai.SystemMessage(render(p)),              // §2 表里全部固定段
+    }
+    msgs = append(msgs, t.transcript(p.ToolResults)...)
     msgs = append(msgs, openai.UserMessage(p.Input))
 
     complete, err := t.client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-        Messages: msgs, Model: t.model, Tools: t.tools,
+        Messages: msgs, Model: t.model, Tools: tools,
     })
     if err != nil {
-        return nil, fmt.Errorf("openai thinker: %w", err)   // 内核按 MaxRetries 重投同一 Prompt
+        return nil, fmt.Errorf("openai thinker: %w", err)   // 内核可能按 MaxRetries 重投，见 §6
     }
     if len(complete.Choices) == 0 {
         return nil, errors.New("openai thinker: completion has no choices")
     }
-    return t.decisionOf(complete), nil
+    return t.decisionOf(complete), nil                      // §4
+}
+
+// transcript 按 §3 的形状重建：一个 turn 一条 assistant（带该轮文本与全部
+// tool_calls），随后按同序各跟一条 tool 消息。内核跨轮累积 ToolResults，
+// 所以这里按自己记的 turn 走，而不是按结果切片猜分组。
+func (t *chatThinker) transcript(results []meowire.ToolResult) []openai.ChatCompletionMessageParamUnion {
+    t.mu.Lock()
+    defer t.mu.Unlock()
+
+    content := make(map[string]string, len(results))
+    for _, tr := range results {
+        content[tr.ID] = cmp.Or(tr.Err, tr.Result)
+    }
+
+    var msgs []openai.ChatCompletionMessageParamUnion
+    for _, tn := range t.turns {
+        if len(tn.calls) == 0 {
+            continue
+        }
+        calls := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(tn.calls))
+        for _, c := range tn.calls {
+            calls = append(calls, openai.ChatCompletionMessageToolCallUnionParam{
+                OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+                    ID: c.ID,
+                    Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+                        Name: c.Name, Arguments: c.Args,
+                    },
+                },
+            })
+        }
+        msgs = append(msgs, openai.ChatCompletionMessageParamUnion{
+            OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+                Content:   openai.ChatCompletionAssistantMessageParamContentUnion{OfString: openai.String(tn.text)},
+                ToolCalls: calls,
+            },
+        })
+        for _, c := range tn.calls {
+            // 被膜拒掉的调用不进 ToolResults（§2），但模型确实说过要调它：
+            // 每个 tool_call 必须有一条 tool 消息回应，缺一条整个请求就非法，
+            // 所以补占位。拒绝原因已经以 [sandbox-denied: ...] 在 Context 里给过模型。
+            msgs = append(msgs, openai.ToolMessage(cmp.Or(content[c.ID], "(withheld)"), c.ID))
+        }
+    }
+    return msgs
 }
 ```
 
-`renderFixed` 拼 §2 表里全部标"同一消息"的段，`decisionOf` 就是 §4 的代码。
-把 `Tools` 的构造放在宿主启动期而不是每轮 `Think` 里：`p.Tools` 是固定的
-（`Connectome` 把 `Tools` 归在构造期注入的固定段），重算只做浪费。
+`render` 拼 §2 表里全部标"同一消息"的段（含 `Memories` / `Stimuli` 的渲染），
+`decisionOf` 就是 §4 的代码。工具表**必须每轮现建**（`toolParams(p)`）：
+`BeforeStimulate` 可以整体改写 `p.Tools`，缓存到启动期会静默丢掉改写，
+代价只是一次 JSON 反序列化。固定段与动态段分开的收益（前缀缓存）在 §2 末。
 
 ## 10. 交付前自检
 
 - [ ] `Prompt` 13 个字段各有落点，特别是 `Memories` / `Stimuli` / `Reflection` / `Inhibit`
-- [ ] 每个 `tool` 消息前有一条 `assistant(tool_calls)`；查不到配对时走文本轨
+- [ ] assistant 里每个 `tool_call_id` 都有一条 `tool` 消息回话，**包括被膜拒掉的**
+- [ ] `Tools` 每轮从 `p.Tools` 现建并剔除 `p.Inhibit`（没有启动期缓存）
+- [ ] Thinker 的共享缓存有锁，`Reset` 的触发点由宿主定（不是 `BeforeStimulate`）
 - [ ] 只有一层重试（`option.WithMaxRetries(0)` + `Config.MaxRetries`，或反之）
 - [ ] `ctx` 一路透传，`Think` 内没有 `WithoutCancel`
 - [ ] `Usage` 为零值时返回 `nil`，不发假 `EventUsage`
 - [ ] 流式推流策略与 `Sandbox.Emit` 的关系被写明（§7 三选一）
-- [ ] 声明了 `Bootable` 的话，该实例只用于一个 agent
+- [ ] 声明了 `Bootable` 的话，该实例只用于一个 agent；组合进 `Fallback*` 时成员自己启动
 - [ ] 本仓库仍然零三方依赖：这些代码在宿主仓，不在 meowire
 
 ---
