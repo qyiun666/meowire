@@ -431,7 +431,7 @@ EventState(error) → EventError(Err)
 | `EventReplace` | `Replace *ReplaceAudit` | 端口替换审计：`ReplaceAudit{CellID, Slot, OldType, NewType}`（端口按 Go 类型名记录，不持有值）；下一次 Stimulate/Resume 开头（生效时刻）按序产出，可持久化 |
 | `EventConfig` | `Config *ConfigAudit` | 配置整包替换审计：`ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`；下一次 Stimulate/Resume 开头在 EventReplace 之后按序产出，可持久化 |
 
-`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`：膜在循环两侧的每一次裁决各产出一条（`Ruling` 三态：Deny 为零值，fail-closed），`Call` 为工具侧被门禁的调用、零值即文本侧。ask 裁决再产出终结记录闭合审计链（拒绝含拒绝文本，批准 Ruling=allow 且 Reason 空）。宿主持久化事件流即得到审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
+`SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}`：膜在循环两侧的每一次裁决各产出一条（`Ruling` 三态：Deny 为零值，fail-closed），`Call` 为工具侧被门禁的调用、零值即文本侧。ask 裁决再产出终结记录闭合审计链（`Reason` 存宿主的批复本身：拒绝落为 `[sandbox-denied: ...]`，批准则原样保留答复文本）。宿主持久化事件流即得到审计日志（谁、代表谁、何时、做了什么、为什么被允许）。详见 [protocols.md](protocols.md) §4 Authority。
 
 ### 6.3 宿主必须掌握的两个语义
 

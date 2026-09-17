@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **集成文档的"完整骨架"不再缺端口**：§8 的 `Organs` 少了第七端口 `Mem`，照抄即
   `required port Mem not injected`；同一份文档里 `hooksFor` 只给八个回调中的三个（缺任一即装配失败），
   示例里引用的 `TaskStatus` 还是一个从未定义、且与框架同名类型撞名的宿主结构
+- **膜的 ask 终结记录写的是宿主批复本身**：三份文档都写"批准时 `Ruling=allow` 且 `Reason` 为空"，
+  实际 `Reason` 存的就是宿主回的那句——照文档写审计日志的宿主会丢掉"谁批的、批的什么"
 
 ### Changed
 

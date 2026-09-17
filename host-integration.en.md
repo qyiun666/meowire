@@ -541,7 +541,7 @@ that could not cross the event wire (§6.5) — the loop itself never fills it, 
 either side of the loop (`Ruling` is tri-state; Deny is the zero value — fail-closed), where `Call`
 is the gated tool action and a zero `Call` means the ruling was about this round's text; an ask
 ruling produces two records on one chain (ask → resolve — the terminal record
-carries the final ruling: deny keeps its text, approval shows allow with an empty Reason).
+carries the final ruling and the host's response in `Reason`: a denial lands as `[sandbox-denied: ...]`, an approval keeps the reply verbatim).
 Persisting the event stream yields
 the action-level audit log (who, on whose behalf, when, what, why permitted). See
 [protocols.md](protocols.md) §4 Authority.
