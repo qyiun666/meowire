@@ -68,6 +68,8 @@ type Thinker interface {
 - 流式输出在 Thinker 内部自行消费（如推给 WebSocket channel）；事件流只承载整段 Text
 - **必须监控 `ctx.Done`**（长请求可被框架取消）
 - 同一 Agent 并发 Stimulate 时 Thinker 必须并发安全
+- 逐字段落地（含 assistant/tool 配对、两层重试的取舍、流式与出口膜的时序）以一个真实 SDK 为例写在
+  [thinker-openai-go.md](thinker-openai-go.md)
 
 ### 2.2 Effector —— 工具执行器（手）
 

@@ -76,6 +76,9 @@ type Thinker interface {
   the event stream only carries whole-segment Text
 - **Must respect `ctx.Done`** (long requests may be cancelled by the framework)
 - Must be concurrency-safe if the same Agent is stimulated concurrently
+- Field-by-field landing (assistant/tool pairing, which of the two retry layers to keep,
+  streaming versus the output membrane) is written up against a real SDK in
+  [thinker-openai-go.md](thinker-openai-go.md) (zh-CN)
 
 ### 2.2 Effector — the tool executor (the hands)
 

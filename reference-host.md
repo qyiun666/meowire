@@ -229,8 +229,16 @@ func (t *thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decisi
 | `Tools` | `tools` 参数 | function schema（Step 3 下） |
 | `Context` | 多条 `system`/`user` | 记忆基底 + 框架追加的 sandbox 裁决（工具结果不在文本轨） |
 | `ToolResults` | 追加进 `user` | 结构化工具结果（`[tool_call_id=xxx]` 标记条目，见下）——框架唯一反馈轨道，必须渲染 |
+| `Memories` | 追加进 `system` 或前置 `user` | 本轮召回结果（宿主决定编排位置；每轮整体替换，不累积） |
+| `Stimuli` | 追加进 `user` | 收件箱里的邻居来信（`[]Signal`，按 `Kind` 分类渲染；宿主不渲染就等于没收到） |
+| `Inhibit` | 追加进 `system` + 从 `tools` 剔除 | 本轮被 notice 撤回的工具名：既要说"不可用"，也不要再把它交给模型 |
+| `Reflection` | 追加进 `system` | 宿主在 `BeforeStimulate` 写的本轮复盘笔记（空 = 无） |
 | `Input` | `user` 消息 | 本次刺激 |
 | `Plan` | 追加进 `user` | 任务计划 |
+
+上表是 `Prompt` 的**完整**字段清单：漏渲染哪个字段，那个器官这一轮就没有说话。
+下面的 `buildMessages` 只演示骨架（省略了后四个的拼接），逐字段落地见
+[thinker-openai-go.md](thinker-openai-go.md) §2。
 
 ```go
 func buildMessages(p *meowire.Prompt) []chatMsg {

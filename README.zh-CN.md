@@ -321,6 +321,7 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | 宿主集成指南 | [host-integration.md](host-integration.md) |
+| Thinker 适配文档 | [thinker-openai-go.md](thinker-openai-go.md) — 以一个真实 SDK 为例逐字段落地 |
 | 宿主参考实现 | [reference-host.md](reference-host.md) — 按步骤从零实现一个 AI 宿主 |
 | 协议映射指南 | [protocols.md](protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

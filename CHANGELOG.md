@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`thinker-openai-go.md`** — 把 `Thinker` 接到一个真实 LLM SDK（`openai-go/v3`）的适配文档，
+  SDK 签名逐条对 module cache 源码核实：`Prompt` 13 个字段的完整落点表、
+  `assistant(tool_calls)` 与 `tool` 必须成对这条承重约束的宿主侧做法（内核只回声 `ID/Name/Result/Err`）、
+  两层重试不要相乘（SDK 默认 2 次 × 内核 `MaxRetries` 无退避重投）、`*openai.Error` 的断言形状、
+  流式累加与**出口膜在整轮文本之后才裁决**的时序后果
+
 ### Fixed
 
 - **一轮只有一个挂起名额，谁占住谁说清楚**：并行批次里后到的等待请求（第二个 `Effect.Send`、
