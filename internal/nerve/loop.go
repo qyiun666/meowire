@@ -31,6 +31,7 @@ type LoopContext struct {
 	Hooks   *Hooks
 	Sandbox Sandbox
 	Budget  *ContextBudget
+	Mem     Memory
 	// Pause is framework-injected wiring (api layer), not a host port.
 	Pause *PauseGate
 
@@ -70,6 +71,11 @@ type LoopContext struct {
 	// Reflection slot (host injected via BeforeStimulate write-back /
 	// base assembly): the Reflexion note passed through to every Think.
 	Reflection string
+
+	// Memories is this round's recall output: replaced wholesale before every
+	// Think, never accumulated and never carried into a Session — a resumed
+	// loop recalls against the round it resumes into.
+	Memories []Record
 
 	// outcome records how this invocation ended (first mark wins; zero =
 	// nothing terminal reached = consumer abort). Delivered by OnCycleEnd.
@@ -201,14 +207,17 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 }
 
 // cycleGuarantees returns the deferred cleanup shared by Cycle and Resume:
-// OnCycleEnd and AfterStimulate are guaranteed exactly once per invocation —
-// on normal completion, error path, suspension, or early consumer stop
-// (yield=false). AfterStimulate is protected from an OnCycleEnd panic via a
-// nested defer. finalOutput is dereferenced at cleanup time.
+// Remember, OnCycleEnd and AfterStimulate are guaranteed exactly once per
+// invocation — on normal completion, error path, suspension, or early consumer
+// stop (yield=false). Remember runs first so the organ sees the same terminal
+// the hooks do and its own failure cannot rewrite it. AfterStimulate is
+// protected from an OnCycleEnd panic via a nested defer. finalOutput is
+// dereferenced at cleanup time.
 func cycleGuarantees(ctx context.Context, lc *LoopContext, finalOutput *string) func() {
 	return func() {
 		defer func() { lc.Hooks.AfterStimulate(ctx, *finalOutput) }()
 		lc.endWith(OutcomeAborted) // no terminal reached: consumer stopped early
+		lc.remember(ctx, *finalOutput)
 		lc.Hooks.OnCycleEnd(ctx, *finalOutput, lc.outcome)
 	}
 }
@@ -312,15 +321,22 @@ func settleRound(lc *LoopContext, b *actBatch, round int) string {
 	return final
 }
 
-// think runs one round's Think phase: context budget trimming, the
-// StateThinking event, prompt assembly, Think with retry, AfterThink, then the
-// text and usage events. It returns the decision, or nil when the loop must
+// think runs one round's Think phase: context budget trimming, memory recall,
+// the StateThinking event, prompt assembly, Think with retry, AfterThink, then
+// the text and usage events. It returns the decision, or nil when the loop must
 // end (an error was emitted or the consumer stopped).
 func (b *actBatch) think() (*Decision, bool) {
 	lc := b.lc
 
 	// Apply the regulator to both accumulating tracks before each Think
 	lc.metabolize()
+
+	// Fill this round's memory track before the prompt is assembled, so the
+	// BeforeThink hook sees what was recalled and may overwrite it.
+	if err := lc.recall(b.ctx); err != nil {
+		emitError(b.ctx, lc, b.yield, err)
+		return nil, false
+	}
 
 	lc.State = StateThinking
 	if !b.yield(Event{Kind: EventState, State: StateThinking}) {

@@ -26,6 +26,7 @@ type Cell struct {
 	Hooks   *nerve.Hooks
 	Sandbox nerve.Sandbox
 	Budget  *nerve.ContextBudget
+	Mem     nerve.Memory
 	// PauseGate returns a fresh pause gate per Stimulate (framework wiring,
 	// injected by the api layer; nil = pause unsupported).
 	PauseGate func() *nerve.PauseGate
@@ -102,6 +103,7 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 	c.wireMu.Lock()
 	think, act := c.Think, c.Act
 	hooks, sandbox, budget := c.Hooks, c.Sandbox, c.Budget
+	mem := c.Mem
 	pauseGate := c.PauseGate
 	cfg := c.Config
 	pendingReplace := c.pendingReplace
@@ -121,6 +123,7 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 		Hooks:          hooks,
 		Sandbox:        sandbox,
 		Budget:         budget,
+		Mem:            mem,
 		MaxRounds:      cfg.MaxRounds,
 		MaxToolOutput:  cfg.MaxToolOutput,
 		MaxRetries:     cfg.MaxRetries,
@@ -207,6 +210,11 @@ var swapSlots = map[string]swapSpec{
 		assert: assertBudget,
 		load:   func(c *Cell) any { return c.Budget },
 		store:  func(c *Cell, v any) { c.Budget = v.(*nerve.ContextBudget) },
+	},
+	"mem": {
+		assert: func(p any) (any, error) { return wantPort[nerve.Memory]("mem", "non-nil nerve.Memory", p) },
+		load:   func(c *Cell) any { return c.Mem },
+		store:  func(c *Cell, v any) { c.Mem = v.(nerve.Memory) },
 	},
 	"hooks": {
 		assert: assertHooks,

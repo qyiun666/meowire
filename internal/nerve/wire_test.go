@@ -56,7 +56,7 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 		byID[wp.ID] = wp
 	}
 	want := []string{
-		"P1", "P2", "P3", "P4", "P5", "P5b", "P6", // ports
+		"P1", "P2", "P3", "P4", "P5", "P5b", "P6", "P6b", "P7", "P7b", // ports
 		"H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", // hooks
 		"F1", "G1", // framework built-ins
 	}
@@ -68,11 +68,12 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 }
 
 // TestConnectomeRequiredPorts verifies every wiring point is required: the
-// six Organs ports, the eight hooks (all required since 1.2.0 — explicit
-// no-op, not absence) and the framework-built-in F1.
+// seven Organs ports, the eight hooks (all required since 1.2.0 — explicit
+// no-op, not absence) and the framework-built-in F1. Implied sub-slots ride
+// their parent port.
 func TestConnectomeRequiredPorts(t *testing.T) {
 	required := map[string]bool{
-		"P1": true, "P2": true, "P3": true, "P4": true, "P5": true, "P6": true,
+		"P1": true, "P2": true, "P3": true, "P4": true, "P5": true, "P6": true, "P7": true,
 		"H1": true, "H2": true, "H3": true, "H4": true, "H5": true, "H6": true, "H7": true, "H8": true,
 		"F1": true, // built-in, always active
 	}

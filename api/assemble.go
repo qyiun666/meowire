@@ -27,6 +27,7 @@ type Organs struct {
 	Hooks   *Hooks         // Required
 	Sandbox Sandbox        // Required
 	Budget  *ContextBudget // Required
+	Mem     Memory         // Required
 
 	// Fixed parts injected into every LoopContext
 	System   string
@@ -113,6 +114,7 @@ func New(b Blueprint) (*Agent, error) {
 		Hooks:    o.Hooks,
 		Sandbox:  o.Sandbox,
 		Budget:   o.Budget,
+		Mem:      o.Mem,
 		Config:   cfg,
 		System:   o.System,
 		Methods:  o.Methods,

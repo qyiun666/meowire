@@ -28,7 +28,7 @@ func fullHooks() *meowire.Hooks {
 	}
 }
 
-// fullOrgans returns an Organs with all required ports wired (six ports +
+// fullOrgans returns an Organs with all required ports wired (seven ports +
 // eight hook callbacks + a working ContextBudget trimmer).
 func fullOrgans() meowire.Organs {
 	return meowire.Organs{
@@ -42,6 +42,7 @@ func fullOrgans() meowire.Organs {
 		Hooks:   fullHooks(),
 		Sandbox: testutil.Sandbox{},
 		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }, TrimResults: func(rs []meowire.ToolResult, _ int) []meowire.ToolResult { return rs }},
+		Mem:     testutil.Memory{},
 	}
 }
 
@@ -225,14 +226,18 @@ func TestDefaultID(t *testing.T) {
 	}
 }
 
-// TestFullOrgansWiring verifies Sandbox/Budget/Identity/Methods/Context reach the loop.
+// TestFullOrgansWiring verifies Sandbox/Budget/Memory/Identity/Methods/Context reach the loop.
 func TestFullOrgansWiring(t *testing.T) {
 	var (
-		sandboxCalled bool
-		trimmerCalled bool
-		gotIdentity   string
-		gotMethods    []meowire.MethodSpec
-		firstCtx      []string
+		sandboxCalled  bool
+		trimmerCalled  bool
+		recallCalled   bool
+		rememberCalled bool
+		gotMemories    []meowire.Record
+		gotFacts       meowire.CycleFacts
+		gotIdentity    string
+		gotMethods     []meowire.MethodSpec
+		firstCtx       []string
 	)
 	calls := 0
 	a, err := testNew(meowire.Organs{
@@ -242,6 +247,7 @@ func TestFullOrgansWiring(t *testing.T) {
 			gotMethods = p.Methods
 			if calls == 0 {
 				firstCtx = p.Context
+				gotMemories = p.Memories
 			}
 			calls++
 			if calls == 1 {
@@ -265,6 +271,17 @@ func TestFullOrgansWiring(t *testing.T) {
 				return ctx
 			},
 			TrimResults: func(rs []meowire.ToolResult, _ int) []meowire.ToolResult { return rs }},
+		Mem: testutil.Memory{
+			RecallFn: func(context.Context, meowire.MemoryQuery) ([]meowire.Record, error) {
+				recallCalled = true
+				return []meowire.Record{{Key: "k1", CellID: "wired-agent", Content: []byte("note")}}, nil
+			},
+			RememberFn: func(_ context.Context, f meowire.CycleFacts) error {
+				rememberCalled = true
+				gotFacts = f
+				return nil
+			},
+		},
 		System:   "sys",
 		Methods:  []meowire.MethodSpec{{Name: "m1", Desc: "md"}},
 		Tools:    []meowire.ToolSpec{{Name: "t1", Desc: "d"}},
@@ -281,6 +298,19 @@ func TestFullOrgansWiring(t *testing.T) {
 	}
 	if !trimmerCalled {
 		t.Fatal("Budget.Trimmer should have been called")
+	}
+	if !recallCalled {
+		t.Fatal("Memory.Recall should have been called before the first Think")
+	}
+	if len(gotMemories) != 1 || string(gotMemories[0].Content) != "note" {
+		t.Fatalf("first Think Memories = %+v, want one record carrying %q", gotMemories, "note")
+	}
+	if !rememberCalled {
+		t.Fatal("Memory.Remember should have been called once at the terminal")
+	}
+	if gotFacts.CellID != "wired-agent" || gotFacts.Input != "work" ||
+		gotFacts.Output != "tok" || gotFacts.Outcome != meowire.OutcomeDone {
+		t.Fatalf("Remember facts = %+v, want {wired-agent work tok Done}", gotFacts)
 	}
 	if gotIdentity != "wire" {
 		t.Fatalf("Identity = %q, want %q", gotIdentity, "wire")

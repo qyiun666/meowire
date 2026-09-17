@@ -12,11 +12,11 @@ you can rely on.
 ## Why Meowire
 
 - **You own the intelligence.** Meowire provides no LLM adapter, no tool framework, no memory
-  backend — it injects six host ports and expects you to implement them. The framework never
+  backend — it injects seven host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~1.9k lines of source. The entire loop is one file
-  (`internal/nerve/loop.go`, ~530 lines with tests).
+- **Small and readable.** ~3.5k lines of Go. The decision loop reads as one concern
+  per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
 
@@ -48,11 +48,12 @@ you can rely on.
   decides when to learn); persistence round-trip via `Edges` export + `NewDirect` restore
 - **Unified composite view** — `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` merge the
   static assembly subgraph with the live synapse graph into one picture (view unified, data separate)
-- **Six host-injected ports, all organs required** (no stubs, no optional
+- **Seven host-injected ports, all organs required** (no stubs, no optional
   wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (token
-  regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens)
+  regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens),
+  `Memory` (experience port — `Recall` before each Think, `Remember` once per invocation)
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
@@ -114,9 +115,8 @@ you can rely on.
 meowire (module root)
   └── api/            facade + composition root — the sole public surface
       ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
-      ├── internal/nerve    decision loop, ports, hooks, events, guards
-      ├── internal/synapse  inter-agent connection & delivery contract (host reference)
-      └── internal/memory   memory CRUD contract (host reference, not consumed by the framework)
+      ├── internal/nerve    decision loop, ports (incl. memory), hooks, events, guards
+      └── internal/synapse  inter-agent connection & delivery contract (host reference)
 ```
 
 | Concept | Where | Role |
@@ -128,6 +128,7 @@ meowire (module root)
 | `Hooks` | ports | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | guard | Tool permission gate, invoked before each Act; `Bounds()` surfaces the execution boundary to the Thinker via `Prompt.Bounds` |
 | `ContextBudget` | guard | Trims the text `Context` and the structured `ToolResults` before each Think, same limit |
+| `Memory` | port | Recalls this round's records into `Prompt.Memories`; takes the finished cycle's facts back |
 | `Event` | events | Typed observation mirror of the loop |
 | `Synapse` / `Memory` | internal | Standalone reference contracts for hosts |
 
@@ -143,7 +144,7 @@ Import the facade package — the sole public surface:
 import meowire "github.com/qyiun666/meowire/api"
 ```
 
-For the full host-side integration contract — the six ports, field-by-field
+For the full host-side integration contract — the seven ports, field-by-field
 semantics, the event stream, and the pitfalls — see the
 [Host Integration Guide](host-integration.en.md).
 
@@ -187,6 +188,15 @@ func (sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, st
 
 func (sandbox) Bounds() string { return "read-only /workspace" }
 
+// memory implements meowire.Memory — the experience port.
+type memory struct{}
+
+func (memory) Recall(context.Context, meowire.MemoryQuery) ([]meowire.Record, error) {
+	return nil, nil
+}
+
+func (memory) Remember(context.Context, meowire.CycleFacts) error { return nil }
+
 func main() {
 	// Blueprint: define once, New many times (flat-model multi-agent)
 	bp := meowire.Blueprint{
@@ -201,6 +211,7 @@ func main() {
 				Trimmer:     func(c []string, max int) []string { return c },
 				TrimResults: func(rs []meowire.ToolResult, max int) []meowire.ToolResult { return rs },
 			},
+			Mem:     memory{},
 		},
 		Config: meowire.Config{},
 	}
@@ -274,11 +285,13 @@ continue from the suspended point — no extra round, no budget during the wait.
 the loop ends with `ErrMaxRounds` — the tool results from that round were never re-thought.
 Use Step-Resume to continue from where the loop stopped.
 
-### Memory is host-managed (MemHop)
+### Memory: the framework owns the timepoints, you own the store
 
-The framework never stores history. You keep the conversation context yourself and inject it via
-`Organs.Context` (or per-round via `Hooks.BeforeThink`). `internal/memory` provides a reference
-`Memory` contract (`Save` / `Recall` / `Forget`) for your backend — the framework does not consume it.
+The framework never stores anything. The `Memory` port decides *when* experience moves: `Recall`
+before every Think (into `Prompt.Memories`, replaced wholesale per round), `Remember` once per
+invocation at its terminal (carrying `CycleFacts`). What is stored, how it is retrieved, and when
+it is deleted stays yours (MemHop). The text track is unchanged: `Organs.Context` and
+`Hooks.BeforeThink` still feed `Prompt.Context`.
 
 ## Multi-agent
 

@@ -31,7 +31,6 @@ var repoDirs = []string{
 	".",
 	"../cell",
 	"../synapse",
-	"../memory",
 	"../testutil",
 	"../../api",
 }

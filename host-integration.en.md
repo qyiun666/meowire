@@ -8,11 +8,11 @@
 
 ## 0. The One-Line Model
 
-meowire is a **pure orchestration kernel**: the host implements six ports
-(LLM, tools, cleanup, hooks, permission gate, context trimming), and the
+meowire is a **pure orchestration kernel**: the host implements seven ports
+(LLM, tools, cleanup, hooks, permission gate, context trimming, experience memory), and the
 framework runs the Think → Act → yield event loop. **The framework does not
 manage history, does not manage multi-agent, and provides no default
-implementations** — all six ports are required; a missing one is an error.
+implementations** — all seven ports are required; a missing one is an error.
 
 The host touches exactly three methods: `New` (assembly), `Stimulate` (run one
 step), `Close` (shutdown).
@@ -20,12 +20,12 @@ step), `Close` (shutdown).
 ## 1. Integration Flow Overview (6 Steps)
 
 ```
-Implement six ports → Assemble Organs → Set Config → Assemble Blueprint → New() → Stimulate() consume event stream → Close()
+Implement seven ports → Assemble Organs → Set Config → Assemble Blueprint → New() → Stimulate() consume event stream → Close()
 ```
 
 | Step | What | Key point |
 |------|------|-----------|
-| 1 | Implement Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | All six ports required |
+| 1 | Implement Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget/Memory | All seven ports required |
 | 2 | Assemble the `Organs` struct | Inject ports + fixed context |
 | 3 | Set `Config` | Zero values are defaults; nothing must be set explicitly |
 | 4 | Assemble `Blueprint{Organs, Config}` and `New(bp)` | Missing port/callback returns an error; incomplete Budget too |
@@ -211,6 +211,31 @@ type ContextBudget struct {
 - Return the input slice unchanged to skip trimming (the function must still be
   provided: a Budget carrying only `Trimmer` fails assembly)
 
+### 2.8 Memory — the experience port
+
+```go
+type Memory interface {
+    Recall(ctx context.Context, q MemoryQuery) ([]Record, error) // before every Think
+    Remember(ctx context.Context, facts CycleFacts) error        // once at the invocation terminal
+}
+```
+
+- The framework owns only the **two timepoints**: `Recall` runs after the budget trim and
+  before the `BeforeThink` hook; `Remember` runs before `OnCycleEnd`, exactly once on each of
+  the four exit arms (done / error / suspension / consumer abort)
+- What recall returns lands in `Prompt.Memories` (the structured track, separate from H3's
+  text track `p.Context`): **replaced wholesale each round, never accumulated, never carried
+  into a `Session` snapshot** — the round that resumes recalls again
+- `MemoryQuery` carries only the two things the framework knows: who is asking (`CellID`) and
+  what this invocation was asked (`Cue`); the retrieval algorithm, ranking, how many records
+  and how long they live all belong to the organ
+- `CycleFacts` carries only what the framework builds by construction: `CellID` / `Input` /
+  `Output` / `Outcome`; what is worth writing never passes through this port, and
+  **deletion and forgetting never do either** (the host does that against its own backend)
+- A failing `Recall` ends that Think with an error (the organ is part of the assembly — the
+  framework does not decide to think on half a context); a failing `Remember` never rewrites
+  the already-decided outcome and reaches the host through `OnError`
+
 ---
 
 ## 3. Step 2: Assemble `Organs` (composition root — the single assembly point)
@@ -224,6 +249,7 @@ o := meowire.Organs{
     Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: ...}), // required: all eight callbacks (helper fills missing ones)
     Sandbox: mySandbox,                         // required
     Budget:  &meowire.ContextBudget{...},       // required
+    Mem:     myMemory,                         // required
 
     System:   "You are a meow agent, answer in English", // fixed system instructions
     Identity: "You are meow, role assistant, warm tone",   // identity description text (host composed)
@@ -244,6 +270,7 @@ o := meowire.Organs{
 | `Hooks` | *Hooks | Interception callbacks (all eight callbacks required) | **yes** |
 | `Sandbox` | Sandbox | Permission gate | **yes** |
 | `Budget` | *ContextBudget | Token regulator (text track + structured-feedback track) | **yes** |
+| `Mem` | Memory | Experience port (`Recall` before each Think, `Remember` at the invocation terminal) | **yes** |
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
 | `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
@@ -294,7 +321,7 @@ agent.UpdateConfig(cfg)   // wholesale swap: takes effect at the next Stimulate/
 
 ```go
 type Blueprint struct {
-    Organs Organs   // six ports + fixed context (all required)
+    Organs Organs   // seven ports + fixed context (all required)
     Config Config   // zero values are defaults
 }
 
@@ -310,7 +337,7 @@ agent, err := meowire.New(bp)
   - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
 - After assembly the host calls `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`, and may
   swap ports at runtime via `Replace` and export the capability card via `AgentCard` (below)
-- All six ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
+- All seven ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
 
 ### 5.1 Dynamic wiring: `Replace` (runtime organ swap)
 
@@ -318,7 +345,7 @@ agent, err := meowire.New(bp)
 oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at the next Stimulate
 ```
 
-- Swappable slots: `SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks` (the
+- Swappable slots: `SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks` (the
   blueprint's `WirePoint.Slot` field is the single source; `Connectome()` / `SwappableSlots()`
   enumerate it and a guard test pins the constants to it);
   `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable
@@ -569,22 +596,6 @@ with `errors.Join`. Stimulate/Resume after Close returns `ErrCellClosed`. The ho
 should `defer agent.Close()`.
 
 ### 7.2 Optional extensions
-
-**Memory (host-built backend)**: `internal/memory` is a reference contract the
-framework does **not** consume:
-
-```go
-type Record struct { Key, CellID, Kind string; Content []byte; Created int64 }  // Created is Unix seconds
-type Query  struct { CellID, Prefix, Kind string; Limit int }                  // empty CellID matches all; Limit<=0 unlimited
-type Memory interface {
-    Save(ctx, Record) error
-    Recall(ctx, Query) ([]Record, error)
-    Forget(ctx, key, cellID string) error
-}
-```
-
-The host implements a backend and injects it into the loop via
-`Organs.Context` + `Hooks.BeforeThink` (MemHop pattern).
 
 **Synapse (inter-agent messaging reference; a plastic synapse graph since 1.1.1)**:
 

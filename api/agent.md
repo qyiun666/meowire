@@ -11,7 +11,6 @@
 - internal/cell (agent kernel)
 - internal/nerve (Event, ports, Hooks, MethodSpec, Signal)
 - internal/synapse (inter-agent connections, re-exported errors)
-- internal/memory (Memory/Record/Query type aliases)
 - Go standard library only
 
 ## Sealed Internals
@@ -20,13 +19,13 @@
   outside this module (Go compiler enforced)
 - This api package is the sole public surface: New/Stimulate/Close plus the
   contract types in types.go
-- Hosts implement the six ports against api-package aliases
-  (Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget); they never touch
+- Hosts implement the seven ports against api-package aliases
+  (Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget/Memory); they never touch
   internal packages directly
 
 ## Interface Contract
 
-- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, System, Identity, Methods, Tools, Context}`: host port container — **all ports required, every hook callback required** (H1–H8: explicit no-op, not absence), a missing port or callback returns an error (no stubs, no default implementations)
+- `Organs{ID, Think, Act, Closer, Hooks, Sandbox, Budget, Mem, System, Identity, Methods, Tools, Context}`: host port container — **all ports required, every hook callback required** (H1–H8: explicit no-op, not absence), a missing port or callback returns an error (no stubs, no default implementations)
 - `Blueprint{Organs, Config}`: host assembly blueprint instance; define once, `New` many times. `New(b Blueprint) (*Agent, error)` — error-level findings (missing ports, incomplete ports) always block; info findings never block. No Strict flag: every wiring point is required, so there are no warn-level findings to promote
 - `FullHooks(h Hooks) *Hooks`: assembly helper — returns a copy with every nil callback filled by an explicit no-op; hosts declare only the hooks they need
 - `Config{MaxRounds, MaxToolOutput, MaxRetries, ToolTimeout, ToolMaxRetries, ParallelActs}` (alias of `nerve.LoopConfig`): zero values fall back to defaults (8 rounds, no truncation, no retry, no per-tool timeout/retry, strict serial tools); ParallelActs (v1.3.3, opt-in) executes a round's multi-tool batch concurrently — serial gating → parallel Act → serial feedback in call order; prerequisite: concurrency-safe Effector (Validate surfaces an info finding when enabled); `UpdateConfig(cfg)` swaps wholesale at runtime (next Stimulate/Resume takes effect, in-flight loop keeps its snapshot), `GetConfig()` reads current values (read-modify-write; a zero field resets to default)
@@ -34,14 +33,14 @@
 - Facade methods are thin delegates: `Stimulate` → Cell.Stimulate (returns `iter.Seq[Event]`); Close → Cell.Close + host Closer; Close is idempotent
 - `Pause()` / `Unpause()`: Agent-level pause control — idempotent, concurrency-safe, no-op after Close; takes effect at the next gap point (before each Think / tool execution); since v1.3.2 a pause yields EventState(StatePaused) + EventPaused (Session snapshot) and ends the iterator normally — resume via `Resume(sess, "")` (unified suspension-resume); `Unpause()` only clears a pause request that has not taken effect yet; `Resume` clears a stale pause request automatically
 - `Resume(ctx, sess Session, response string) iter.Seq[Event]`: continues a suspended loop from the Session captured in EventWaitInput (tool suspension) or EventPaused (pause suspension) — for a tool suspension the response is injected as the pending tool's structured result (ToolResults entry with the pending call's ID); for a pause suspension the response must be empty (pending.ID == "": nothing is injected, the loop just continues); for a sandbox ask suspension (`sess.sandboxAsk`, wire v2) the response follows the deny/approve grammar — "" denies as the `[sandbox-denied: declined]` feedback, a `[denied:` prefix denies with its text in the canonical `[sandbox-denied: ...]` form (input protocol and output feedback are distinct formats), anything else approves the pending call without re-gating; remaining tools of the suspended round run first, then the round loop resumes from the suspended round (no extra round, no budget during the wait); stream/hooks/guarantees isomorphic with Stimulate; zero-value Session rejected with an error event; after Close yields ErrCellClosed; persistence round-trip via `Session.Marshal()` / `meowire.UnmarshalSession(data)` (versioned JSON, cross-process recovery)
-- `Replace(slot, port) (any, error)`: dynamic wiring — runtime port swap (SlotThink/SlotAct/SlotSandbox/SlotBudget/SlotHooks); takes effect at the next Stimulate (in-flight Stimulate keeps its ports); returns the previous port; concurrency-safe; no-op after Close; **rejects nil/incomplete ports** (Budget needs Trimmer+MaxTokens, Hooks needs all eight callbacks); Closer/PauseGate never swappable; every successful swap records a `ReplaceAudit{CellID, Slot, Old, New}` emitted as EventReplace at the start of the next Stimulate/Resume (the moment the swap takes effect), before any other event
+- `Replace(slot, port) (any, error)`: dynamic wiring — runtime port swap (SlotThink/SlotAct/SlotSandbox/SlotBudget/SlotMem/SlotHooks — the set the blueprint's WirePoint.Slot values own); takes effect at the next Stimulate (in-flight Stimulate keeps its ports); returns the previous port; concurrency-safe; no-op after Close; **rejects nil/incomplete ports** (Budget needs Trimmer+TrimResults+MaxTokens, Hooks needs all eight callbacks); Closer/PauseGate never swappable; every successful swap records a `ReplaceAudit{CellID, Slot, Old, New}` emitted as EventReplace at the start of the next Stimulate/Resume (the moment the swap takes effect), before any other event
 - `AgentCard(o Organs) ([]byte, error)`: A2A-style capability card (JSON name/description/skills) projected from ID/Identity/Methods; publish at /.well-known/agent-card.json for agent discovery
 - After Close, Stimulate returns ErrCellClosed
 - Errors: ErrCellClosed defined here; synapse errors (ErrNoTarget/ErrNotLinked/ErrTargetBusy) re-exported via errors.go
 
 ## Wiring Blueprint (graph-based assembly inspection)
 
-- The blueprint is a **graph**: `ConnectomeNodes()` are the data-object nodes (prompt/context/toolresults/plan/bounds/decision/action/effect/err/output/timing/resources/hooks); `Connectome()` is the slot edge list (ports P1–P6 plus P5b/P6b, hooks H1–H8, built-ins F1/G1). Each edge carries ID/Name/Phase(1 framework·2 host port·3 hook)/Category(sense-decide-act)/TargetID(graph node it reads or mutates)/Semantics(replace-append-trim-gate-read-only-act-container)/Parallel/Required/Slot(Non-empty = the name `Cell.Replace` accepts for it — the single source of the swappable-slot list, which `nerve.SwappableSlots()` derives and both `cell`'s dispatch table and the `api` `Slot*` constants are tested against)/Desc
+- The blueprint is a **graph**: `ConnectomeNodes()` are the data-object nodes (prompt/context/toolresults/plan/bounds/decision/action/effect/err/output/timing/resources/hooks); `Connectome()` is the slot edge list (ports P1–P7 plus the P5b/P6b/P7b sub-slots, hooks H1–H8, built-ins F1/G1). Each edge carries ID/Name/Phase(1 framework·2 host port·3 hook)/Category(sense-decide-act)/TargetID(graph node it reads or mutates)/Semantics(replace-append-trim-gate-read-only-act-container)/Parallel/Required/Slot(Non-empty = the name `Cell.Replace` accepts for it — the single source of the swappable-slot list, which `nerve.SwappableSlots()` derives and both `cell`'s dispatch table and the `api` `Slot*` constants are tested against)/Desc
 - `WiringDiagram(o Organs) []Slot`: extracts actual assembly state (filled/unwired) from Organs — no host registration needed; built-ins always filled
 - `BuildGraph(o Organs) WiringGraph`: assembled graph — canonical nodes + slot edges with filled state
 - `SlotsByTarget(o Organs, targetID) []Slot`: **find by function, not by port** — who touches a data object? e.g. Context → P6 (trim), H3 (replace); ToolResults → F1 (append), P6b (trim)
@@ -71,8 +70,9 @@
 - Dynamic memory injection: Stimulate has no per-round context channel; per-round retrieval happens in Hooks.BeforeThink; host controls once-vs-every-round semantics with its own closure flag
 - Guards/emotion/plan: ContextBudget trims both accumulating tracks before each Think — text Context via Trimmer, structured ToolResults via TrimResults (trimmer, not hard stop); MaxRetries retries Think only — tool-failure guards are host-side (Effector or AfterAct); ToolTimeout/ToolMaxRetries bound tool execution (per-attempt timeout; retry on effector err only, Effect.Err never retried); identity/emotion is host-composed into the `Identity` string and rendered by the host Thinker; Plan is a host-serialized string injected via BeforeThink and updated via AfterThink
 - Sandbox: host membrane (tool security gate: allowlist/denylist, ask-confirm) maps to the tri-state `Sandbox.Allow` returning `(Verdict, reason string, err error)` — Deny (zero value, fail-closed) appends `[sandbox-denied: ...]` feedback, Allow proceeds, Ask suspends for external confirmation (see above), err coerces to Deny with reason `sandbox error: <err>` (feedback lands as `[sandbox-denied: sandbox error: ...]`); every decision of a configured sandbox first yields EventSandbox carrying a `SandboxVerdict{CellID, Call, Ruling Verdict, Reason, Question, Err}` (action-level audit record; ask chains close with a terminal resolve record); denial then yields EventToolResult(Err) and the loop continues; Sandbox.Bounds() is snapshotted once per Stimulate into Prompt.Bounds (execution boundary description surfaced to the LLM)
+- Memory port vs the text track (dual track, no overlap): P7 fills the structured `Prompt.Memories` from `Memory.Recall` before every Think; H3 (`BeforeThink`) overwrites the text track `p.Context`. Injecting records into `p.Context` by hand duplicates what P7 exists to do
 - Assembly only at composition root: components inside must not create dependencies
-- No stubs/sentinels: all six ports must be injected; there is no "minimal runnable" path
+- No stubs/sentinels: all seven ports must be injected; there is no "minimal runnable" path
 
 ## Pitfalls
 

@@ -17,7 +17,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	meowire "github.com/qyiun666/meowire/api"
 )
+
+// phaseHostPort is the blueprint phase marking a host-implemented port.
+const phaseHostPort = 2
 
 const (
 	eventGoPath  = "../internal/nerve/event.go"
@@ -164,4 +169,50 @@ func TestLoopStateContractSynced(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRequiredPortCountSyncedWithGuides pins the port count the guides
+// advertise to the blueprint: the Organs table of each host-integration guide
+// carries one required row per required phase-2 slot. A port added to the
+// blueprint without an organ row (or the reverse) fails here.
+func TestRequiredPortCountSyncedWithGuides(t *testing.T) {
+	want := 0
+	var names []string
+	for _, wp := range meowire.Connectome() {
+		if wp.Phase == phaseHostPort && wp.Required {
+			want++
+			names = append(names, wp.Name)
+		}
+	}
+	if want == 0 {
+		t.Fatal("blueprint advertises no required host port — the phase filter is wrong")
+	}
+
+	for _, tc := range []struct{ path, mark string }{
+		{hostMD, "是"},
+		{hostENMD, "yes"},
+	} {
+		table := organsTable(t, tc.path)
+		rowRe := regexp.MustCompile("(?m)^\\| `\\w+`.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
+		if got := len(rowRe.FindAllString(table, -1)); got != want {
+			t.Errorf("%s advertises %d required organ rows, blueprint requires %d ports (%s)",
+				tc.path, got, want, strings.Join(names, "/"))
+		}
+	}
+}
+
+// organsTable returns the Organs assembly table section of a host guide (from
+// its "## 3." heading to the next top-level heading).
+func organsTable(t *testing.T, path string) string {
+	t.Helper()
+	doc := readContractFile(t, path)
+	start := strings.Index(doc, "\n## 3.")
+	if start < 0 {
+		t.Fatalf("%s has no '## 3.' section", path)
+	}
+	rest := doc[start+1:]
+	if end := strings.Index(rest[3:], "\n## "); end >= 0 {
+		return rest[:end+3]
+	}
+	return rest
 }

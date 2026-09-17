@@ -61,15 +61,24 @@ func testBudget() *ContextBudget {
 	return &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }}
 }
 
-// fillRequired fills the required ports (Hooks/Sandbox/Budget) with no-op
-// defaults when a test does not target them. The loop requires all three
-// (assembly enforces); tests that do not care get declared no-ops.
+// testMemory recalls nothing and remembers nothing.
+type testMemory struct{}
+
+func (testMemory) Recall(context.Context, MemoryQuery) ([]Record, error) { return nil, nil }
+func (testMemory) Remember(context.Context, CycleFacts) error            { return nil }
+
+// fillRequired fills the required ports (Hooks/Sandbox/Budget/Memory) with
+// no-op defaults when a test does not target them. The loop requires all of
+// them (assembly enforces); tests that do not care get declared no-ops.
 func fillRequired(lc *LoopContext) {
 	if lc.Sandbox == nil {
 		lc.Sandbox = testSandbox{}
 	}
 	if lc.Budget == nil {
 		lc.Budget = testBudget()
+	}
+	if lc.Mem == nil {
+		lc.Mem = testMemory{}
 	}
 	if lc.Hooks == nil {
 		lc.Hooks = testHooks()

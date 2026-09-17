@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Memory` is now a port the framework calls (P7)** — `Recall(ctx, MemoryQuery{CellID, Cue})
+  ([]Record, error)` runs before every Think (after the budget trim, before `BeforeThink`), and
+  `Remember(ctx, CycleFacts{CellID, Input, Output, Outcome})` runs exactly once per invocation at
+  its terminal — before `OnCycleEnd`, on all four exit arms (done / error / suspension / consumer
+  abort). Recall fills the new `Prompt.Memories` track (replaced wholesale per round, never
+  accumulated, never snapshotted into a `Session`); the storage, ranking, retention and deletion
+  strategy stay entirely in the organ. Blueprint registers `P7 Mem` (required, slot `mem`) plus
+  `P7b Mem.Remember` (implied by P7). A failing recall ends the Think with an error; a failing
+  remember is reported through `OnError` and never rewrites the outcome.
 - **One slot-name source of truth** — `WirePoint` carries a `Slot` field and
   `nerve.SwappableSlots()` derives the swappable names from the blueprint:
   `cell.Replace`'s dispatch table, the `api` `Slot*` constants and the
@@ -19,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Assembly now requires seven organs** (was six): `Organs.Mem` and `Cell.Mem` are
+  mandatory and `New` refuses an assembly without them; `Replace("mem", …)` joins
+  the swappable set.
+  **Breaking**: hosts must supply a `Memory` implementation (an inert one recalls
+  nothing and remembers nothing).
 - **`ContextBudget` now regulates both accumulating tracks** — the port gains
   `TrimResults func([]ToolResult, int) []ToolResult`; before each Think the loop
   applies `Trimmer` to the text `Context` and `TrimResults` to the structured
@@ -34,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`openai` reference Thinker package** — the kernel ships no LLM client, transport
   or prompt renderer: `Thinker` is a port the host implements, and the framework
   defines only the `Prompt` that goes in and the `Decision` that comes out.
+- **`internal/memory`, as a standalone contract package** — its `Record` shape moved to
+  `nerve` (aliased by `api`) and became the payload of the P7 port; `Memory.Save` was
+  replaced by `Remember(ctx, CycleFacts)` and `Forget` left the contract entirely
+  (deletion is the host acting on its own backend, never a framework timepoint). The
+  package had no framework consumer and no non-alias importer.
 - **Dead contract members with no producer or consumer** — `Message` /
   `MessageRole` (the conversation shape lives in `Prompt` and `ToolResult`),
   `Signal.ErrPayload`, `Prompt.State` (the loop set it to `StateThinking` before

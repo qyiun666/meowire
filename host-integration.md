@@ -6,19 +6,19 @@
 
 ## 0. 一句话模型
 
-meowire 是一个**纯编排内核**：宿主实现六端口（LLM、工具、清理、钩子、权限门、上下文裁剪），框架负责 Think → Act → yield 事件循环。**框架不管理历史、不管理多 agent、不提供任何默认实现**——六端口全部必填，缺一报错。
+meowire 是一个**纯编排内核**：宿主实现七端口（LLM、工具、清理、钩子、权限门、上下文裁剪、经验记忆），框架负责 Think → Act → yield 事件循环。**框架不管理历史、不管理多 agent、不提供任何默认实现**——七端口全部必填，缺一报错。
 
 宿主对外只需接触三个方法：`New`（装配）、`Stimulate`（运行一轮）、`Close`（关闭）。
 
 ## 1. 集成流程总览（6 步）
 
 ```
-实现六端口 → 组装 Organs → 配置 Config → 装配 Blueprint → New() 创建 → Stimulate() 消费事件流 → Close()
+实现七端口 → 组装 Organs → 配置 Config → 装配 Blueprint → New() 创建 → Stimulate() 消费事件流 → Close()
 ```
 
 | 步骤 | 做什么 | 关键点 |
 |------|--------|--------|
-| 1 | 实现 Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget | 六端口 + 八回调全部必填（显式 no-op） |
+| 1 | 实现 Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget/Memory | 七端口 + 八回调全部必填（显式 no-op） |
 | 2 | 组装 `Organs` 结构体 | 注入端口 + 固定上下文；Hooks 用 `FullHooks` 补全 |
 | 3 | 设置 `Config` | 零值即默认，无需显式填 |
 | 4 | 组装 `Blueprint{Organs, Config}` 并 `New(bp)` | 缺端口/缺回调返回错误；不完整 Budget 也报错 |
@@ -27,7 +27,7 @@ meowire 是一个**纯编排内核**：宿主实现六端口（LLM、工具、�
 
 ---
 
-## 2. 第 1 步：实现六端口（宿主能力）
+## 2. 第 1 步：实现七端口（宿主能力）
 
 ### 2.1 Thinker —— LLM 封装（大脑）
 
@@ -171,6 +171,21 @@ type ContextBudget struct {
 - 是裁剪器不是硬停：超预算只剪不报错
 - 不想裁剪时返回入参原切片即可（但仍须提供该函数：只给 `Trimmer` 的 Budget 装配失败）
 
+### 2.8 Memory —— 经验端口
+
+```go
+type Memory interface {
+    Recall(ctx context.Context, q MemoryQuery) ([]Record, error) // 每次 Think 前
+    Remember(ctx context.Context, facts CycleFacts) error        // 每次调用的终点，恰好一次
+}
+```
+
+- 框架只拥有**两个调用时点**：`Recall` 在预算裁剪之后、`BeforeThink` 钩子之前；`Remember` 在 `OnCycleEnd` 之前，四条终态路径（done / error / 挂起 / 消费者中途放弃）各恰好一次
+- `Recall` 的结果进 `Prompt.Memories`（结构化轨，与 H3 的文本轨 `p.Context` 分属两轨）：**每轮整体替换、不累积、不进 `Session` 快照**——恢复的那一轮重新召回
+- `MemoryQuery` 只带框架知道的两件事：谁在问（`CellID`）与这轮被问了什么（`Cue`）；检索算法、排序、取几条、留多久全归器官
+- `CycleFacts` 只带框架构造得出的事实：`CellID` / `Input` / `Output` / `Outcome`；写什么、写成什么形状不经该端口，**删除与遗忘更不经过它**（那是宿主直接对自己的后端做的事）
+- `Recall` 失败 → 该轮 Think 以 error 结束（器官是装配的一部分，框架不替宿主决定"少一半上下文也想"）；`Remember` 失败 → 不改写已定的终态，经 `OnError` 报告
+
 ---
 
 ## 3. 第 2 步：组装 `Organs`（装配根，唯一组装点）
@@ -184,6 +199,7 @@ o := meowire.Organs{
     Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: ...}), // 必填：全部八回调（工具函数填充缺失回调）
     Sandbox: mySandbox,                         // 必填
     Budget:  &meowire.ContextBudget{...},       // 必填
+    Mem:     myMemory,                         // 必填
 
     System:   "你是 meow agent，用中文回答",      // 固定系统指令
     Identity: "你叫 meow，角色 assistant，语气温暖", // 身份描述文本（宿主自拼）
@@ -204,6 +220,7 @@ o := meowire.Organs{
 | `Hooks` | *Hooks | 拦截回调（全部八回调必填） | **是** |
 | `Sandbox` | Sandbox | 权限门 | **是** |
 | `Budget` | *ContextBudget | 令牌调节器（文本轨 + 结构化反馈轨） | **是** |
+| `Mem` | Memory | 经验端口（`Recall` 每轮 Think 前，`Remember` 每次调用终点） | **是** |
 | `System` | string | 系统指令，进 Prompt.System | 否 |
 | `Identity` | string | 身份描述文本（宿主自拼），进 Prompt.Identity | 否 |
 | `Methods` | []MethodSpec | 内置能力描述（基因投影，仅描述不执行）；`MethodSpec{Name, Desc, Input, Output}`，进 Prompt.Methods | 否 |
@@ -253,7 +270,7 @@ agent.UpdateConfig(cfg)   // 整体替换：下一次 Stimulate/Resume 生效（
 
 ```go
 type Blueprint struct {
-    Organs Organs   // 六端口 + 固定上下文（全部必填）
+    Organs Organs   // 七端口 + 固定上下文（全部必填）
     Config Config   // 零值即默认
 }
 
@@ -267,7 +284,7 @@ agent, err := meowire.New(bp)
   - `info` 级（空 Identity/Tools/Context、默认轮数）：**永不阻断**，用 `meowire.Validate(organs, cfg)` 显式查看
   - 不再有 `warn` 级：每个接线点都是必填，缺失即缺失器官，没有“半配放行”
 - 装配后宿主调用 `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`，并可经 `Replace` 运行时换端口、经 `AgentCard` 导出能力卡（见下）
-- 六端口 + 八回调均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**；宿主可用 `meowire.FullHooks(...)` 把不需要的钩子声明为显式 no-op
+- 七端口 + 八回调均须由宿主实现，**没有 stub、没有默认实现、没有"最小可运行"路径**；宿主可用 `meowire.FullHooks(...)` 把不需要的钩子声明为显式 no-op
 
 ### 5.1 动态接线：`Replace`（运行时换器官）
 
@@ -275,7 +292,7 @@ agent, err := meowire.New(bp)
 oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // 下次 Stimulate 生效
 ```
 
-- 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
+- 可换槽位：`SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks`（槽名单一事实源是蓝图 `WirePoint.Slot`，`Connectome()`/`SwappableSlots()` 可枚举，常量与之由测试钉死）；`Closer`（资源绑定）与 `PauseGate`（框架接线）不可换
 - 语义：每次 `Stimulate` 快照端口构造全新 LoopContext——**飞行中的 Stimulate 不受影响**，替换只在下次生效；返回被换下的端口（它持有的资源何时释放由宿主决定，框架不代关）
 - 并发安全；`Close` 后为 no-op；**拒绝 nil/不完整端口**（Budget 需 Trimmer+TrimResults+MaxTokens、Hooks 需八回调）；槽位或端口类型错误返回 error
 - **审计事件（v1.3.0）**：每次成功替换记录一条 `ReplaceAudit{CellID, Slot, Old, New}`，在**下一次 Stimulate/Resume 开头（生效时刻）**以 `EventReplace` 产出（与 `EventSandbox` 同级可持久化审计）；失败替换不记录；无替换零产出。宿主模型切换审计闭环：从事件流更新 activeModel，不再手工维护状态机
@@ -440,20 +457,6 @@ for ev := range agent.Resume(ctx, sess, ans) {  // 事件流与 Stimulate 同构
 幂等（CAS 保证）；依次关闭 cell + 宿主 Closer，错误用 `errors.Join` 聚合；关闭后 Stimulate/Resume 返回 `ErrCellClosed`。宿主应 `defer agent.Close()`。
 
 ### 7.2 可选扩展
-
-**Memory（记忆后端，宿主自建）**：`internal/memory` 是参考契约，框架**不消费**：
-
-```go
-type Record struct { Key, CellID, Kind string; Content []byte; Created int64 }  // Created 为 Unix 秒
-type Query  struct { CellID, Prefix, Kind string; Limit int }                  // 空 CellID 匹配全部；Limit<=0 不限
-type Memory interface {
-    Save(ctx, Record) error
-    Recall(ctx, Query) ([]Record, error)
-    Forget(ctx, key, cellID string) error
-}
-```
-
-宿主实现后端，经 `Organs.Context` + `Hooks.BeforeThink` 注入循环（MemHop 模式）。
 
 **Synapse（多 agent 消息参考实现，1.1.1 起为可塑突触图）**：
 

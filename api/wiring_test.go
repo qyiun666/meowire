@@ -37,10 +37,11 @@ func fullOrgans() Organs {
 		Hooks:   fullHooks(),
 		Sandbox: testutil.Sandbox{},
 		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }},
+		Mem:     testutil.Memory{},
 	}
 }
 
-// TestWiringDiagramFull: a complete assembly fills every slot — the six
+// TestWiringDiagramFull: a complete assembly fills every slot — the seven
 // ports, the eight required hooks and the framework built-ins.
 func TestWiringDiagramFull(t *testing.T) {
 	slots := WiringDiagram(fullOrgans())

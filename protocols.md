@@ -19,7 +19,7 @@
   harness 变薄）→ 3.0 Attention（harness 只留权限、身份、信任、
   可解释性，即 human attention policy surface）。
 
-meowire 的设计（纯接线、六端口、动作级拦截、事件流观测）与上述
+meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）与上述
 坐标天然对齐：协议是宿主域，接线是框架域。
 
 ## 映射总表
@@ -35,6 +35,7 @@ meowire 的设计（纯接线、六端口、动作级拦截、事件流观测）
 | `Methods` | Agent Card 能力声明（机器可读） | `Organs.Methods` |
 | `System` / `Identity` | AGENTS.md（人机协作边界） | `Organs.System` / `Identity` |
 | `ContextBudget` | 上下文工程（context rot 治理） | `Organs.Budget` |
+| `Memory` 端口 | 分层记忆的调用时点（召回进脑、终态回写） | `Organs.Mem` |
 | Step-Resume | 长时任务状态外化（checkpoint） | 宿主历史 + 重新 `Stimulate` |
 
 ## 1. MCP（Agent → 工具）

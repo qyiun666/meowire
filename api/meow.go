@@ -33,12 +33,13 @@ const (
 	SlotAct     = "act"
 	SlotSandbox = "sandbox"
 	SlotBudget  = "budget"
+	SlotMem     = "mem"
 	SlotHooks   = "hooks"
 )
 
-// Replace swaps one runtime port (SlotThink/SlotAct/SlotSandbox/SlotBudget/
-// SlotHooks). It takes effect at the next Stimulate — each Stimulate builds a
-// fresh LoopContext, so an in-flight Stimulate keeps the ports it started
+// Replace swaps one runtime port (see the Slot* constants above; the blueprint
+// owns the set). It takes effect at the next Stimulate — each Stimulate builds
+// a fresh LoopContext, so an in-flight Stimulate keeps the ports it started
 // with. This is the dynamic-wiring counterpart of synaptic plasticity: hosts
 // swap organs between stimuli (another LLM, a stricter permission policy)
 // without rebuilding the agent. Closer is never swappable (resource

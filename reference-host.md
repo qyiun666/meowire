@@ -8,7 +8,7 @@
 ## 0. 心智模型（先读，30 秒）
 
 - **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间通信（channel/HTTP/Redis 任选，synapse 是参考实现）。
-- 框架只给循环（Think → Act → yield 事件流）；**LLM、工具、权限、记忆全是宿主实现**——六端口全部必填，没有默认实现。
+- 框架只给循环（Think → Act → yield 事件流）；**LLM、工具、权限、记忆全是宿主实现**——七端口全部必填，没有默认实现。
 - 宿主只需要掌握三个方法：`New`（装配）、`Stimulate`（跑一轮）、`Close`（关闭）。
 - **唯一需要持久化的自主变化值**：synapse 突触图的 `Weight`（学习规则改写）与 `Fired`（投递计数）——导出用 `Edges`，恢复用 `NewDirect(initial...)`，全程宿主在组合根手动做（§8.3）。
 - 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§9）。
@@ -21,8 +21,8 @@
 | 2 | 写 LLM 客户端（OpenAI 兼容，标准库实现） | `llm.go` |
 | 3 | **实现 Thinker**（核心：Prompt → messages → Decision） | `thinker.go` |
 | 4 | 实现 Effector（工具注册表 + 分发） | `effector.go` |
-| 5 | 实现 Sandbox（权限门）+ ContextBudget（裁剪） | `guards.go` |
-| 6 | 实现 Hooks + 记忆（MemHop 模式） | `memory.go` |
+| 5 | 实现 Sandbox（权限门）+ ContextBudget（两轨调节器） | `guards.go` |
+| 6 | 实现 Memory 端口（Recall/Remember）+ Hooks | `memory.go` |
 | 7 | 组装 Blueprint，New + 事件循环 | `main.go` |
 | 8 | 扩展多 agent + synapse 持久化 + 事件日志（状态外化） | `multi.go` |
 
@@ -45,7 +45,7 @@ myhost/
 ├── thinker.go     # Thinker 端口（Step 3）
 ├── effector.go    # Effector 端口（Step 4）
 ├── guards.go      # Sandbox + ContextBudget（Step 5）
-└── memory.go      # Hooks + 记忆（Step 6）
+└── memory.go      # Memory 端口 + Hooks（Step 6）
 ```
 
 ---
@@ -403,9 +403,9 @@ func trimResults(rs []meowire.ToolResult, max int) []meowire.ToolResult {
 
 ---
 
-## Step 6：Hooks + 记忆（MemHop 模式）
+## Step 6：Memory 端口 + Hooks（经验回灌）
 
-框架不管理历史。记忆的循环是：**`BeforeStimulate` 召回 → `Context` 注入 → 循环消费 → `AfterStimulate` 保存**。
+框架不存储记忆，但它规定**两个时点**：每轮 Think 前 `Recall`、每次调用的终点 `Remember`（P7，必填端口）。检索算法、写什么、留多久都在器官里。文本轨（`p.Context`）另由钩子注入（H1/H3），与 P7 的结构化轨分属两轨。
 
 ```go
 // memory.go
@@ -419,38 +419,52 @@ import (
 	meowire "github.com/qyiun666/meowire/api"
 )
 
-// hostMemory：极简内存记忆后端（生产换 DB/Redis/向量库，接口不变）
+// hostMemory：极简经验端口（生产换 DB/Redis/向量库，接口不变）
 type hostMemory struct {
-	entries []string // 按时间序保存的会话摘要
+	entries []meowire.Record // 按写入序保存
 }
 
-func (m *hostMemory) Recall(limit int) []string {
-	if limit <= 0 || limit >= len(m.entries) {
-		return m.entries
+// Recall：每轮 Think 前被调用一次，返回值进 Prompt.Memories（整轮替换）。
+// 这里的匹配只是示范——真正的排序/召回策略属于器官。
+func (m *hostMemory) Recall(_ context.Context, q meowire.MemoryQuery) ([]meowire.Record, error) {
+	var out []meowire.Record
+	for _, r := range m.entries {
+		if r.CellID != q.CellID {
+			continue
+		}
+		if q.Cue != "" && !strings.Contains(string(r.Content), q.Cue) {
+			continue
+		}
+		out = append(out, r)
 	}
-	return m.entries[len(m.entries)-limit:]
+	return out, nil
 }
 
-func (m *hostMemory) Save(round string) {
-	m.entries = append(m.entries, round)
+// Remember：每次调用的终点恰好一次（正常/错误/挂起/被放弃四条路径都到）。
+// 删除与遗忘不经过这个接口——那是宿主直接对自己的后端做的事。
+func (m *hostMemory) Remember(_ context.Context, f meowire.CycleFacts) error {
+	if f.Output == "" {
+		return nil // 挂起与中途放弃没有可存的终稿
+	}
+	m.entries = append(m.entries, meowire.Record{
+		Key:     fmt.Sprintf("%s-%d", f.CellID, len(m.entries)),
+		CellID:  f.CellID,
+		Kind:    "turn", // f.Outcome 告诉你这次是善终、挂起还是被放弃
+		Content: []byte(f.Output),
+	})
+	return nil
 }
 
 // buildHooks 组装全部八回调（缺的由 FullHooks 补显式 no-op）
-func buildHooks(mem *hostMemory) *meowire.Hooks {
+func buildHooks() *meowire.Hooks {
 	return meowire.FullHooks(meowire.Hooks{
-		// 回合开始：召回最近记忆，注入原型 → 全轮生效
+		// 回合开始：往文本轨写常驻提示（原型浅拷贝，安全）
 		BeforeStimulate: func(ctx context.Context, p *meowire.Prompt) error {
-			for _, r := range mem.Recall(5) {
-				p.Context = append(p.Context, "[记忆] "+r)
-			}
+			p.Context = append(p.Context, "[提示] 回答保持简洁")
 			return nil
 		},
-		// 回合结束：保存本轮摘要（正常/错误/提前停止三路径都恰好一次）
-		AfterStimulate: func(ctx context.Context, output string) {
-			if output != "" {
-				mem.Save(output)
-			}
-		},
+		// 回合结束：结算落点（三路径都恰好一次）
+		AfterStimulate: func(ctx context.Context, output string) {},
 	})
 }
 ```
@@ -487,9 +501,10 @@ func main() {
 			Think:   &thinker{client: client},
 			Act:     &effector{registry: toolRegistry()},
 			Closer:  &noopCloser{},
-			Hooks:   buildHooks(mem),
+			Hooks:   buildHooks(),
 			Sandbox: &sandbox{allowed: map[string]bool{"calc": true}, bounds: "只允许 calc 工具"},
 			Budget:  &meowire.ContextBudget{MaxTokens: 20, Trimmer: trimContext, TrimResults: trimResults},
+			Mem:     mem,
 
 			System:   "你是 meow agent，用中文回答，简洁直接。",
 			Identity: "你叫 meow，角色 assistant",
@@ -582,7 +597,7 @@ func toolRegistry() map[string]toolFn {
 func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
 	bp.Organs.ID = id
 	bp.Organs.Context = []string{}          // 每个 agent 独立历史
-	bp.Organs.Hooks = buildHooks(mem)       // 每个 agent 独立记忆闭包（或共享 hub，见 host-integration.md §7.3）
+	bp.Organs.Hooks = buildHooks()          // 钩子只管文本轨；记忆是端口（见 Step 6）
 	ag, err := meowire.New(bp)
 	if err != nil {
 		log.Fatal(err)

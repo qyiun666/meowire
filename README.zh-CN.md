@@ -10,10 +10,10 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 
 ## 为什么选择 Meowire
 
-- **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入六个宿主端口，
+- **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入七个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
 - **零依赖。** 仅标准库。没有需要审计的传递依赖树。
-- **小巧可读。** 源码约 1900 行。整个循环只有一个文件（`internal/nerve/loop.go`，含测试约 530 行）。
+- **小巧可读。** Go 源码约 3500 行。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
   `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
 
@@ -44,10 +44,11 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   持久化往返：`Edges` 导出 + `NewDirect` 恢复
 - **统一合成视图** —— `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 把
   静态装配子图与实时突触图合并为一张图（视图统一、数据分离）
-- **六个宿主注入端口，全部器官必填**（无 stub、无可选接线）：
+- **七个宿主注入端口，全部器官必填**（无 stub、无可选接线）：
   `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
-  `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）
+  `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）、
+  `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
@@ -103,9 +104,8 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 meowire (模块根)
   └── api/            门面 + 组合根 —— 唯一对外表面
       ├── internal/cell     agent 内核（ID + 端口 + DecisionLoop）
-      ├── internal/nerve    决策循环、端口、钩子、事件、守卫
-      ├── internal/synapse  个体间连接与信号投递契约（宿主参考）
-      └── internal/memory   记忆 CRUD 契约（宿主参考，框架不消费）
+      ├── internal/nerve    决策循环、端口（含记忆）、钩子、事件、守卫
+      └── internal/synapse  个体间连接与信号投递契约（宿主参考）
 ```
 
 | 概念 | 位置 | 职责 |
@@ -117,6 +117,7 @@ meowire (模块根)
 | `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
 | `Sandbox` | 守卫 | 工具权限门，每次 Act 前调用；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪文本轨 `Context` 与结构化反馈轨 `ToolResults`（同一额度） |
+| `Memory` | 端口 | 把本轮召回写进 `Prompt.Memories`，并把结束那一轮的事实收回去 |
 | `Event` | 事件 | 循环的类型化观察镜像 |
 | `Synapse` / `Memory` | internal | 供宿主参考的独立契约 |
 
@@ -132,7 +133,7 @@ go get github.com/qyiun666/meowire@latest
 import meowire "github.com/qyiun666/meowire/api"
 ```
 
-宿主侧完整集成契约 —— 六端口、逐字段语义、事件流与陷阱清单 —— 见
+宿主侧完整集成契约 —— 七端口、逐字段语义、事件流与陷阱清单 —— 见
 [宿主集成指南](host-integration.md)。
 
 ## 快速开始
@@ -175,6 +176,15 @@ func (sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict, st
 
 func (sandbox) Bounds() string { return "read-only /workspace" }
 
+// memory —— meowire.Memory 的惰性实现（召回空、回写不存）。
+type memory struct{}
+
+func (memory) Recall(context.Context, meowire.MemoryQuery) ([]meowire.Record, error) {
+	return nil, nil
+}
+
+func (memory) Remember(context.Context, meowire.CycleFacts) error { return nil }
+
 func main() {
 	// Blueprint：一次定义，多次 New（flat model 多 agent）
 	bp := meowire.Blueprint{
@@ -189,6 +199,7 @@ func main() {
 			Trimmer:     func(c []string, max int) []string { return c },
 			TrimResults: func(rs []meowire.ToolResult, max int) []meowire.ToolResult { return rs },
 		},
+		Mem:     memory{},
 		},
 		Config: meowire.Config{},
 	}
@@ -259,11 +270,12 @@ func main() {
 `Config.MaxRounds`（默认 8）是硬上限。如果最后一轮仍有未决的工具调用，循环以
 `ErrMaxRounds` 结束 —— 该轮的工具结果未被再次思考。用 Step-Resume 从循环停止处继续。
 
-### 记忆由宿主管理（MemHop）
+### 记忆：时点归框架，存储归宿主
 
-框架从不存储历史。你自行维护对话上下文，通过 `Organs.Context` 注入
-（或通过 `Hooks.BeforeThink` 按轮注入）。`internal/memory` 提供参考性的 `Memory` 契约
-（`Save` / `Recall` / `Forget`）供你的后端实现 —— 框架不消费它。
+框架从不存储任何东西，`Memory` 端口只规定经验何时流动：每轮 Think 前 `Recall`
+（进 `Prompt.Memories`，整轮替换）、每次调用终点 `Remember` 一次（带回 `CycleFacts`）。
+存什么、怎么检索、何时删除仍由你决定（MemHop）。文本轨不变：`Organs.Context` 与
+`Hooks.BeforeThink` 照旧喂 `Prompt.Context`。
 
 ## 多 agent
 

@@ -10,7 +10,6 @@
 package meowire
 
 import (
-	"github.com/qyiun666/meowire/internal/memory"
 	"github.com/qyiun666/meowire/internal/nerve"
 	"github.com/qyiun666/meowire/internal/synapse"
 )
@@ -23,6 +22,7 @@ type (
 	Hooks         = nerve.Hooks
 	Sandbox       = nerve.Sandbox
 	ContextBudget = nerve.ContextBudget
+	Memory        = nerve.Memory
 	PauseGate     = nerve.PauseGate
 )
 
@@ -38,6 +38,12 @@ type (
 	Effect     = nerve.Effect
 	Usage      = nerve.Usage
 	Verdict    = nerve.Verdict // tri-state sandbox ruling (Deny / Allow / Ask)
+
+	// Memory port payload (P7): what recall returns and what a finished
+	// invocation hands back for persistence.
+	Record      = nerve.Record
+	MemoryQuery = nerve.MemoryQuery
+	CycleFacts  = nerve.CycleFacts
 )
 
 // Events yielded by the Stimulate iterator.
@@ -59,13 +65,6 @@ type (
 func UnmarshalSession(data []byte) (Session, error) {
 	return nerve.UnmarshalSession(data)
 }
-
-// Memory contract for host-implemented memory backends.
-type (
-	Memory = memory.Memory
-	Record = memory.Record
-	Query  = memory.Query
-)
 
 // Inter-agent messaging (host reference).
 type (

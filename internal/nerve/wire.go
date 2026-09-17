@@ -43,9 +43,10 @@ type WireNode struct {
 // call; callers must not rely on identity between calls.
 func ConnectomeNodes() []WireNode {
 	return []WireNode{
-		{ID: "prompt", Name: "Prompt", Desc: "full prompt bundle: System+Identity+Methods+Tools+Context+Input+Plan+ToolResults"},
+		{ID: "prompt", Name: "Prompt", Desc: "full prompt bundle: System+Identity+Methods+Tools+Context+Input+Plan+Memories+ToolResults"},
 		{ID: "context", Name: "Context", Desc: "conversation context list (host base + sandbox denials)"},
 		{ID: "toolresults", Name: "ToolResults", Desc: "structured tool feedback list (single track)"},
+		{ID: "memories", Name: "Memories", Desc: "this round's recall output (volatile track)"},
 		{ID: "plan", Name: "Plan", Desc: "host-side plan text"},
 		{ID: "bounds", Name: "Bounds", Desc: "execution boundary snapshot"},
 		{ID: "decision", Name: "Decision", Desc: "Thinker output"},
@@ -136,6 +137,14 @@ func Connectome() []WirePoint {
 			TargetID: "toolresults", Target: "Prompt.ToolResults", Semantics: SemTrim,
 			Parallel: false, Required: false, Slot: "budget",
 			Desc: "structured-feedback trimming at the same checkpoint and limit; implied by P6"},
+		{ID: "P7", Name: "Mem", Phase: 2, Category: CategorySense,
+			TargetID: "memories", Target: "MemoryQuery → Prompt.Memories", Semantics: SemReplace,
+			Parallel: false, Required: true, Slot: "mem",
+			Desc: "recall before each Think; the round's memory track, replaced wholesale"},
+		{ID: "P7b", Name: "Mem.Remember", Phase: 2, Category: CategoryAct,
+			TargetID: "output", Target: "CycleFacts → memory store", Semantics: SemAct,
+			Parallel: false, Required: false, Slot: "mem",
+			Desc: "one write per invocation at its terminal point, before OnCycleEnd; implied by P7"},
 
 		// --- hooks (phase 3: host runtime updates, all required) ---
 		{ID: "H1", Name: "BeforeStimulate", Phase: 3, Category: CategorySense,
@@ -149,7 +158,7 @@ func Connectome() []WirePoint {
 		{ID: "H3", Name: "BeforeThink", Phase: 3, Category: CategorySense,
 			TargetID: "context", Target: "Prompt.Context (whole-field)", Semantics: SemReplace,
 			Parallel: false, Required: true,
-			Desc: "memory retrieval injection point; replace p.Context wholesale"},
+			Desc: "text-track injection point (structured recall is P7); replace p.Context wholesale"},
 		{ID: "H4", Name: "AfterThink", Phase: 3, Category: CategoryDecide,
 			TargetID: "decision", Target: "Decision", Semantics: SemRead,
 			Parallel: false, Required: true,

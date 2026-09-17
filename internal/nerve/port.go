@@ -41,6 +41,12 @@ type Prompt struct {
 
 	// Structured tool feedback accumulated within this cycle (see ToolResult).
 	ToolResults []ToolResult
+
+	// Memories is this round's recall output (see Memory): framework-filled
+	// before every Think and replaced wholesale each round, so it never
+	// accumulates and never enters a suspension snapshot. BeforeThink may
+	// overwrite it, as it may overwrite Context.
+	Memories []Record
 }
 
 // buildPrompt assembles this round's data package from the loop context. The
@@ -57,6 +63,7 @@ func (lc *LoopContext) buildPrompt() *Prompt {
 		Plan:        lc.Plan,
 		Reflection:  lc.Reflection,
 		ToolResults: lc.ToolResults,
+		Memories:    lc.Memories,
 	}
 }
 

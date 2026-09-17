@@ -107,6 +107,8 @@ var organFilled = map[string]func(Organs) bool{
 	"P5b": func(o Organs) bool { return o.Sandbox != nil },
 	"P6":  func(o Organs) bool { return o.Budget != nil },
 	"P6b": func(o Organs) bool { return o.Budget != nil },
+	"P7":  func(o Organs) bool { return o.Mem != nil },
+	"P7b": func(o Organs) bool { return o.Mem != nil },
 	"H1":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.BeforeStimulate != nil },
 	"H2":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.AfterStimulate != nil },
 	"H3":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.BeforeThink != nil },
@@ -120,9 +122,9 @@ var organFilled = map[string]func(Organs) bool{
 }
 
 // impliedSlots are sub-slots carried by a parent port (Sandbox.Bounds by
-// Sandbox, Budget.TrimResults by Budget). They are reported by WiringDiagram
-// for inspection but never checked twice.
-var impliedSlots = map[string]bool{"P5b": true, "P6b": true}
+// Sandbox, Budget.TrimResults and Mem.Remember by their own port). They are
+// reported by WiringDiagram for inspection but never checked twice.
+var impliedSlots = map[string]bool{"P5b": true, "P6b": true, "P7b": true}
 
 // slotFilled reports whether a blueprint slot is actually wired in the
 // assembly.

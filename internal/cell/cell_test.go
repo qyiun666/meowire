@@ -38,6 +38,7 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 			MaxTokens:   100,
 			Trimmer:     func(c []string, _ int) []string { return c },
 			TrimResults: func(rs []nerve.ToolResult, _ int) []nerve.ToolResult { return rs }},
+		Mem: testutil.Memory{},
 	}
 }
 

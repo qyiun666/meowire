@@ -48,6 +48,29 @@ func (m Sandbox) Allow(ctx context.Context, a nerve.Action) (nerve.Verdict, stri
 // Bounds implements nerve.Sandbox.
 func (m Sandbox) Bounds() string { return m.Bound }
 
+// Memory is a test-only Memory stub: the function fields drive each call
+// (nil = inert: recall nothing, remember nothing).
+type Memory struct {
+	RecallFn   func(ctx context.Context, q nerve.MemoryQuery) ([]nerve.Record, error)
+	RememberFn func(ctx context.Context, f nerve.CycleFacts) error
+}
+
+// Recall implements nerve.Memory.
+func (m Memory) Recall(ctx context.Context, q nerve.MemoryQuery) ([]nerve.Record, error) {
+	if m.RecallFn == nil {
+		return nil, nil
+	}
+	return m.RecallFn(ctx, q)
+}
+
+// Remember implements nerve.Memory.
+func (m Memory) Remember(ctx context.Context, f nerve.CycleFacts) error {
+	if m.RememberFn == nil {
+		return nil
+	}
+	return m.RememberFn(ctx, f)
+}
+
 // Closer is a test-only Closer stub recording invocations.
 type Closer struct {
 	Called bool
@@ -63,4 +86,5 @@ func (c *Closer) Close() error {
 var _ nerve.Thinker = Thinker{}
 var _ nerve.Effector = Effector{}
 var _ nerve.Sandbox = Sandbox{}
+var _ nerve.Memory = Memory{}
 var _ nerve.Closer = (*Closer)(nil)
