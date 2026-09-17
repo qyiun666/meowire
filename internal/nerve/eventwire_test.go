@@ -329,6 +329,15 @@ func TestUnnamedRulingRefusedAtEncode(t *testing.T) {
 	if _, err := EncodeEvent(Event{Kind: EventText, Text: "x", State: StateWaiting}); err == nil {
 		t.Fatal("a state value on a text event was encoded by dropping it")
 	}
+	// A value past the end of a name table used to encode as "unknown" — a record
+	// whose own name guarantees DecodeEvent will refuse it. Better no entry than a
+	// poison entry.
+	if _, err := EncodeEvent(Event{Kind: EventState, State: LoopState(42)}); err == nil {
+		t.Fatal("an unnamed loop state was encoded")
+	}
+	if _, err := EncodeEvent(Event{Kind: EventKind(42)}); err == nil {
+		t.Fatal("an unnamed event kind was encoded")
+	}
 }
 
 // TestEventKindNamesCoverEveryKind: the name table is indexed by kind value, so

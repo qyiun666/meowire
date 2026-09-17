@@ -24,9 +24,9 @@ const (
 // explicit no-op is a declared decision, an absent callback a missing organ —
 // so a nil callback fails assembly.
 // BeforeStimulate fires once before any event and receives a Prompt prototype
-// whose content fields (System/Identity/Methods/Tools/Context/Input/Plan) are
-// written back, applying to every round of the Stimulate; an error terminates
-// the whole Stimulate. AfterStimulate and OnCycleEnd each run exactly once per
+// whose content fields are written back, applying to every round of the
+// Stimulate; an error terminates the whole Stimulate. AfterStimulate and
+// OnCycleEnd each run exactly once per
 // Stimulate on all paths (normal completion, error, suspension, consumer
 // stop); OnCycleEnd carries the CycleOutcome classification. AfterAct receives
 // the tool execution error (err non-nil = effector failure).

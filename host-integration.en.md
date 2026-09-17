@@ -716,7 +716,7 @@ should `defer agent.Close()`.
 
 ### 7.2 Optional extensions
 
-**Synapse (inter-agent messaging reference; a plastic synapse graph since 1.1.1)**:
+**Synapse (inter-agent messaging reference, a plastic synapse graph)**:
 
 ```go
 type Edge struct {
@@ -779,8 +779,20 @@ instances. Sub-agents are created inside host Effector tools
 type StreamHub struct {
 	mu      sync.RWMutex
 	streams map[string]chan meowire.Event // streaming output (optional; no channel = silent)
-	tasks   map[string]*TaskStatus        // task state (required, written by Hooks)
+	tasks   map[string]*taskView          // task state (required, written by Hooks)
 	plans   map[string]string             // plan tree (written by update_plan tool)
+}
+```
+
+```go
+// taskView is the host's own task projection. The framework's meowire.TaskStatus
+// strings live only on cross-agent Signal.Status (six states, one writer each) and
+// are not this local observation.
+type taskView struct {
+	State    string
+	LastText string
+	LastTool string
+	Output   string
 }
 ```
 
@@ -831,22 +843,22 @@ them at fixed points. The id is captured via closure (`AfterAct` may also use
 
 ```go
 hooksFor := func(id string) *meowire.Hooks {
-	return &meowire.Hooks{
+	return meowire.FullHooks(meowire.Hooks{
 		AfterThink: func(ctx context.Context, d *meowire.Decision) error {
-			hub.updateTask(id, TaskStatus{State: "thinking", LastText: d.Text})
+			hub.updateTask(id, taskView{State: "thinking", LastText: d.Text})
 			return nil
 		},
 		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
-			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
+			hub.updateTask(a.CellID, taskView{State: "acting", LastTool: a.Call.Name})
 		},
 		OnCycleEnd: func(ctx context.Context, output string, outcome meowire.CycleOutcome) {
 			switch outcome {
 			case meowire.OutcomeDone:
-				hub.updateTask(id, TaskStatus{State: "done", Output: output})
+				hub.updateTask(id, taskView{State: "done", Output: output})
 			case meowire.OutcomeSuspended:
-				hub.updateTask(id, TaskStatus{State: "needs-input"})
+				hub.updateTask(id, taskView{State: "needs-input"})
 			default:
-				hub.updateTask(id, TaskStatus{State: "failed"})
+				hub.updateTask(id, taskView{State: "failed"})
 			}
 		},
 	}
@@ -926,7 +938,7 @@ func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Dec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/Plan → messages
+	msgs := buildMessages(p) // every Prompt field needs a landing point; see thinker-openai-go.md §2
 	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
 	return &meowire.Decision{
 		Text:      resp.Text,
@@ -957,6 +969,7 @@ func main() {
 			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
 			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim, TrimResults: trimResults},
+			Mem:     &memory{}, // seventh required port: Recall + Remember
 			System:  "You are a meow agent, answer in English",
 			Tools: []meowire.ToolSpec{
 				{Name: "calc", Desc: "calculator", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "number"},

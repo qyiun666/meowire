@@ -100,5 +100,5 @@
 - Host ports must respect ctx (long operations must monitor ctx.Done)
 - Hooks.BeforeThink must replace p.Context as a whole slice — it shares the backing array with lc.Context; appending into it can corrupt the loop's accumulated context
 - Streaming UX lives in the Thinker (host side); the event stream never carries token deltas (EventText is whole-segment by contract)
-- Synapse errors (ErrNoTarget/ErrNotLinked/ErrTargetBusy/ErrWeakSynapse) re-exported at api level
+- Framework sentinels a host must match by identity are re-exported at api level: `ErrMaxRounds`, `ErrForeignSession` (a Session resumed by the wrong cell), and the four synapse errors (ErrNoTarget/ErrNotLinked/ErrTargetBusy/ErrWeakSynapse) — `internal/` is not importable from a host, so a value that never reaches `api/` cannot be `errors.Is`-matched by one
 - Facade adds no business logic (delegation only); extend semantics in capability packages or host

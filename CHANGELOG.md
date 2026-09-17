@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `assistant(tool_calls)` 与 `tool` 必须成对这条承重约束的宿主侧做法（内核只回声 `ID/Name/Result/Err`）、
   两层重试不要相乘（SDK 默认 2 次 × 内核 `MaxRetries` 无退避重投）、`*openai.Error` 的断言形状、
   流式累加与**出口膜在整轮文本之后才裁决**的时序后果
+- **`ErrForeignSession` 现在在 api 层可见**：集成文档一直承诺宿主用 `errors.Is` 分辨"句柄是别的 cell 的"与
+  "器官出错了"，而那个值只存在于 `internal/nerve`——宿主 import 不到，承诺无法兑现；
+  facade 级的身份判定由一条集成测试钉住
 
 ### Fixed
 
@@ -28,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ——现在循环两侧与 `GuardStack` 三个入口统一收在一处按 `Deny` 处置，拒绝文本点名那个值
 - **被拒的等待不吞掉原有失败**：并行批次里后到的等待被拒绝时，工具自己写过的 `Err` 追加在后面，
   不再被覆盖成"名额已被占"一句
+- **写侧不再吐出名之外的枚举**：`EncodeEvent` 现在拒绝名字表里没有的事件种类与循环状态——
+  此前它们被写成 `"unknown"`，是一条 Decode 必然拒绝、却已经进了日志的记录
+- **框架判词与工具自己的失败并存**：委托不可投递的四条理由（没指名目标、没有 Colony 器官、
+  本轮已有一笔在等、投递本身失败）此前直接覆盖 `Effect.Err`；现在两条都在，框架的理由排在前面
+  （结构化反馈按头部截断，排在后面的先被吃掉）
+- **集成文档的"完整骨架"不再缺端口**：§8 的 `Organs` 少了第七端口 `Mem`，照抄即
+  `required port Mem not injected`；同一份文档里 `hooksFor` 只给八个回调中的三个（缺任一即装配失败），
+  示例里引用的 `TaskStatus` 还是一个从未定义、且与框架同名类型撞名的宿主结构
 
 ### Changed
 
@@ -35,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   启动；已关闭的 Agent 拒绝交换并返回 `ErrCellClosed`（此前静默返回"成功且无旧端口"）
 - **枚举一律按下标取值的名表**：事件种类、循环状态、膜的裁决、挂起成因四张表同一写法，
   由一条守卫测试钉住覆盖；`Session.Marshal` 不再把一个不认识的挂起成因写成 `pause`
+- **四张名字表共用一次实现**：越界判断与按名反查从八份同形函数收进 `internal/nerve/names.go`
+  的两个泛型 helper，写法漂移（有的返回 `"unknown"`、有的返回 `""`）随之一并消失
+- 文档里残留的版本叙述标记（`(v1.3.x)`、"1.1.1 起"、"取代旧的阻塞式等待"）清除，
+  "三种挂起/四种挂起"两处口径统一为四种，README 的行数与 `Synapse` 方法清单按实测校正
 - **组合器不代管启动**：`GuardStack` / `Fallback*` 返回的端口值不声明 `Bootable`，
   框架只对它拿到手的那个值做能力断言——必须先启动的成员在组合之前由宿主启动，
   这条边界由一条守卫测试与 `compose.go` 的契约注释同时钉住

@@ -110,20 +110,31 @@ func (b *actBatch) delegate(eff *Effect) {
 	eff.Send = nil
 	switch {
 	case sig.To == "":
-		eff.Err = "a delegation names one target (Signal.To)"
+		reportOver(eff, "a delegation names one target (Signal.To)")
 	case b.lc.Send == nil:
-		eff.Err = "no Colony organ: cannot ask " + sig.To
+		reportOver(eff, "no Colony organ: cannot ask "+sig.To)
 	case b.lc.awaiting != "":
-		eff.Err = "one delegation per round: already awaiting " + b.lc.awaiting
+		reportOver(eff, "one delegation per round: already awaiting "+b.lc.awaiting)
 	default:
 		id, err := b.lc.Send(b.ctx, sig)
 		if err != nil {
-			eff.Err = fmt.Errorf("nerve: peer request to %s: %w", sig.To, err).Error()
+			reportOver(eff, fmt.Sprintf("nerve: peer request to %s: %v", sig.To, err))
 			return
 		}
 		b.lc.awaiting = id
 		eff.WaitInput = "awaiting reply from " + sig.To
 	}
+}
+
+// reportOver records why the framework stopped a call, ahead of any failure text
+// the organ already wrote: the framework's reason is what explains the round, and
+// a truncated tool error must not crowd it out.
+func reportOver(eff *Effect, reason string) {
+	if eff.Err == "" {
+		eff.Err = reason
+		return
+	}
+	eff.Err = reason + "; " + eff.Err
 }
 
 // refuseLaterWait drops a wait that arrived after the round spent its single
@@ -137,10 +148,7 @@ func refuseLaterWait(eff *Effect, pending ToolCall) {
 	}
 	eff.Send = nil
 	eff.WaitInput = ""
-	if eff.Err != "" {
-		eff.Err += "; "
-	}
-	eff.Err += fmt.Sprintf("one wait per round: %s already waits", pending.Name)
+	reportOver(eff, fmt.Sprintf("one wait per round: %s already waits", pending.Name))
 }
 
 // admitted runs one call that cleared the membrane: BeforeAct (a mutated

@@ -13,7 +13,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入七个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
 - **零依赖。** 仅标准库。没有需要审计的传递依赖树。
-- **小巧可读。** Go 源码约 3500 行。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
+- **小巧可读。** Go 源码约 5400 行。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
   `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
 
@@ -39,7 +39,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   发布到 `/.well-known/agent-card.json` 即可被其他 agent 发现
 - **A2A 风格任务状态** —— `Signal.Status` 携带六个任务生命周期状态
   （submitted/working/needs-input/completed/failed/cancelled），端到端追踪跨 agent 任务
-- **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Edges）+
+- **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Fire/Edges）+
   参考学习规则 `Hebbian`/`STDP`/`STDPFrom`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；每条边
   还记住最近一次投递的时刻，所以 `STDPFrom` 只读图就能配对；宿主注入的 `Floor` 可以让一条边「存在但不承载流量」（`ErrWeakSynapse`）；
   持久化往返：`Edges` 导出 + `NewDirect` 恢复
@@ -57,11 +57,11 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）
 - **一个端口后面放多个器官** —— `GuardStack` / `FallbackThinker` / `FallbackEffector` 把若干实现组合成循环看到的唯一一个器官，返回的**就是端口类型本身**：组合器官与单个器官接法一致，蓝图没有多出任何插槽
 - **器官可以在被使用之前先启动** —— 任何端口都可声明 `Bootable`；`New` 按 `PortOrder()`（蓝图自己蕴含的顺序，不是在旁边另抄一份）对每个声明者调用一次，`Replace` 在提交替换之前先启动。启动失败即中止装配，本次尝试打开的东西经宿主 `Closer` 释放 —— 框架依旧不关任何器官
-- **事件流可落盘** (v1.3.8) —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以一份日志可以混写整个集群
+- **事件流可落盘** —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以一份日志可以混写整个集群
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
-- **统一挂起-恢复（v1.3.2 起）** —— 三种挂起共用同一条快照 + 恢复路径：
+- **统一挂起-恢复** —— 四种挂起共用同一条快照 + 恢复路径：
   - **ask_user**：工具返回 `Effect{WaitInput: 问题}`，循环产出 `EventState(StateWaiting)` +
     `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束** ——不阻塞、不占轮次、
     等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：响应以挂起工具的结构化
@@ -258,7 +258,7 @@ func main() {
 两条路径互斥；用 break + `Stimulate` 模拟 ask_user 会丢失挂起上下文（`Session` 不透明，
 无法手工重建）。
 
-### 统一挂起-恢复（v1.3.2）
+### 统一挂起-恢复
 
 四种挂起 —— 工具请求输入（ask_user）、执行前征询、文本征询（两侧都是 `VerdictAsk`）与宿主请求暂停（Pause）—— 共用同一机制：
 循环产出携带不透明 `Session` 快照的挂起事件后**迭代器正常结束**；宿主保存 Session
@@ -277,7 +277,7 @@ func main() {
   调用（不再重新过门禁）或按原稿说出被扣住的草稿（不重跑该轮 Think）。
 - `Agent.Resume` 自动清除失效的暂停请求；`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
 - Session 单次使用：重复恢复会重放剩余工具调用（宿主责任）。
-  该统一模型取代旧的阻塞式 PauseGate 等待（v1.3.2 breaking）。
+  暂停从不打断执行中的 Think/Act：它只在间隙点被兑现。
 
 ### 轮数上限
 

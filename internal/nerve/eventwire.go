@@ -130,14 +130,20 @@ type wrappedErr struct {
 func (w wrappedErr) Error() string { return w.text }
 func (w wrappedErr) Unwrap() error { return w.err }
 
-// EncodeEvent serializes one event. Beyond JSON encoding it fails on two values
+// EncodeEvent serializes one event. Beyond JSON encoding it fails on the values
 // it cannot faithfully hand back: a Session that cannot be serialized (a
-// suspension handle is not something to journal half of) and a ruling this
-// build has no name for (the record could never be decoded again).
+// suspension handle is not something to journal half of), and any enum written
+// out of range — kind, loop state, membrane ruling — whose name table has no
+// entry. Those are exactly the records DecodeEvent must refuse, so refusing them
+// here is what keeps a journal free of entries that can never be replayed.
 func EncodeEvent(e Event) ([]byte, error) {
+	kind := nameOf(eventKindNames, e.Kind)
+	if kind == "" {
+		return nil, fmt.Errorf("nerve: encode event: unknown kind %d", int(e.Kind))
+	}
 	w := WireEvent{
 		Version:  eventVersion,
-		Kind:     e.Kind.String(),
+		Kind:     kind,
 		CellID:   e.CellID,
 		Text:     e.Text,
 		ToolCall: e.ToolCall,
@@ -149,7 +155,10 @@ func EncodeEvent(e Event) ([]byte, error) {
 		Dropped:  e.Dropped,
 	}
 	if e.Kind == EventState {
-		w.State = e.State.String()
+		w.State = nameOf(loopStateNames, e.State)
+		if w.State == "" {
+			return nil, fmt.Errorf("nerve: encode event: unknown state %d", int(e.State))
+		}
 	} else if e.State != 0 {
 		return nil, fmt.Errorf("nerve: encode event: state %q on kind %q", e.State, e.Kind)
 	}

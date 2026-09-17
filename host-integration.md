@@ -522,7 +522,7 @@ ev, err := meowire.DecodeEvent(line)
 
 ### 7.2 可选扩展
 
-**Synapse（多 agent 消息参考实现，1.1.1 起为可塑突触图）**：
+**Synapse（多 agent 消息参考实现，可塑突触图）**：
 
 ```go
 type Edge struct {
@@ -576,8 +576,19 @@ type Synapse interface {
 type StreamHub struct {
 	mu      sync.RWMutex
 	streams map[string]chan meowire.Event // 流式输出（可选注入；无 channel = 静默）
-	tasks   map[string]*TaskStatus        // 任务状态（必选，Hooks 写入）
+	tasks   map[string]*taskView          // 任务状态（必选，Hooks 写入）
 	plans   map[string]string             // plan 树（update_plan 工具写入）
+}
+```
+
+```go
+// taskView 是宿主自己的任务视图。框架那个 meowire.TaskStatus 字符串只出现在跨 agent 的
+// Signal.Status 上（六态、各自只有一个写入者），与这里的本地观察结构无关。
+type taskView struct {
+	State    string
+	LastText string
+	LastTool string
+	Output   string
 }
 ```
 
@@ -620,25 +631,25 @@ func (t *streamingThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowi
 
 ```go
 hooksFor := func(id string) *meowire.Hooks {
-	return &meowire.Hooks{
+	return meowire.FullHooks(meowire.Hooks{
 		AfterThink: func(ctx context.Context, d *meowire.Decision) error {
-			hub.updateTask(id, TaskStatus{State: "thinking", LastText: d.Text})
+			hub.updateTask(id, taskView{State: "thinking", LastText: d.Text})
 			return nil
 		},
 		AfterAct: func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {
-			hub.updateTask(a.CellID, TaskStatus{State: "acting", LastTool: a.Call.Name})
+			hub.updateTask(a.CellID, taskView{State: "acting", LastTool: a.Call.Name})
 		},
 		OnCycleEnd: func(ctx context.Context, output string, outcome meowire.CycleOutcome) {
 			switch outcome {
 			case meowire.OutcomeDone:
-				hub.updateTask(id, TaskStatus{State: "done", Output: output})
+				hub.updateTask(id, taskView{State: "done", Output: output})
 			case meowire.OutcomeSuspended:
-				hub.updateTask(id, TaskStatus{State: "needs-input"})
+				hub.updateTask(id, taskView{State: "needs-input"})
 			default:
-				hub.updateTask(id, TaskStatus{State: "failed"})
+				hub.updateTask(id, taskView{State: "failed"})
 			}
 		},
-	}
+	})
 }
 ```
 
@@ -712,7 +723,7 @@ func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Dec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	msgs := buildMessages(p) // System/Identity/Methods/Tools/Context/Bounds/Input/Plan → messages
+	msgs := buildMessages(p) // Prompt 全部字段都要有落点，映射表见 thinker-openai-go.md §2
 	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
 	return &meowire.Decision{
 		Text:      resp.Text,
@@ -743,6 +754,7 @@ func main() {
 			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
 			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim, TrimResults: trimResults},
+			Mem:     &memory{}, // 第七端口，必填：Recall + Remember
 			System:  "你是 meow agent，用中文回答",
 			Tools: []meowire.ToolSpec{
 				{Name: "calc", Desc: "计算器", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "数值"},

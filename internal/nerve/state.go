@@ -30,21 +30,16 @@ var loopStateNames = []string{
 
 // String returns the human-readable name of the loop state.
 func (s LoopState) String() string {
-	if int(s) < 0 || int(s) >= len(loopStateNames) {
-		return "unknown"
+	if name := nameOf(loopStateNames, s); name != "" {
+		return name
 	}
-	return loopStateNames[s]
+	return "unknown"
 }
 
 // loopStateOf resolves a state name; an unknown name is reported as not-a-state
 // so a stored stream is rejected instead of read as some other state.
 func loopStateOf(name string) (LoopState, bool) {
-	for i, n := range loopStateNames {
-		if n == name {
-			return LoopState(i), true
-		}
-	}
-	return 0, false
+	return valueOfName[LoopState](loopStateNames, name)
 }
 
 // DefaultMaxRounds is the default round limit when MaxRounds <= 0.

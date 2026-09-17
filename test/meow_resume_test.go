@@ -7,6 +7,7 @@ package meowire_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -204,5 +205,53 @@ func TestAgentReplaceAuditEvent(t *testing.T) {
 	}
 	if got.NewType != "testutil.Thinker" {
 		t.Fatalf("audit new type = %q, want the swapped-in Thinker", got.NewType)
+	}
+}
+
+// TestForeignSessionIsMatchableAtTheFacade: a Session suspended by one agent and
+// resumed by another is refused on the event stream, and the host's only way to
+// tell that refusal from an organ failure is to match the value — so the value
+// has to be reachable from the importable package, not only from `nerve`.
+func TestForeignSessionIsMatchableAtTheFacade(t *testing.T) {
+	ctx := context.Background()
+	suspender, err := testNew(testOrgans(meowire.Organs{
+		ID: "suspender",
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			return &meowire.Decision{Text: "ask", ToolCalls: []meowire.ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
+		}},
+		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+			return &meowire.Effect{WaitInput: "may I?"}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new suspender: %v", err)
+	}
+	defer suspender.Close()
+
+	other, err := testNew(testOrgans(meowire.Organs{ID: "other"}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new other: %v", err)
+	}
+	defer other.Close()
+
+	var sess meowire.Session
+	var gotWait bool
+	for ev := range suspender.Stimulate(ctx, "work") {
+		if ev.Kind == meowire.EventWaitInput {
+			sess, gotWait = ev.Wait.Session, true
+		}
+	}
+	if !gotWait {
+		t.Fatal("no Session captured from the suspending run")
+	}
+
+	var refused error
+	for ev := range other.Resume(ctx, sess, "yes") {
+		if ev.Kind == meowire.EventError {
+			refused = ev.Err
+		}
+	}
+	if !errors.Is(refused, meowire.ErrForeignSession) {
+		t.Fatalf("resume refused with %v, want the api's ErrForeignSession to match", refused)
 	}
 }

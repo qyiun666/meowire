@@ -214,22 +214,12 @@ var waitKindNames = []string{"pause", "tool", "call-ask", "utterance-ask"}
 
 // wireName is the enum's JSON identity. "" means the value is not a flavour this
 // build knows, which Marshal refuses rather than writing out as a pause.
-func (k waitKind) wireName() string {
-	if int(k) < 0 || int(k) >= len(waitKindNames) {
-		return ""
-	}
-	return waitKindNames[k]
-}
+func (k waitKind) wireName() string { return nameOf(waitKindNames, k) }
 
 // waitKindOf decodes a wire name; an unknown name is reported as not-a-kind
 // (the caller rejects the handle rather than guessing a flavour).
 func waitKindOf(name string) (waitKind, bool) {
-	for i, n := range waitKindNames {
-		if n == name {
-			return waitKind(i), true
-		}
-	}
-	return 0, false
+	return valueOfName[waitKind](waitKindNames, name)
 }
 
 // sessionVersion is the Session serialization format version. Bump it on

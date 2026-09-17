@@ -125,7 +125,7 @@ Anthropic 长时 Agent 的核心结论：上下文压缩不够，**状态必须�
 ## 5b. 动态接线（运行时换器官）
 
 `Agent.Replace(slot, port)` 支持在两次 `Stimulate` 之间替换运行端口
-（think/act/sandbox/budget/hooks）：换 LLM 提供商、换沙箱策略、
+（think/act/sandbox/budget/mem/hooks）：换 LLM 提供商、换沙箱策略、
 换工具集都不必重建 Agent。这与 DeepSeek Harness 的运行时热插拔是
 同一哲学，但 meowire 保持编译期类型安全（Replace 做端口类型断言）
 与"飞行中的 Stimulate 不受影响"的语义——每次 `Stimulate` 快照

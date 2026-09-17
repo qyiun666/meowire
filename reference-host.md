@@ -569,7 +569,7 @@ func main() {
 			fmt.Println("❓", ev.Wait.Call.Name, ev.Wait.Question)
 			pendingSession = ev.Wait.Session
 		case meowire.EventReplace: // 端口替换审计：模型切换闭环从这里取，不再手工维护状态机
-			fmt.Printf("🔁 slot=%s old=%T new=%T\n", ev.Replace.Slot, ev.Replace.Old, ev.Replace.New)
+			fmt.Printf("🔁 slot=%s old=%T new=%T\n", ev.Replace.Slot, ev.Replace.OldType, ev.Replace.NewType)
 		case meowire.EventUsage:
 			fmt.Println("💰", ev.Usage.Total, "tokens")
 		case meowire.EventDone:

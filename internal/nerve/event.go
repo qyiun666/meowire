@@ -59,7 +59,7 @@ type SandboxVerdict struct {
 // the previous port to the host, which is where a value can still be acted on.
 type ReplaceAudit struct {
 	CellID  string // owning agent id
-	Slot    string // swappable slot name ("think"/"act"/"sandbox"/"budget"/"hooks")
+	Slot    string // slot name this swap went through (one of the blueprint's WirePoint.Slot values)
 	OldType string // type name of the displaced port ("" when none was set)
 	NewType string // type name of the swapped-in port
 }
@@ -107,19 +107,14 @@ var eventKindNames = []string{
 // inserting or reordering the iota cannot silently reinterpret a stored stream
 // (same discipline as the Session's waitKind names).
 func (k EventKind) String() string {
-	if int(k) < 0 || int(k) >= len(eventKindNames) {
-		return "unknown"
+	if name := nameOf(eventKindNames, k); name != "" {
+		return name
 	}
-	return eventKindNames[k]
+	return "unknown"
 }
 
 // eventKindOf resolves a wire name; an unknown name is reported as not-a-kind
 // so the caller rejects the record instead of guessing what it was.
 func eventKindOf(name string) (EventKind, bool) {
-	for i, n := range eventKindNames {
-		if n == name {
-			return EventKind(i), true
-		}
-	}
-	return 0, false
+	return valueOfName[EventKind](eventKindNames, name)
 }

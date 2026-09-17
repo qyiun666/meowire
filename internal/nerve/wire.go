@@ -157,7 +157,7 @@ func Connectome() []WirePoint {
 
 		// --- hooks (phase 3: host runtime updates, all required) ---
 		{ID: "H1", Name: "BeforeStimulate", Phase: 3, Category: CategorySense,
-			TargetID: "prompt", Target: "System, Identity, Methods, Tools, Context, Input, Plan", Semantics: SemReplace,
+			TargetID: "prompt", Target: "System, Identity, Methods, Tools, Context, Input, Plan, Reflection", Semantics: SemReplace,
 			Parallel: false, Required: true,
 			Desc: "whole-field write-back applies to every round"},
 		{ID: "H2", Name: "AfterStimulate", Phase: 3, Category: CategorySense,

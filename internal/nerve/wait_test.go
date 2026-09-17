@@ -127,3 +127,27 @@ func TestParallelSecondWaitRefused(t *testing.T) {
 		t.Errorf("refused effect err = %q, want it to name the claimant", second.Err)
 	}
 }
+
+// TestDelegationFailureKeepsToolError: an undeliverable delegation is the
+// framework's answer, and the tool's own failure is the organ's — both belong in
+// the feedback, with the framework's reason first, because the structured track
+// truncates from the head (MaxToolOutput keeps the front). What a reader must
+// never lose is why nothing was delegated.
+func TestDelegationFailureKeepsToolError(t *testing.T) {
+	send := func(a Action) (*Effect, error) {
+		return &Effect{Send: &Signal{}, Err: "tool backend exploded"}, nil
+	}
+	_, fedBack := waitHarness(t, &LoopContext{CellID: "c1", Input: "go"}, []ToolCall{{ID: "t1", Name: "sendNowhere"}}, send)
+	eff := fedBack["t1"]
+	if eff == nil {
+		t.Fatal("the call produced no EventToolResult")
+	}
+	own := strings.Index(eff.Err, "tool backend exploded")
+	reason := strings.Index(eff.Err, "names one target")
+	if own < 0 || reason < 0 {
+		t.Fatalf("err = %q, want both the framework reason and the tool's own failure", eff.Err)
+	}
+	if reason > own {
+		t.Errorf("err = %q, want the framework reason ahead of the tool's text", eff.Err)
+	}
+}

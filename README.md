@@ -15,7 +15,7 @@ you can rely on.
   backend — it injects seven host ports and expects you to implement them. The framework never
   hides what your agent actually does.
 - **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
-- **Small and readable.** ~5.3k lines of Go. The decision loop reads as one concern
+- **Small and readable.** ~5.4k lines of Go. The decision loop reads as one concern
   per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
@@ -44,7 +44,7 @@ you can rely on.
   capability card (JSON); publish it at `/.well-known/agent-card.json` for agent discovery
 - **A2A-style task states** — `Signal.Status` carries the six task lifecycle states
   (submitted/working/needs-input/completed/failed/cancelled) for end-to-end inter-agent tracking
-- **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Edges)
+- **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Fire/Edges)
   with reference learning rules `Hebbian`/`STDP`/`STDPFrom`/`Prune` (host-side; framework stores state,
   never decides when to learn); each edge also carries when it last conducted, so `STDPFrom` pairs
   spikes from graph state alone, and a host-injected `Floor` makes a connection able to exist yet
@@ -80,7 +80,7 @@ you can rely on.
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
-- **Unified suspension-resume (v1.3.2 onward)** — one snapshot + resume path for all suspension kinds:
+- **Unified suspension-resume** — one snapshot + resume path for all four suspension flavours:
   - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), remaining tools run first, then the loop resumes from the suspended round.
   - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, "")` continues (no pending tool to inject). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
   - **Membrane ask**: a tri-state ruling — `Sandbox.Allow` before a call runs, or `Sandbox.Emit` before a round's text is heard — yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason; an `Emit` ask withholds the draft inside the `Session`). Resolution follows one shared response grammar — "" denies (`[sandbox-denied: declined]`), a `[denied:` prefix denies with that text (the feedback lands in the canonical `[sandbox-denied: ...]` form), any other response approves: the pending call runs without re-gating, or the withheld draft is said as generated without another Think.
@@ -92,13 +92,13 @@ you can rely on.
   host Thinker's decision — the text track (`Context`) keeps host base + sandbox denials
 - **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
   `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
-- **Parallel tool batches (v1.3.3, opt-in)** — `Config.ParallelActs` executes a round's
+- **Parallel tool batches (opt-in)** — `Config.ParallelActs` executes a round's
   multiple independent tool calls concurrently (serial gating → parallel Act → serial
   feedback in call order); events and hooks stay serial. Off by default; requires a
-  concurrency-safe Effector. `MaxParallelActs` (v1.3.8) caps how many calls of a batch run at
+  concurrency-safe Effector. `MaxParallelActs` caps how many calls of a batch run at
   once. `Session.RemainingCalls()` exposes the pending calls of a
   suspension (empty when nothing is left to replay)
-- **The stream is journalable** (v1.3.8) — `EncodeEvent`/`DecodeEvent` write one versioned JSON
+- **The stream is journalable** — `EncodeEvent`/`DecodeEvent` write one versioned JSON
   record per event, carry enums by name, restore framework errors by identity, and name anything
   that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
   that produced it, so one log can hold a whole colony
@@ -294,9 +294,10 @@ opaque `Session` — resume it via `Agent.Resume(ctx, sess, response)` (see Susp
 The two paths are mutually exclusive; a break-based `ask_user` would lose the suspended context
 (the `Session` is opaque and cannot be rebuilt by hand).
 
-### Unified suspension-resume (v1.3.2)
+### Unified suspension-resume
 
-All three suspension kinds — tool-requested input (ask_user), a sandbox ask (`VerdictAsk`), and host-requested pause — share one
+All four suspension flavours — tool-requested input (ask_user), a membrane ask on either side of the loop
+(`VerdictAsk`), and host-requested pause — share one
 mechanism: the loop yields a suspension event carrying an opaque `Session` snapshot and ends the
 iterator normally; the host saves the Session (optionally persisting it via `Session.Marshal()` /
 `UnmarshalSession` for cross-process recovery), then calls `Agent.Resume(ctx, sess, response)` to
@@ -313,7 +314,7 @@ continue from the suspended point — no extra round, no budget during the wait.
 - `Agent.Resume` clears a stale pause request automatically; `Agent.Unpause()` only backs out a
   pause request that has not taken effect yet.
 - The Session is single-use: resuming it twice re-executes the remaining tool calls (host
-  responsibility). This unified model replaces the old blocking PauseGate wait (v1.3.2 breaking).
+  responsibility). A pause never interrupts a running Think/Act: it is honored at a gap point.
 
 ### Round limits
 
