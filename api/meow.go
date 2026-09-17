@@ -105,6 +105,11 @@ func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.
 	}
 }
 
+// ID returns the agent's cell identity — the name a colony's routing table
+// (Resolve) delivers by. It is fixed at assembly: Organs.ID, or "agent" when
+// that was left empty.
+func (a *Agent) ID() string { return a.cell.ID }
+
 // UpdateConfig swaps the scalar loop configuration wholesale (zero-value
 // semantics identical to New). It takes effect at the next Stimulate/Resume
 // — an in-flight loop keeps the values it started with. Every call records a

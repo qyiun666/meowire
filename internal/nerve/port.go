@@ -47,6 +47,16 @@ type Prompt struct {
 	// accumulates and never enters a suspension snapshot. BeforeThink may
 	// overwrite it, as it may overwrite Context.
 	Memories []Record
+
+	// Stimuli are the signals this cell's inbox held at the Think gap (see
+	// LoopContext.Ingest): what the colony sent since the last Think. Volatile
+	// as Memories — replaced wholesale every round, never snapshotted.
+	Stimuli []Signal
+
+	// Inhibit lists the tool names this round's KindNotice signals ask the loop
+	// to withhold. The framework refuses a matching call before it is gated; a
+	// call already in flight is never revoked.
+	Inhibit []string
 }
 
 // buildPrompt assembles this round's data package from the loop context. The
@@ -64,6 +74,8 @@ func (lc *LoopContext) buildPrompt() *Prompt {
 		Reflection:  lc.Reflection,
 		ToolResults: lc.ToolResults,
 		Memories:    lc.Memories,
+		Stimuli:     lc.Stimuli,
+		Inhibit:     inhibitNames(lc.Stimuli),
 	}
 }
 
@@ -131,6 +143,17 @@ type Effect struct {
 	Err    string
 	// WaitInput non-empty = suspend and wait for external input.
 	WaitInput string
+	// Send asks the framework to put a request to another cell and to wait for
+	// the answer: the host names the target (To, optionally Skill and
+	// Payload), the cell stamps what it owns (ID, From, Kind, Status=submitted)
+	// and delivers through its colony. A successful send suspends this call
+	// exactly like WaitInput does, and the reply arrives as the call's
+	// structured result once the host resumes it (see Agent.Resumptions). A
+	// send that cannot be delivered (no colony wired, busy or unknown target)
+	// never suspends: its error becomes this call's tool feedback, like any
+	// other resistance. WaitInput wins over Send when both are set; a second
+	// Send in the same round is refused rather than silently dropped.
+	Send *Signal
 }
 
 // WaitInput is the EventWaitInput payload: why the loop stopped for input and
@@ -166,6 +189,7 @@ type Session struct {
 	pending     ToolCall     // the tool that requested input (zero value for pause suspensions)
 	remaining   []ToolCall   // tool calls after the suspending one
 	toolResults []ToolResult // accumulated structured tool feedback at suspension
+	requests    []Signal     // peer requests this invocation is serving (answered at its terminal)
 	cell        string       // owning cell: Resume refuses a handle from another cell
 	kind        waitKind     // why the loop stopped for input
 	utterance   string       // withheld text, kind == waitUtterance
@@ -231,6 +255,7 @@ type sessionJSON struct {
 	Pending     ToolCall     `json:"pending"`
 	Remaining   []ToolCall   `json:"remaining"`
 	ToolResults []ToolResult `json:"toolResults"`
+	Requests    []Signal     `json:"requests"`  // peer requests still being served
 	Ask         string       `json:"ask"`       // waitKind wire name
 	Utterance   string       `json:"utterance"` // withheld text (ask == "utterance-ask")
 }
@@ -255,6 +280,7 @@ func (s Session) Marshal() ([]byte, error) {
 		Pending:     s.pending,
 		Remaining:   s.remaining,
 		ToolResults: s.toolResults,
+		Requests:    s.requests,
 		Ask:         s.kind.wireName(),
 		Utterance:   s.utterance,
 	})
@@ -290,6 +316,7 @@ func UnmarshalSession(data []byte) (Session, error) {
 		pending:     sj.Pending,
 		remaining:   sj.Remaining,
 		toolResults: sj.ToolResults,
+		requests:    sj.Requests,
 		cell:        sj.Cell,
 		kind:        kind,
 		utterance:   sj.Utterance,

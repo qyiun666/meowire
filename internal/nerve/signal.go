@@ -40,7 +40,11 @@ const (
 type SignalKind int
 
 const (
-	KindStimulus SignalKind = iota // Stimulus: host sends task to agent
-	KindResponse                   // Response: agent reply
-	KindNotice                     // Notice: side-channel message, no DecisionLoop
+	KindStimulus SignalKind = iota // Stimulus: task put to this cell (host or another cell)
+	KindResponse                   // Response: agent reply, ReplyTo names the signal it answers
+	// KindNotice: side-channel message that runs no DecisionLoop of its own. The
+	// framework reads exactly one thing from it — a Payload naming a single tool
+	// to withhold from the round that drains it (see Prompt.Inhibit). Anything
+	// else a notice carries is the host's own convention.
+	KindNotice
 )

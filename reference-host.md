@@ -331,7 +331,7 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 | `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归宿主 |
 | `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试；最终错误同样写入 `ToolResults.Err` |
 
-多 agent 工具（`send_message`/`spawn_agent`）也在这里实现，见 Step 8。
+多 agent 工具里 `spawn_agent` 在这里实现；委托邻居不必自己持有 synapse——返回 `Effect{Send: ...}` 交给框架投递与配对，见 Step 8。
 
 ---
 
@@ -619,7 +619,9 @@ func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
 
 子 agent 的创建位置：**宿主 Effector 工具内**（`spawn_agent`），对主循环完全透明（扁平模型，无框架级嵌套）。
 
-### 8.2 agent 间通信：synapse（参考实现）+ 宿主工具
+### 8.2 agent 间委托：工具只说「问谁」，投递/答复/配对归框架
+
+装配顺序要先建图、再装 agent、最后回填路由表（colony 本身是环形的）：
 
 ```go
 // multi.go
@@ -628,20 +630,42 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	meowire "github.com/qyiun666/meowire/api"
 )
 
-// resolver：把目标 ID 映射到它的信号收件箱（宿主维护 inbox 映射）
-func makeResolver(inboxes map[string]chan meowire.Signal) meowire.Resolver {
-	return func(id string) (chan<- meowire.Signal, bool) {
-		ch, ok := inboxes[id]
-		return ch, ok
+func buildColony(bpMain, bpHelper meowire.Blueprint) (*meowire.Agent, *meowire.Agent, error) {
+	syn := meowire.NewDirect(nil)                 // 参考实现，resolver 先空着
+	bpMain.Organs.Colony, bpHelper.Organs.Colony = syn, syn
+	main, err := meowire.New(bpMain)
+	if err != nil {
+		return nil, nil, fmt.Errorf("main agent: %w", err)
 	}
+	helper, err := meowire.New(bpHelper)
+	if err != nil {
+		main.Close()
+		return nil, nil, fmt.Errorf("helper agent: %w", err)
+	}
+	r, err := meowire.Resolve(main, helper)       // ID → 各自收件箱（重复 ID 即拒）
+	if err != nil {
+		return nil, nil, err
+	}
+	syn.SetResolver(r)                            // 回填，环闭合
+	for _, e := range [][2]string{{"main", "helper"}, {"helper", "main"}} {
+		if err := syn.Link(context.Background(), e[0], e[1], 1); err != nil { // 方向要各自连
+			return nil, nil, err
+		}
+	}
+	return main, helper, nil
 }
+```
 
-// send_message 宿主工具：Fire 投递；失败以反馈回流，不硬停
-func sendMessageTool(colony meowire.Synapse) toolFn { // 需 import fmt、time
+**委托工具**（主 agent 侧）——只填 `To`/`Payload`，`ID`/`From`/`Kind`/`Status` 归框架：
+
+```go
+// delegate 工具：把问题交给邻居，本轮挂起等回信
+func delegateTool() toolFn {
 	return func(ctx context.Context, args string) (*meowire.Effect, error) {
 		var p struct {
 			To   string `json:"to"`
@@ -650,22 +674,29 @@ func sendMessageTool(colony meowire.Synapse) toolFn { // 需 import fmt、time
 		if err := json.Unmarshal([]byte(args), &p); err != nil {
 			return &meowire.Effect{Err: "bad args"}, nil
 		}
-		sig := meowire.Signal{
-			ID:      "msg-" + fmt.Sprint(time.Now().UnixNano()),
-			From:    "agent-main",
-			To:      p.To,
-			Kind:    meowire.KindStimulus,
-			Payload: []byte(p.Text), // 内容走 Payload（宿主自定编码）
-		}
-		if err := colony.Fire(ctx, sig); err != nil {
-			return &meowire.Effect{Err: err.Error()}, nil // ErrTargetBusy/ErrNotLinked → 反馈
-		}
-		return &meowire.Effect{Result: "delivered"}, nil
+		// 框架铸 ID/From/Kind=submitted → 经 Colony 投递 → 挂起该调用（同 WaitInput 路径）
+		return &meowire.Effect{Send: &meowire.Signal{To: p.To, Payload: []byte(p.Text)}}, nil
 	}
 }
 ```
 
-**消费侧**：宿主从目标 inbox 取出 `Signal` → `target.Stimulate(ctx, string(sig.Payload))` 喂给目标 agent，回复同样经 `Fire` 回传。
+投不出去（没接 Colony、目标忙、未知 agent、边没连）**不挂起**，错误按普通工具反馈回流——阻力是反馈不是硬停。
+
+**被委托方不需要任何代码来"回话"**：它的 `Stimulate` 在自己的终点自动向请求方发一条 `KindResponse`（载荷 = 本次调用的最终输出，状态 = `TaskOutcome`：completed / needs-input / failed / cancelled）。入站侧同样零宿主代码：框架在该 agent 的下一个 Think 间隙点排空收件箱写入 `Prompt.Stimuli`（`KindNotice` 若带工具名则本轮撤下该工具，进 `Prompt.Inhibit`）。
+
+**宿主只剩一件事：决定何时继续。**
+
+```go
+// 宿主侧回合循环里的续跑分支——框架绝不自行 Resume
+for _, r := range main.Resumptions() {
+	for ev := range main.Resume(ctx, r.Session, string(r.Response)) {
+		relay(ev) // 正常消费事件流
+	}
+	main.Ack(r.SignalID) // 销账；之后同一请求的回信按普通入站信号呈现
+}
+```
+
+一个任务可以先报 `needs-input` 再报 `completed`，两条回信配在同一次委托上；`Resumptions()` 是快照，读到 `Ack` 之前一直在。
 
 ### 8.3 synapse 持久化：宿主存储，New 时带回来（自主变化值）
 
@@ -759,7 +790,8 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 17. **synapse 是唯一有自主变化值的组件**（`Weight`/`Fired`）——`Edges` 导出 / `NewDirect` 恢复，宿主在组合根做，`Agent.New` 不参与
 18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的变异；重负载场景用周期性快照 + WAL（§8.3/§8.4）
 19. **事件日志按 JSON 行 append** 即可作 WAL；恢复流程 = 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`
-20. **多 agent 的 hub/inbox 生命周期归宿主**（[host-integration.md §7.3](host-integration.md)）：收件箱 channel 满时 `Fire` 返回 `ErrTargetBusy`——宿主决定阻塞、丢弃或排队
+20. **收件箱归框架**（[host-integration.md §7.2](host-integration.md)）：每个 cell 自带 `InboxCapacity` 容量的收件箱，`meowire.Resolve(agents...)` 只是把 ID 映射到它；队列满时 `Fire` 返回 `ErrTargetBusy`，从不阻塞发送方。投递只是填队列——目标 cell 在下一个 Think 间隙点、或宿主读 `Resumptions()` 时才看到它
+21. **两处「框架不决策」**：信号到了不等于跑了（框架不代为 `Stimulate`），配好了不等于续跑了（框架不代为 `Resume`，见 §8.2）——什么时候让一个 cell 干活、什么时候让挂起的轮次继续，都是宿主的调度权
 
 ## 10. 相关文档
 

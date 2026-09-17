@@ -8,7 +8,6 @@
 package nerve
 
 import (
-	"fmt"
 	"sync"
 )
 
@@ -65,6 +64,13 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 	batch = make([]batchEntry, 0, len(b.calls))
 	denied := make([]bool, len(b.calls))
 	for i, tc := range b.calls {
+		if notice, blocked := b.lc.inhibited(tc.Name); blocked {
+			if !b.refuse(tc, inhibitedText(notice)) {
+				return nil, nil, true
+			}
+			denied[i] = true
+			continue // withheld by a notice: its feedback already landed
+		}
 		g := b.gate(tc)
 		if !g.ok {
 			return nil, nil, true
@@ -80,7 +86,7 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 			w, yOk := b.suspend(suspension{pending: tc, remaining: tail, question: g.question, kind: waitCallAsk})
 			return nil, w, !yOk
 		case VerdictDeny:
-			if !b.deny(tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason)) {
+			if !b.refuse(tc, deniedText(g.reason)) {
 				return nil, nil, true
 			}
 			denied[i] = true
@@ -124,6 +130,7 @@ func (b *actBatch) execPhase(batch []batchEntry) []batchOutcome {
 func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*WaitInput, bool) {
 	suspendAt := -1
 	for j := range batch {
+		b.delegate(results[j].eff)
 		if suspendAt < 0 && results[j].eff != nil && results[j].eff.WaitInput != "" {
 			suspendAt = j
 			continue

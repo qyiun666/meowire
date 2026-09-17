@@ -94,6 +94,9 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 	if o.Budget != nil {
 		base.Budget = o.Budget
 	}
+	if o.Colony != nil {
+		base.Colony = o.Colony
+	}
 	if o.ID != "" {
 		base.ID = o.ID
 	}

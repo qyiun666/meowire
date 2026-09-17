@@ -39,10 +39,11 @@ func (b *actBatch) gate(tc ToolCall) gateResult {
 	return g
 }
 
-// deny records a final denial: the [sandbox-denied: ...] text joins the
-// Context track (a verdict is not a tool result) and is yielded as structured
-// feedback in place. Returns false when the consumer stopped.
-func (b *actBatch) deny(tc ToolCall, fb string) bool {
+// refuse records a final refusal: the text joins the Context track (a refusal
+// is not a tool result) and is yielded as structured feedback in place. It
+// serves both refusals — a membrane denial and a notice inhibition. Returns
+// false when the consumer stopped.
+func (b *actBatch) refuse(tc ToolCall, fb string) bool {
 	b.lc.Context = append(b.lc.Context, fb)
 	return b.yield(Event{Kind: EventToolResult, Effect: &Effect{Err: fb}, ToolCall: &tc})
 }
@@ -155,7 +156,7 @@ func (b *actBatch) resolveCallAsk(sess Session, response string) bool {
 		return false
 	}
 	if ruling != VerdictAllow {
-		return b.deny(sess.pending, text)
+		return b.refuse(sess.pending, text)
 	}
 	b.lc.State = StateActing
 	if !b.yield(Event{Kind: EventState, State: StateActing}) {

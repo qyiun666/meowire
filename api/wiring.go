@@ -61,7 +61,8 @@ func ConnectomeNodes() []WireNode {
 }
 
 // WiringDiagram returns the filled state of every blueprint slot.
-// Framework built-ins (F1 tool feedback, G1 PauseGate) always read as filled.
+// Framework built-ins (F1 tool feedback, G1 PauseGate, G3 Inbox) always read
+// as filled; G2 Egress reads filled only when the host wired Organs.Colony.
 func WiringDiagram(o Organs) []Slot {
 	bp := nerve.Connectome()
 	slots := make([]Slot, 0, len(bp))
@@ -95,9 +96,9 @@ func SlotsByTarget(o Organs, targetID string) []Slot {
 
 // organFilled answers "is this blueprint slot wired?" per slot id. Ports read
 // their own Organs field, hooks read the container plus the specific callback,
-// and the framework built-in / api-injected slots are always active. An
-// unknown id is reported unfilled: a slot the api does not know about cannot
-// be assumed present.
+// the framework built-in / api-injected slots are always active, and the
+// colony's outbound slot follows its organ. An unknown id is reported
+// unfilled: a slot the api does not know about cannot be assumed present.
 var organFilled = map[string]func(Organs) bool{
 	"P1":  func(o Organs) bool { return o.Think != nil },
 	"P2":  func(o Organs) bool { return o.Act != nil },
@@ -105,6 +106,7 @@ var organFilled = map[string]func(Organs) bool{
 	"P4":  func(o Organs) bool { return o.Hooks != nil },
 	"P5":  func(o Organs) bool { return o.Sandbox != nil },
 	"P5b": func(o Organs) bool { return o.Sandbox != nil },
+	"P5c": func(o Organs) bool { return o.Sandbox != nil },
 	"P6":  func(o Organs) bool { return o.Budget != nil },
 	"P6b": func(o Organs) bool { return o.Budget != nil },
 	"P7":  func(o Organs) bool { return o.Mem != nil },
@@ -119,6 +121,8 @@ var organFilled = map[string]func(Organs) bool{
 	"H8":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnCycleEnd != nil },
 	"F1":  func(Organs) bool { return true },
 	"G1":  func(Organs) bool { return true },
+	"G2":  func(o Organs) bool { return o.Colony != nil },
+	"G3":  func(Organs) bool { return true },
 }
 
 // impliedSlots are sub-slots carried by a parent port (Sandbox.Bounds by
@@ -177,24 +181,32 @@ func Validate(o Organs, cfg Config) []Issue {
 		})
 	}
 
-	// info: notable defaults (zero-value Config semantics are documented).
+	return append(issues, defaultNotes(o, cfg)...)
+}
+
+// defaultNotes reports the assembly choices that are legal but worth hearing
+// about: an organ left empty or a limit left at its documented default.
+func defaultNotes(o Organs, cfg Config) []Issue {
+	var notes []Issue
 	if o.Identity == "" {
-		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "P1", Msg: "Identity empty (agent has no persona)"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P1", Msg: "Identity empty (agent has no persona)"})
 	}
 	if len(o.Tools) == 0 {
-		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "Tools empty (no tools declared)"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "Tools empty (no tools declared)"})
 	}
 	if len(o.Context) == 0 {
-		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "P6", Msg: "Context empty"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P6", Msg: "Context empty"})
 	}
 	if cfg.MaxRounds <= 0 {
-		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "", Msg: "MaxRounds<=0 uses DefaultMaxRounds(8)"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "", Msg: "MaxRounds<=0 uses DefaultMaxRounds(8)"})
 	}
 	if cfg.ParallelActs {
-		issues = append(issues, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
 	}
-
-	return issues
+	if o.Colony == nil {
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "G2", Msg: "Colony not wired (peer delegation and answers are unavailable)"})
+	}
+	return notes
 }
 
 // RenderDiagram renders the assembly as an ASCII wiring graph: the data

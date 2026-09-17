@@ -47,10 +47,21 @@ you can rely on.
 - **Plastic synapse graph** — `Synapse` five-method contract (Link-with-weight/Unlink/Reinforce/Edges)
   with reference learning rules `Hebbian`/`STDP`/`Prune` (host-side; framework stores state, never
   decides when to learn); persistence round-trip via `Edges` export + `NewDirect` restore
+- **Colony wiring with zero host plumbing** — `Resolve(agents...)` maps every agent ID to the inbox
+  its cell already owns (capacity `InboxCapacity`), so a synapse built over it delivers to the right
+  neuron with no host channel map; each cell drains its inbox into `Prompt.Stimuli` at the Think
+  gap, and a `KindNotice` naming a tool withdraws that tool for the round (`Prompt.Inhibit`) —
+  no consumer pump, and an in-flight Act is never preempted
+- **Agent-to-agent tasks are primitives, not host code** — a tool delegates by returning
+  `Effect{Send: &Signal{To: …}}`: the cell mints the id, stamps `submitted`, suspends the call, and
+  the serving cell answers at its own terminal with the state `TaskOutcome` derives (six states, one
+  writer each). The answer is paired back into `agent.Resumptions()` — the framework never resumes
+  on its own; the host continues with `Resume` and retires the pairing with `Ack`
 - **Unified composite view** — `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` merge the
   static assembly subgraph with the live synapse graph into one picture (view unified, data separate)
 - **Seven host-injected ports, all organs required** (no stubs, no optional
-  wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
+  port wiring — the one opt-in is `Organs.Colony`, the delivery organ of a
+  multi-agent wiring): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (token
   regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens),
@@ -84,8 +95,9 @@ you can rely on.
   Error/Aborted); `BeforeStimulate` may write a turn-scoped self-review note onto
   `Prompt.Reflection`, carried onto every Thinker prompt of the cycle
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
-- **Flat multi-agent model** — sub-agents and inter-agent messaging are host tools
-  (`spawn_agent` / `send_message`), never framework-level nesting
+- **Flat multi-agent model** — sub-agents stay host tools (`spawn_agent`), while
+  inter-agent delegation is a framework primitive (`Effect.Send` + `Resumptions`); never
+  framework-level nesting
 - **Resistance is feedback, not failure** — denied tools, tool errors, and busy targets flow back
   into the loop as `EventToolResult` feedback; the loop continues
 
@@ -305,8 +317,10 @@ it is deleted stays yours (MemHop). The text track is unchanged: `Organs.Context
 Meowire is a **flat model**: one `Agent` = one kernel. The host owns all instances.
 
 - Sub-agents: a `spawn_agent` host tool that returns results as `EventToolResult` feedback
-- Inter-agent messaging: a `send_message` host tool (reference routing semantics in
-  `internal/synapse`); resistance (busy target, unknown agent) becomes feedback, never a hard stop
+- Inter-agent tasks: a tool returns `Effect{Send: &Signal{To: …}}` and the framework delivers,
+  answers at the serving cell's terminal and pairs the reply into `agent.Resumptions()`;
+  resistance (busy target, unknown agent) becomes feedback, never a hard stop
+  (`Resolve(agents...)` builds the routing table; `internal/synapse` is the reference graph)
 - Capability discovery: `AgentCard` renders the A2A-style card; `Signal.Status` (A2A six-state
   task lifecycle) tracks each inter-agent task end to end
 

@@ -6,13 +6,13 @@
 
 - Capability layer: plastic synapse graph — inter-agent connections (Link/Unlink/Reinforce) and signal delivery (Fire), plus Direct implementation
 - Depends on nerve; does not depend on cell (uses Resolver closure to resolve targets, avoiding cell import)
-- Signal types are host-level: the framework does not consume them — hosts route/consume via their own inboxes
+- The graph is content-agnostic (it never reads a `Payload` and has no opinion on what a signal means), but a signal's routing fields are framework-owned end to end since v1.3.8: `api.Resolve` hands it cell queues instead of host channels, and the cell pairs replies against its own delegations
 - Learning rules (Hebbian/STDP) are host-side: the framework stores state (weights, delivery counts), never decides when to change it
 
 ## Dependencies
 
 - nerve (Signal type)
-- Go standard library only (context/fmt/sync)
+- Go standard library only (zero third-party dependencies)
 
 ## Interface Contract
 
@@ -25,9 +25,9 @@
   - `Edges(ctx, from) ([]Edge, error)` — deep-copied snapshot; from="" = whole graph (persistence export); unknown from = empty, not an error
 - `Direct` implementation:
   - Edge table `map[string]map[string]Edge` (from→to→Edge, RWMutex protected)
-  - `Resolver func(id) (chan<- nerve.Signal, bool)`: resolves target inbox by ID (host-injected closure)
+  - `Resolver func(id) (chan<- nerve.Signal, bool)`: resolves target inbox by ID (host-injected closure; `api.Resolve(agents...)` builds one from the agent list, so the host names members instead of owning channels)
   - `NewDirect(r Resolver, initial ...Edge)`: initial restores a persisted graph (omitted = empty); negative weights clamp
-  - `SetResolver`: late resolver injection at assembly time; connectivity is read through the `Edges` snapshot
+  - `SetResolver`: late resolver injection at assembly time. It exists for the colony's circular order — the routing table is built from the agents, and each agent's Colony organ is the synapse itself, so neither can be constructed first; `api.NewDirect` deliberately returns `*Direct` (not the interface) to keep this step reachable without adding it to the `Synapse` contract. Connectivity is read through the `Edges` snapshot
 - Error variables: `ErrNoTarget`, `ErrNotLinked`, `ErrTargetBusy`
 - Reference learning rules (host-callable; the framework never auto-applies):
   - `Hebbian(ctx, s, from, to, rate) error` — fire-together-wire-together step (Reinforce +rate)
@@ -42,8 +42,8 @@
 - Non-blocking delivery: buffer full → ErrTargetBusy immediately (never waits for target consumption)
 - Plastic graph since 1.1.1: Link carries initial weight; Unlink/Reinforce/Edges added; single-path policy — no two-interface compatibility shim
 - Persistence round-trip: export `Edges(ctx, "")` → host serializes; restore via `NewDirect(resolver, restored...)` — Agent.New stays unaware (host-domain assembly)
-- Multi-agent orchestration is host-side: hosts wrap synapse.Fire inside a `send_message` tool; Fire errors become `Effect{Err}` feedback (EventToolResult) so the loop continues — resistance is yield-ed, not fatal
-- Asynchronous task pattern: hosts combine `submit_task` (immediate ack) + `query_task` (status poll) tools for long-running sub-agents; the loop stays continuous
+- Two sanctioned routes through Fire (v1.3.8): the framework's own — `Organs.Colony` is this graph's `Fire`, driven by the kernel for a delegation (`Effect.Send`) and for the answers it owes, which is what gets ids minted and replies paired — and the host's — a `send_message` tool firing signals of its own convention, which the cell cannot pair (it never minted those ids) and therefore surfaces as ordinary inbound traffic
+- Delivery resistance stays feedback: a `Fire` error reaches `Effect{Err}` (EventToolResult) on the host route and a tool feedback on the delegation route, so the loop continues rather than dying — a busy or unknown peer is information, not a failure
 
 ## Pitfalls
 
@@ -51,7 +51,7 @@
 - Fired counter bumps only on successful delivery; an edge unlinked concurrently is skipped (counts lost with the connection)
 - Edges returns a deep copy: mutating the snapshot never mutates internal state
 - Weights clamp at 0 (both Link and Reinforce); negative delta can only approach 0, never go negative
-- Target closed (Cell.Close but still in table): Resolver returns false → ErrNoTarget; host Retire path should handle connection cleanup
-- Resolver-returned inbox may be closed: host must ensure lifecycle ordering (stop sending before Retire)
+- Closed target, still in the table: `api.Resolve` snapshots membership and the cell's inbox is never closed, so a dead cell's ID keeps resolving and signals queue to capacity, then ErrTargetBusy — retiring a member means resolving again without it, not closing a channel
 - Link ctx is only for cancellation check, does not block
-- The event stream is a synchronous pull model (iter.Seq): external events cannot be injected mid-iteration; cross-cycle waiting is done via poll tools
+- Delivering is not waking: `Fire` fills a queue, and the target reads it only at its own next Think gap (or when its host reads `Resumptions`) — nothing in the framework Stimulates a cell on a signal's behalf, so a peer nobody runs never picks up its share of the colony
+- The event stream is a synchronous pull model (iter.Seq): external events cannot be injected mid-iteration; waiting on a peer is `Effect.Send` (the round suspends on its own Session), waiting on a human is `Effect.WaitInput`

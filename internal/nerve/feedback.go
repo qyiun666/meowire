@@ -54,6 +54,13 @@ func (b *actBatch) run() (waiting *WaitInput, ok bool) {
 			return nil, false
 		}
 
+		if notice, blocked := b.lc.inhibited(tc.Name); blocked {
+			if !b.refuse(tc, inhibitedText(notice)) {
+				return nil, false
+			}
+			continue // withheld by a notice this round: never gated, never run
+		}
+
 		g := b.gate(tc)
 		if !g.ok {
 			return nil, false
@@ -66,7 +73,7 @@ func (b *actBatch) run() (waiting *WaitInput, ok bool) {
 			}
 			return w, true
 		case VerdictDeny:
-			if !b.deny(tc, fmt.Sprintf("[sandbox-denied: %s]", g.reason)) {
+			if !b.refuse(tc, deniedText(g.reason)) {
 				return nil, false
 			}
 			continue // refused by the membrane: feedback landed in place
@@ -82,6 +89,34 @@ func (b *actBatch) run() (waiting *WaitInput, ok bool) {
 	return nil, true
 }
 
+// delegate turns a tool's peer request into the wait the loop already knows
+// how to take: the cell stamps the signal with what it owns (id, sender, kind,
+// submitted) and delivers it, the call becomes the pending one, and the answer
+// arrives as its result once the host resumes. Resistance stays feedback — an
+// undeliverable request never suspends the round, and a second one in the same
+// batch is refused instead of being left awaiting nothing.
+func (b *actBatch) delegate(eff *Effect) {
+	if eff == nil || eff.Send == nil {
+		return
+	}
+	sig := *eff.Send
+	eff.Send = nil
+	switch {
+	case b.lc.Send == nil:
+		eff.Err = "no Colony organ: cannot ask " + sig.To
+	case b.lc.awaiting != "":
+		eff.Err = "one delegation per round: already awaiting " + b.lc.awaiting
+	default:
+		id, err := b.lc.Send(b.ctx, sig)
+		if err != nil {
+			eff.Err = fmt.Errorf("nerve: peer request to %s: %w", sig.To, err).Error()
+			return
+		}
+		b.lc.awaiting = id
+		eff.WaitInput = "awaiting reply from " + sig.To
+	}
+}
+
 // admitted runs one call that cleared the membrane: BeforeAct (a mutated
 // Action is what executes), actWithRetry, then either a suspension — the tool
 // asked for external input, and the tail rides the Session — or structured
@@ -93,6 +128,7 @@ func (b *actBatch) admitted(tc ToolCall, tail []ToolCall) (*WaitInput, bool) {
 		return nil, false
 	}
 	eff, err := actWithRetry(b.ctx, b.lc, act)
+	b.delegate(eff)
 
 	// A tool-requested wait wins over err (explicit intent) and a nil effect
 	// never suspends. The suspending call gets no AfterAct/EventToolResult —

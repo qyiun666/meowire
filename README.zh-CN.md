@@ -42,9 +42,14 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **可塑突触图** —— `Synapse` 五方法契约（Link 带权重/Unlink/Reinforce/Edges）+
   参考学习规则 `Hebbian`/`STDP`/`Prune`（宿主侧；框架只存状态，从不决定何时学习）；
   持久化往返：`Edges` 导出 + `NewDirect` 恢复
+- **多 agent 接线零宿主管道** —— `Resolve(agents...)` 把每个 agent 的 ID 映射到它的 cell 本来就自有的
+  收件箱（容量 `InboxCapacity`），建在其上的突触图无需宿主 channel 映射也能投递到正确神经元；每个
+  cell 在 Think 间隙点自行排空收件箱写入 `Prompt.Stimuli`，`KindNotice` 若为一个工具名则本轮撤下它
+  （`Prompt.Inhibit`）——没有消费泵，在途 Act 也不被抢占
+- **agent 间任务是原语，不是宿主代码** —— 工具返回 `Effect{Send: &Signal{To: …}}` 即完成委托：cell 铸信号 ID、盖 `submitted`、挂起该调用；服务方的调用在**自己的终点**回话，状态由 `TaskOutcome` 从循环终点算出（六个状态各一个写入者）。回信由框架配对进 `agent.Resumptions()`——框架绝不自行续跑，宿主 `Resume` 续上、`Ack` 销账
 - **统一合成视图** —— `BuildComposite`/`RenderComposite`/`RenderCompositeJSON` 把
   静态装配子图与实时突触图合并为一张图（视图统一、数据分离）
-- **七个宿主注入端口，全部器官必填**（无 stub、无可选接线）：
+- **七个宿主注入端口，全部器官必填**（无 stub、端口无可选接线；唯一可选的是多 agent 投递器官 `Organs.Colony`）：
   `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
   `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）、
@@ -75,8 +80,8 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
-- **扁平多 agent 模型** —— 子 agent 与 agent 间通信是宿主工具
-  （`spawn_agent` / `send_message`），绝不做框架级嵌套
+- **扁平多 agent 模型** —— 子 agent 仍是宿主工具（`spawn_agent`），而 agent 间委托是框架原语
+  （`Effect.Send` + `Resumptions`），绝不做框架级嵌套
 - **阻力是反馈，不是失败** —— 被拒绝的工具、工具错误、目标繁忙都以 `EventToolResult`
   反馈回流循环，循环继续
 
@@ -286,9 +291,10 @@ func main() {
 Meowire 是**扁平模型**：一个 `Agent` = 一个内核。宿主拥有所有实例。
 
 - 子 agent：`spawn_agent` 宿主工具，结果以 `EventToolResult` 反馈回流
-- agent 间通信：`send_message` 宿主工具（路由语义参考 `internal/synapse`）；
-  阻力（目标繁忙、未知 agent）成为反馈，绝不是硬停止
-- 能力发现：`AgentCard` 渲染 A2A 风格卡片；`Signal.Status`（A2A 六态任务生命周期）
+- agent 间任务：工具返回 `Effect{Send: &Signal{To: …}}`，框架负责投递、在被委托方的终点回话、
+  并把回信配对进 `agent.Resumptions()`；阻力（目标繁忙、未知 agent）成为反馈，绝不是硬停止
+  （路由表由 `Resolve(agents...)` 建出，`internal/synapse` 是参考突触图）
+- 能力发现：`AgentCard` 渲染 A2A 风格卡片；`Signal.Status`（A2A 六态任务生命周期，**全部由框架写入**）
   端到端追踪每个跨 agent 任务
 
 ## 开发

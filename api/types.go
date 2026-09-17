@@ -10,6 +10,8 @@
 package meowire
 
 import (
+	"context"
+
 	"github.com/qyiun666/meowire/internal/nerve"
 	"github.com/qyiun666/meowire/internal/synapse"
 )
@@ -72,18 +74,34 @@ func UnmarshalSession(data []byte) (Session, error) {
 
 // Inter-agent messaging (host reference).
 type (
-	Synapse    = synapse.Synapse
-	Edge       = synapse.Edge
-	Resolver   = synapse.Resolver
-	Signal     = nerve.Signal
-	SignalKind = nerve.SignalKind
-	TaskStatus = nerve.TaskStatus
+	Synapse     = synapse.Synapse
+	Edge        = synapse.Edge
+	Resolver    = synapse.Resolver
+	Signal      = nerve.Signal
+	SignalKind  = nerve.SignalKind
+	TaskStatus  = nerve.TaskStatus
+	Correlation = nerve.Correlation
 )
 
+// Colony is the delivery organ a cell sends peer signals through: the subset of
+// Synapse the kernel calls. The reference Direct satisfies it, and so does any
+// host router that can put a signal on a named cell.
+type Colony interface {
+	Fire(ctx context.Context, sig Signal) error
+}
+
+// InboxCapacity is how many signals wait in one agent's inbox before it starts
+// refusing: a delivery to a cell that is not consuming gets ErrTargetBusy, so a
+// slow neighbour is backpressure, not unbounded memory.
+const InboxCapacity = nerve.InboxCapacity
+
 // NewDirect creates the reference Direct synapse (connection-table with
-// Resolver-based delivery). r may be nil until SetResolver is called;
-// initial restores a previously exported graph (host persistence round-trip).
-func NewDirect(r Resolver, initial ...Edge) Synapse { return synapse.NewDirect(r, initial...) }
+// Resolver-based delivery). The concrete type is returned so the assembly
+// order a colony requires stays available: r may be nil until SetResolver
+// injects the table built by Resolve over agents that already carry this
+// graph. initial restores a previously exported graph (host persistence
+// round-trip).
+func NewDirect(r Resolver, initial ...Edge) *synapse.Direct { return synapse.NewDirect(r, initial...) }
 
 // STDPParams tunes the reference STDP learning rule (host-side learning;
 // the framework never applies learning rules itself).

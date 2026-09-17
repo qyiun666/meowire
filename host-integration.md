@@ -48,6 +48,10 @@ type Thinker interface {
 | `Context` | 上下文切片：宿主常驻基底 + 框架追加的 sandbox 裁决（`[sandbox-denied: ...]`，产出即最终形式）；工具结果不再进文本轨 | 宿主基底 + 框架追加 |
 | `ToolResults` | 结构化工具结果（`ToolResult{ID, Name, Result, Err}`）：循环内累积，ID 为 LLM 返回的 `call_xxx`，Result/Err 为截断后的原始输出；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记等）归宿主 Thinker | 框架，循环内追加 |
 | `Bounds` | 执行边界描述（`Sandbox.Bounds()` 快照，如"只能访问 /workspace"） | 框架，每次 Stimulate 一次 |
+| `Reflection` | 上一轮的自检笔记（ Reflexion 槽位，逐字透传） | 宿主（`BeforeStimulate` 写回） |
+| `Memories` | 本轮召回的经验记录（`Memory.Recall` 输出；整轮替换，不累积、不进快照） | 框架，每次 Think 前 |
+| `Stimuli` | 邻居投递给本 agent 的信号（`Signal{From, Kind, ReplyTo, Skill, Payload}`）；整轮替换，不累积、不进快照 | 框架，每次 Think 前的间隙点排空收件箱 |
+| `Inhibit` | 本轮 `KindNotice` 撤下的工具名：匹配到的调用在被门禁之前就拒执；在途 Act 不撤销 | 框架，随 `Stimuli` |
 | `Input` | 本次刺激文本（Stimulate 入参） | 框架，每轮动态 |
 | `Plan` | 任务计划/进度文本 | 宿主经 `Hooks.BeforeThink` 写 `p.Plan`（指针可改，下一轮 Think 生效）；配合宿主 `update_plan` 工具形成闭环（§7.3 ③） |
 
@@ -82,11 +86,12 @@ type Effector interface {
 | `Effect.Result` | 成功结果文本（框架截断后写入 `ToolResults.Result`，渲染归宿主） |
 | `Effect.Err` | 工具自身错误文本（框架截断后写入 `ToolResults.Err`；`Err` 非空 = 调用失败） |
 | `Effect.WaitInput` | 非空 = 请求外部输入（字段即问题文本）；框架产出 `EventWaitInput`（携带 Session）并**正常结束本轮迭代器**，宿主收集响应后调 `agent.Resume(sess, response)` 续跑（见 §6.4） |
+| `Effect.Send` | 委托邻居：宿主只填 `To`（可带 `Skill`/`Payload`），框架铸 `ID`/`From`/`Kind`/`Status=submitted` 并经 `Organs.Colony` 投递，随后**同 `WaitInput` 一样挂起该调用**；回信到达后由框架配对到这次挂起，宿主 `agent.Resumptions()` 取句柄、`Resume` 续跑、`Ack` 销账（见 §7.2）。投不出去（没接 Colony、目标忙/未知）不挂起，错误作为该调用的工具反馈回流 |
 | 返回 error | 执行层错误（同样写入 `ToolResults.Err`，循环继续） |
 
 **宿主职责：**
 - 工具注册表 + 分发器：按 `Name` 路由、反序列化 `Args`、序列化结果
-- 多 agent 工具在这里实现：`spawn_agent`（New → Stimulate → 返回结果）、`send_message`（跨 agent 消息，见 §7.2）——扁平模型约定
+- 多 agent 工具在这里实现：`spawn_agent`（New → Stimulate → 返回结果）；跨 agent 委托**不需要工具自己持有 synapse**——返回 `Effect{Send: ...}` 让框架投递与配对（见 §7.2），旁路消息才用 `Synapse.Fire`
 - `ask_user` 类工具：**返回 `&Effect{WaitInput: question}` 而非同步阻塞**（阻塞会拖住 Close 的等待；挂起由框架表达，UI 可见"猫在等人回答"），见 §6.4
 - 工具失败返回 `Effect{Err: ...}` 而非 error 也可，两者都会作为反馈继续循环（**阻力是反馈不是失败**）
 
@@ -205,6 +210,7 @@ o := meowire.Organs{
     Sandbox: mySandbox,                         // 必填
     Budget:  &meowire.ContextBudget{...},       // 必填
     Mem:     myMemory,                         // 必填
+    Colony:  mySynapse,                         // 可选：多 agent 投递器官（不接=不能委托/答复邻居）
 
     System:   "你是 meow agent，用中文回答",      // 固定系统指令
     Identity: "你叫 meow，角色 assistant，语气温暖", // 身份描述文本（宿主自拼）
@@ -226,6 +232,7 @@ o := meowire.Organs{
 | `Sandbox` | Sandbox | 权限门（`Allow` 守工具执行、`Emit` 守该轮文本出口） | **是** |
 | `Budget` | *ContextBudget | 令牌调节器（文本轨 + 结构化反馈轨） | **是** |
 | `Mem` | Memory | 经验端口（`Recall` 每轮 Think 前，`Remember` 每次调用终点） | **是** |
+| `Colony` | Colony | 多 agent 投递器官（`Synapse` 的 `Fire` 子集）：`Effect.Send` 的委托与入站请求的答复都经它出去；不接则该 agent 不能委托也不能答复邻居（`Validate` 报 info） | 否 |
 | `System` | string | 系统指令，进 Prompt.System | 否 |
 | `Identity` | string | 身份描述文本（宿主自拼），进 Prompt.Identity | 否 |
 | `Methods` | []MethodSpec | 内置能力描述（基因投影，仅描述不执行）；`MethodSpec{Name, Desc, Input, Output}`，进 Prompt.Methods | 否 |
@@ -492,8 +499,22 @@ type Synapse interface {
 }
 ```
 
-- `SignalKind`：`KindStimulus`（宿主发任务）/`KindResponse`（agent 回复）/`KindNotice`（旁路通知，不进决策循环）
-- 真正路由（channel/HTTP/Redis/gRPC）宿主自选；宿主工具 `send_message` 经 `synapse.Fire` 发送，阻力（目标忙/未知 agent）以 `EventToolResult` 反馈回循环，不硬停
+- `SignalKind`：`KindStimulus`（带 `ID`/`From` 的请求 = 一次任务，会被答复）/`KindResponse`（答复，`ReplyTo` 指向被答信号）/`KindNotice`（旁路通知，不进决策循环）
+- **装配顺序（colony 是环形的）**：路由表要点 agent 的名字，agent 又得带上这张表投递，所以先建图、再装 agent、最后回填：
+  ```go
+  syn := meowire.NewDirect(nil)                      // 参考实现，resolver 先空着
+  a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
+  b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
+  r, _ := meowire.Resolve(a, b)                      // ID → 各自收件箱（重复 ID 即拒）
+  syn.SetResolver(r)                                 // 回填；自定义路由宿主自己解决这一步
+  syn.Link(ctx, "a", "b", 1)                         // 只有连了边的两个方向才通
+  ```
+- **收件箱归框架**：每个 cell 自带容量 `InboxCapacity`（8）的收件箱；框架在下一个 Think 间隙点排空收件箱写入 `Prompt.Stimuli`，宿主既不维护 channel 映射也没有消费泵
+- `KindNotice` 的框架语义只有一条：Payload 若为一个工具名，则本轮该名字的调用在门禁之前就拒执（`Prompt.Inhibit`）；通知本身不触发循环，其余内容是宿主自己的约定
+- **委托 = 返回值，不是宿主调 Fire**：工具返回 `Effect{Send: &Signal{To, Skill, Payload}}`，框架铸 `ID`/`From`/`Kind`/`Status=submitted`、经 `Organs.Colony` 投递、把该调用挂起（与 `WaitInput` 同一条 Session 路径）。投不出去不挂起，错误进工具反馈（阻力是反馈）
+- **答复也是框架的账**：一次调用如果服务过带 `ID`/`From` 的请求，它结束时必定向请求方回一条 `KindResponse`，载荷 = 该次调用的最终输出，状态由 `TaskOutcome` 从循环终点算出——因此六个 `TaskStatus` 各只有一个写入者：`Submitted`=发出的请求、`Working`=被排空进本轮的请求、`NeedsInput`/`Completed`/`Failed`/`Cancelled`=终点映射（消费者中途放弃迭代器**不编状态、也不回话**）；无 Colony 可答的 agent 经 `OnError` 报出，不静默丢
+- **配对归内核，续跑归宿主**：回信落在发起方收件箱后由框架按 `ReplyTo` 配给它挂起的那一轮，进 `agent.Resumptions()`（快照式，读一次不影响下次）；宿主 `Resume(r.Session, string(r.Response))` 续跑、`Ack(r.SignalID)` 销账。一个任务可先报 `needs-input` 再报 `completed`，两条都配在同一次委托上
+- 真正路由（channel/HTTP/Redis/gRPC）宿主自选；`Colony` 只是 `Synapse` 的 `Fire` 子集，旁路消息宿主仍可直接 `Fire`（阻力以 `EventToolResult` 反馈回循环，不硬停）
 - synapse 错误（`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`）在 api 层 re-export；`Edge` 同步 re-export
 - **持久化往返**：运行期 `Edges(ctx, "")` 导出全图 → 宿主序列化存盘；下次启动反序列化 → `NewDirect(resolver, restored...)` 注入初始边。学习规则（赫布/STDP）宿主实现，框架只存状态不决策
 

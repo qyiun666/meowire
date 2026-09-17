@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A colony needs no host plumbing** — every cell owns its inbound queue (`InboxCapacity` = 8
+  signals, created on first use, blueprint entry `G3 Inbox`), drained at the Think gap into the new
+  `Prompt.Stimuli` track (replaced wholesale per round, never accumulated, never snapshotted), where
+  the cell first routes out any reply that answers one of its own outstanding requests.
+  `Resolve(agents...)` builds the synapse routing table from the agent list itself —
+  each ID mapped to that cell's own inbox, duplicate IDs refused — so the host names its members
+  instead of writing a channel map and a consumer pump. `Agent.ID()` exposes the address `Fire`
+  routes to. A `KindNotice` whose payload is a single tool name withdraws that tool for the round
+  that drains it (`Prompt.Inhibit`): a matching call is refused before the membrane sees it, while
+  a call already in flight is never preempted.
+- **A cell can ask another cell and get an answer back** — `Effect` gains `Send *Signal`: a tool
+  hands the framework a request (`To`, optionally `Skill` and `Payload`) and the cell stamps what
+  only it owns (`ID` minted as `<cellID>/<n>`, `From`, `Kind`, the opening task state) before
+  delivering it through `Organs.Colony` — the one optional organ of the assembly, blueprint entry
+  `G2 Egress`, whose absence makes a send tool feedback rather than a suspension. A delivered send
+  waits through the existing tool-suspension path, so no second resume machinery and no new wire
+  kind; one delegation per round, and a second send in the same round is refused instead of quietly
+  dropped. The answer reaches the host as a pairing: `Agent.Resumptions()` lists each
+  `Correlation{SignalID, CellID, Call, Session, Status, Response}` waiting to be continued without
+  consuming it, and `Agent.Ack(signalID)` ends the delegation. **The framework never resumes on its
+  own** — matching a reply to the round that asked is wiring, deciding when that round may continue
+  is not.
+- **Every task state has exactly one writer, and it is the framework** — the cell opens a task
+  (`TaskSubmitted`), the inbound step marks each drained stimulus `TaskWorking`, and the four
+  closing states all come from one mapping, `TaskOutcome(CycleOutcome, ctxErr)`. Each request an
+  invocation served is answered at its terminal — before `Remember` and `OnCycleEnd`, so the memory
+  organ and the hook observe the same ending the requester does — with that outcome, which means an
+  organ never reports a lifecycle and a host never assigns `Signal.Status`. A suspended invocation
+  carries its outstanding requests inside the `Session` (wire v3 gains `requests`) and discharges
+  them when it finishes; an iterator abandoned mid-flight answers nothing, because work that
+  stopped without failing has no lifecycle to invent; an answer with no route out reaches `OnError`
+  rather than vanishing.
+- **The membrane guards the egress side** — `Sandbox` gains `Emit(ctx, Utterance) (Verdict, reason
+  string, err error)`: a round's text passes a ruling before it reaches the event stream, the
+  accumulated output or the next Think. `Allow` says it as generated; `Deny` replaces the draft
+  with `[sandbox-denied: reason]` (which also joins the `Context` track); `Ask` withholds the draft
+  and suspends through the shared Session/Resume path — an approved draft is then said exactly as
+  generated, with no second Think. Blueprint gains `P5c Sandbox.Emit` (implied by P5); each ruling
+  is audited as one `EventSandbox`, the zero `Call` marking the utterance side.
 - **`Memory` is now a port the framework calls (P7)** — `Recall(ctx, MemoryQuery{CellID, Cue})
   ([]Record, error)` runs before every Think (after the budget trim, before `BeforeThink`), and
   `Remember(ctx, CycleFacts{CellID, Input, Output, Outcome})` runs exactly once per invocation at
@@ -28,6 +67,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`Sandbox` is a three-method port** — `Allow`, `Emit` and `Bounds`; the membrane is one organ
+  holding both sides of the loop rather than a permission gate plus a filter.
+  **Breaking**: every host membrane must implement `Emit` (an inert one returns `VerdictAllow`).
+- **A `Session` belongs to the cell that suspended it** — the handle carries its owner and
+  `Resume` refuses a foreign one with `ErrForeignSession` (replaying A's unfinished round on B's
+  organs would run one agent's brain with another's tools); the wait cause is stored as a
+  name-encoded kind (`pause` / `tool` / `call-ask` / `utterance-ask`) so reordering an internal
+  constant cannot reinterpret a saved handle, and a withheld draft travels on the wire.
+  **Breaking**: Session wire is v3 — handles marshalled by an earlier build are refused.
+- **`EventUsage` is emitted before the output ruling** — token accounting describes the Think that
+  produced it, so a denial or a suspension on the egress side can no longer drop it.
 - **Assembly now requires seven organs** (was six): `Organs.Mem` and `Cell.Mem` are
   mandatory and `New` refuses an assembly without them; `Replace("mem", …)` joins
   the swappable set.
@@ -42,6 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described only half of what reached the brain.
   **Breaking**: `TrimResults` is required — a Budget carrying only a `Trimmer`
   fails assembly (`New`) and is refused by `Replace("budget", …)`.
+- **`api.NewDirect` returns `*Direct` instead of the `Synapse` interface** — a colony's routing
+  table is built from its agents while each agent's Colony organ is that synapse, so the table can
+  only be injected after construction; the concrete return keeps `SetResolver` reachable instead of
+  adding a method to the interface that only one implementation can honour.
+
+### Fixed
+
+- **`OrganFilled` reported the output membrane as unwired** — `P5c Sandbox.Emit` was missing from
+  the edges an assembled `Sandbox` fills, so a wiring diagram drawn from a live agent showed the
+  egress gate as a hole the host had already closed.
 
 ### Removed
 
@@ -62,14 +122,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Internal
 
-- The decision loop is split by concern (`state.go`, `loop.go`, `feedback.go`,
-  `gate.go`, `pause.go`, `retry.go`, `hooks.go`, `parallel.go`): `loop.go` had
-  grown past the file budget by accumulating the membrane, the pause gate,
-  retries and the batch path. Every Act-phase step now runs through one
+- The decision loop is split by concern (`state.go`, `invocation.go`, `loop.go`, `inbox.go`,
+  `correlation.go`, `task.go`, `feedback.go`, `gate.go`, `pause.go`, `retry.go`, `hooks.go`,
+  `parallel.go`): `loop.go` had grown past the file budget by accumulating the membrane, the pause
+  gate, retries and the batch path, and the colony work repeated the same pressure, so
+  `LoopContext` moved to `invocation.go` and its inbound steps to `inbox.go`. Every Act-phase step
+  now runs through one
   `actBatch` handle (calls, round, output accumulator, yield) instead of
   dragging a six-to-nine-argument convoy, and the parallel batch splits into
   `gatePhase` / `execPhase` / `feedbackPhase`. No contract and no event order
   changed — the sequence assertions in `internal/nerve` are the proof.
+- The cell keeps its half of an exchange in `internal/cell/colony.go` — minting ids, stamping
+  outbound signals, and pairing replies to the round that asked — leaving `cell.go` the kernel and
+  its per-invocation snapshot.
 - `size_test.go` enforces the complexity budget across the module (file
   ≤400 lines, function body ≤50, ≤4 parameters). The exemption list is closed
   and carries a reason per entry (`Connectome` is a data table,

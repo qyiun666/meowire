@@ -35,6 +35,26 @@ type Cell struct {
 	// UpdateConfig; each Stimulate/Resume snapshots the current values.
 	Config nerve.LoopConfig
 
+	// inbox is the cell's inbound signal queue (capacity nerve.InboxCapacity),
+	// owned by the framework and created on first use: a colony built without
+	// any traffic pays nothing for it. Inbox() hands the send end to the
+	// routing table; the loop reaches the queue only through ingest().
+	inboxOnce sync.Once
+	inbox     chan nerve.Signal
+
+	// Egress delivers one outbound signal (api assembly wires it to the host's
+	// Colony organ; nil = this cell sends nothing, so it cannot delegate or
+	// answer). Injected once at assembly, never swapped at runtime.
+	Egress func(context.Context, nerve.Signal) error
+
+	// Colony bookkeeping: which peer requests this cell awaits answers to, and
+	// the answers that arrived with no round running to take them.
+	colonyMu    sync.Mutex
+	seq         uint64
+	delegations map[string]nerve.Correlation
+	resumptions []nerve.Correlation
+	inbound     []nerve.Signal
+
 	// Host-injected fixed parts
 	System  string
 	Methods []nerve.MethodSpec // Built-in capability description (describes only)
@@ -51,6 +71,21 @@ type Cell struct {
 	// into the LoopContext of the next Stimulate/Resume (the moment the swap
 	// takes effect) and emitted as EventConfig.
 	pendingConfig []nerve.ConfigAudit
+}
+
+// Inbox returns the send end of the cell's inbound signal queue — the handle a
+// colony's routing table delivers through. It is created on first use and never
+// closed: a cell that stops consuming applies backpressure (a sender gets
+// synapse.ErrTargetBusy), it does not lose the queue under a running sender.
+func (c *Cell) Inbox() chan<- nerve.Signal { return c.inboxChan() }
+
+// inboxChan creates the queue on first use and returns it in full
+// bidirectional form (the loop needs the receive end).
+func (c *Cell) inboxChan() chan nerve.Signal {
+	c.inboxOnce.Do(func() {
+		c.inbox = make(chan nerve.Signal, nerve.InboxCapacity)
+	})
+	return c.inbox
 }
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
@@ -140,6 +175,10 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 	}
 	if pauseGate != nil {
 		lc.Pause = pauseGate()
+	}
+	lc.Ingest = c.ingest
+	if c.Egress != nil {
+		lc.Send, lc.Await = c.emit, c.await
 	}
 	return lc
 }

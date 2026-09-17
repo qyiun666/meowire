@@ -55,6 +55,10 @@ type Thinker interface {
 | `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results no longer enter the text track | Host base + framework appends |
 | `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
+| `Reflection` | Self-review note from the previous round (Reflexion slot, passed through verbatim) | Host (write-back in `BeforeStimulate`) |
+| `Memories` | This round's recalled experience records (`Memory.Recall` output; replaced wholesale per round, never accumulated, never enters a Session snapshot) | Framework, before each Think |
+| `Stimuli` | Signals neighbours delivered to this agent (`Signal{From, Kind, ReplyTo, Skill, Payload}`); replaced wholesale per round, never accumulated, never enters a Session snapshot | Framework, draining the inbox at the Think gap before each Think |
+| `Inhibit` | Tool names withdrawn this round by a `KindNotice`: a matching call is refused before it ever reaches the gate; an in-flight Act is not preempted | Framework, alongside `Stimuli` |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
 | `Plan` | Task plan/progress text | Host, updatable via Hooks |
 
@@ -90,12 +94,15 @@ type Effector interface {
 | `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the host's call) |
 | `Effect.Err` | Tool-side error text (truncated into `ToolResults.Err`; non-empty `Err` = the call failed) |
 | `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the response and calls `agent.Resume(sess, response)` (see §6.4) |
+| `Effect.Send` | Delegate to a peer: the host names `To` (optionally `Skill`/`Payload`), the framework mints `ID`/`From`/`Kind`/`Status=submitted`, delivers through `Organs.Colony` and **suspends that call exactly like `WaitInput` does**; when the answer arrives the framework pairs it back to that suspension — the host takes the handle from `agent.Resumptions()`, continues with `Resume`, then `Ack`s it (see §7.2). An undeliverable request (no Colony, busy or unknown target) never suspends: its error flows back as that call's tool feedback |
 | return error | Execution-layer error (also written to `ToolResults.Err`; the loop continues) |
 
 **Host responsibilities:**
 - Tool registry + dispatcher: route by `Name`, deserialize `Args`, serialize results
-- Multi-agent tools live here: `spawn_agent` (New → Stimulate → return result),
-  `send_message` (cross-agent messaging, see §7.2) — flat-model convention
+- Multi-agent tools live here: `spawn_agent` (New → Stimulate → return result);
+  cross-agent delegation **needs no synapse inside the tool** — return
+  `Effect{Send: ...}` and the framework delivers and pairs (see §7.2); only
+  side-channel messages call `Synapse.Fire` directly
 - `ask_user`-style tools: **return `&Effect{WaitInput: question}` instead of blocking synchronously**
   (blocking drags the Close wait; the suspension is expressed by the framework so the
   UI can show "the cat is waiting for an answer"), see §6.4
@@ -263,6 +270,7 @@ o := meowire.Organs{
     Sandbox: mySandbox,                         // required
     Budget:  &meowire.ContextBudget{...},       // required
     Mem:     myMemory,                         // required
+    Colony:  mySynapse,                         // optional: multi-agent delivery organ (absent = cannot ask or answer peers)
 
     System:   "You are a meow agent, answer in English", // fixed system instructions
     Identity: "You are meow, role assistant, warm tone",   // identity description text (host composed)
@@ -284,6 +292,7 @@ o := meowire.Organs{
 | `Sandbox` | Sandbox | Permission gate (`Allow` guards execution, `Emit` guards the round's text egress) | **yes** |
 | `Budget` | *ContextBudget | Token regulator (text track + structured-feedback track) | **yes** |
 | `Mem` | Memory | Experience port (`Recall` before each Think, `Remember` at the invocation terminal) | **yes** |
+| `Colony` | Colony | Multi-agent delivery organ (the `Fire` subset of `Synapse`): peer delegations and answers to inbound requests go out through it; without it the agent can be asked but cannot ask or answer (`Validate` reports info) | no |
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
 | `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
@@ -647,11 +656,22 @@ type Synapse interface {
 }
 ```
 
-- `SignalKind`: `KindStimulus` (host sends a task) / `KindResponse` (agent reply)
-  / `KindNotice` (side-channel notice, no DecisionLoop)
-- Real routing (channel/HTTP/Redis/gRPC) is host-chosen; the host tool
-  `send_message` fires via `synapse.Fire`; resistance (busy target, unknown
-  agent) flows back as `EventToolResult` feedback, never a hard stop
+- `SignalKind`: `KindStimulus` (a request carrying `ID`/`From` is a task, and a task gets an answer) / `KindResponse` (the answer, `ReplyTo` names the request) / `KindNotice` (side-channel notice, runs no DecisionLoop)
+- **Assembly order (a colony is circular)**: the routing table names the agents while each agent carries that table, so build the graph first, create the members, then hand it the table:
+  ```go
+  syn := meowire.NewDirect(nil)                      // reference graph, no resolver yet
+  a, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "a", Colony: syn, ...}})
+  b, _ := meowire.New(meowire.Blueprint{Organs: meowire.Organs{ID: "b", Colony: syn, ...}})
+  r, _ := meowire.Resolve(a, b)                      // ID → each cell's own inbox (duplicate IDs refused)
+  syn.SetResolver(r)                                 // close the circle; custom routers do this their own way
+  syn.Link(ctx, "a", "b", 1)                         // only a linked direction conducts
+  ```
+- **The inbox belongs to the framework**: every cell carries an inbox of capacity `InboxCapacity` (8); the framework drains it into `Prompt.Stimuli` at the next Think gap, so the host maintains no channel map and runs no consumer pump
+- The one framework-read meaning of `KindNotice`: if its Payload is a tool name, calls to that name are refused this round before the gate even sees them (`Prompt.Inhibit`); a notice never starts a loop itself, and everything else it carries is the host's own convention
+- **Delegation is a return value, not a Fire call**: a tool returns `Effect{Send: &Signal{To, Skill, Payload}}`; the framework mints `ID`/`From`/`Kind`/`Status=submitted`, delivers through `Organs.Colony` and suspends that call on the same Session path `WaitInput` uses. An undeliverable request never suspends — its error is that call's tool feedback (resistance is feedback)
+- **The answer is the framework's debt too**: an invocation that served a request (one carrying `ID`/`From`) replies to the requester when it ends, with its final output as the payload and the state computed by `TaskOutcome` from how the loop terminated. That gives each of the six `TaskStatus` values exactly one writer: `Submitted` = the request going out, `Working` = the request drained into a round, and `NeedsInput`/`Completed`/`Failed`/`Cancelled` = the terminal mapping (a consumer that abandons the iterator invents no state and sends no answer). A cell with no Colony that owed an answer reports it through `OnError` instead of dropping it
+- **Pairing is the kernel's, continuation is the host's**: a reply landing in the sender's inbox is matched by `ReplyTo` to the round that delegated and queued; the host reads `agent.Resumptions()` (a snapshot — reading does not consume), calls `Resume(r.Session, string(r.Response))`, then `Ack(r.SignalID)`. One task may report `needs-input` before it reports `completed`; both pair against the same delegation
+- Real routing (channel/HTTP/Redis/gRPC) is host-chosen; `Colony` is only the `Fire` subset of `Synapse`, and a host tool may still call `Fire` directly for side-channel messages (resistance flows back as `EventToolResult` feedback, never a hard stop)
 - Synapse errors (`ErrNoTarget`/`ErrNotLinked`/`ErrTargetBusy`) are re-exported at the api layer; `Edge` re-exported too
 - **Persistence round-trip**: export the whole graph via `Edges(ctx, "")` at
   runtime, serialize it host-side; on restart deserialize and inject via

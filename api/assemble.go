@@ -29,6 +29,12 @@ type Organs struct {
 	Budget  *ContextBudget // Required
 	Mem     Memory         // Required
 
+	// Colony is the delivery organ a peer request or answer goes through
+	// (optional, unlike the seven ports): without it a cell can still be sent
+	// signals, it just cannot delegate to a neighbour or answer one. Wire it to
+	// the same Synapse the colony's routing table was resolved from.
+	Colony Colony
+
 	// Fixed parts injected into every LoopContext
 	System   string
 	Methods  []MethodSpec
@@ -124,5 +130,8 @@ func New(b Blueprint) (*Agent, error) {
 
 	a := &Agent{cell: c, closer: o.Closer}
 	a.cell.PauseGate = a.pauseGate
+	if o.Colony != nil {
+		a.cell.Egress = o.Colony.Fire
+	}
 	return a, nil
 }

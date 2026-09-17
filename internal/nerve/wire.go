@@ -54,6 +54,7 @@ func ConnectomeNodes() []WireNode {
 		{ID: "effect", Name: "Effect", Desc: "tool execution result"},
 		{ID: "err", Name: "Error", Desc: "error value"},
 		{ID: "output", Name: "Output", Desc: "final output of a Stimulate"},
+		{ID: "signal", Name: "Signal", Desc: "inbound colony message (stimulus / response / notice)"},
 		{ID: "timing", Name: "LoopTiming", Desc: "loop schedule (gap points)"},
 		{ID: "resources", Name: "Resources", Desc: "external resources held by the agent"},
 		{ID: "hooks", Name: "Hooks", Desc: "callback container (H1–H8 sub-slots)"},
@@ -193,5 +194,13 @@ func Connectome() []WirePoint {
 			TargetID: "timing", Target: "loop timing", Semantics: SemGate,
 			Parallel: false, Required: false,
 			Desc: "api-injected automatically; honors Pause at gap points"},
+		{ID: "G2", Name: "Egress", Phase: 1, Category: CategoryAct,
+			TargetID: "signal", Target: "Signal → Colony.Fire", Semantics: SemAct,
+			Parallel: false, Required: false,
+			Desc: "outbound half of colony wiring: the cell stamps (id, sender, kind, task state) and delivers through Organs.Colony; absent = no delegation or answer"},
+		{ID: "G3", Name: "Inbox", Phase: 1, Category: CategorySense,
+			TargetID: "signal", Target: "Signal → Prompt.Stimuli", Semantics: SemReplace,
+			Parallel: false, Required: false,
+			Desc: "framework-owned queue, drained at the Think gap (a notice also withholds a call that has not started); absent = no colony wiring"},
 	}
 }

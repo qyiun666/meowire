@@ -52,12 +52,17 @@ meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）
 
 ## 2. A2A（Agent → Agent）
 
-meowire 采用扁平多 agent 模型：一个 Agent 一个内核，agent 间通信是
-宿主域（`spawn_agent` / `send_message` 宿主工具）。映射方式：
+meowire 采用扁平多 agent 模型：一个 Agent 一个内核，宿主管实例（`spawn_agent`
+宿主工具）；agent 间的委托、投递、答复与配对都是框架原语（工具只需说出
+「问谁、问什么」）。映射方式：
 
-- **任务委托**：`send_message` 宿主工具把消息作为 `Signal` 经宿主路由
-  投递给目标 Agent；目标 Agent 的 `Stimulate` 消费后返回结果，结果经
-  `EventToolResult` 反馈回发起方循环（resistance is feedback）。
+- **任务委托**：工具返回 `Effect{Send: &Signal{To, Skill, Payload}}` 即完成一次 A2A
+  任务投递——框架铸 `ID`/`From`/`Status=submitted`、经 `Organs.Colony` 投递、挂起该调用；
+  被委托方在自己的终点回一条 `KindResponse`（载荷 = 最终输出，状态 = `TaskOutcome`）。
+  回信落进发起方收件箱，框架按 `ReplyTo` 配对到那次挂起，宿主 `agent.Resumptions()` →
+  `Resume` → `Ack` 决定何时继续（**配对归内核，续跑归宿主**）。路由表由
+  `Resolve(agents...)` 从 agent 列表建出，宿主不建 channel、不搬信号；目标忙/未知 agent
+  以 `EventToolResult` 回流（resistance is feedback）。
 - **能力发现**：A2A 用 `Agent Card`（`/.well-known/agent-card.json`）
   声明能力。meowire 提供 `AgentCard(Organs)`：把 `ID`/`Identity`/
   `Methods`（gene projection，只描述不消费）渲染为 A2A 风格 JSON 卡片，
@@ -66,9 +71,10 @@ meowire 采用扁平多 agent 模型：一个 Agent 一个内核，agent 间通�
   {"name": "agent", "description": "...", "skills": [{"name": "...", "description": "..."}]}
   ```
 - **任务状态机**：A2A 定义 submitted → working → needs-input →
-  completed / failed / cancelled 六态。meowire 提供 `TaskStatus` 常量
-  （TaskSubmitted/TaskWorking/TaskNeedsInput/TaskCompleted/TaskFailed/
-  TaskCancelled），由 `Signal.Status` 携带端到端传递；状态迁移与持久化
+  completed / failed / cancelled 六态。meowire 由**框架写入全部六态**，每个状态
+  只有一个生产者：`Submitted`=委托信号发出时（`Effect.Send`）、`Working`=该请求被排空进
+  某一轮时、其余四态由 `TaskOutcome` 从循环终点算出（Done/Suspended/Error|MaxRounds/
+  ctx 取消），消费者中途放弃迭代器**不产生状态也不回话**（没完成的事不编）。持久化仍
   在宿主域（推荐外化到宿主数据库，与长时任务方案一致）。
 - 参考实现：[A2A 官方仓库](https://github.com/a2aproject/A2A)（Linux
   Foundation）。

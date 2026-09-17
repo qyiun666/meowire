@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 )
 
 // ErrMaxRounds is returned when the loop exhausts all rounds with pending tool calls.
@@ -21,81 +20,6 @@ var ErrMaxRounds = errors.New("nerve: max rounds exceeded")
 // calls, and replaying it against another cell's organs would run one agent's
 // half-finished round with another agent's brain and tools.
 var ErrForeignSession = errors.New("nerve: session belongs to another cell")
-
-// LoopContext carries all data needed for a single Cycle invocation.
-type LoopContext struct {
-	// Identity
-	CellID   string
-	Identity string
-
-	// Built-in capability description (gene projection, describes only)
-	Methods []MethodSpec
-
-	// Required ports
-	Think   Thinker
-	Act     Effector
-	Hooks   *Hooks
-	Sandbox Sandbox
-	Budget  *ContextBudget
-	Mem     Memory
-	// Pause is framework-injected wiring (api layer), not a host port.
-	Pause *PauseGate
-
-	// Config
-	MaxRounds      int           // Hard round limit (<=0 uses DefaultMaxRounds)
-	MaxToolOutput  int           // Tool output truncation length (<=0 = no truncation)
-	MaxRetries     int           // Think retry count (<=0 = no retry)
-	ToolTimeout    time.Duration // Per-tool execution timeout (<=0 = no timeout)
-	ToolMaxRetries int           // Tool retry count on effector error (<=0 = no retry)
-	ParallelActs   bool          // Parallel batch execution (requires a concurrency-safe Effector)
-
-	// Dynamic state
-	State   LoopState
-	Input   string
-	Plan    string
-	Context []string // Host-injected base + sandbox denials (tool results live in ToolResults)
-	Bounds  string   // Sandbox.Bounds() snapshot, taken once per Stimulate
-
-	// Structured tool feedback accumulated within this cycle (see ToolResult).
-	ToolResults []ToolResult
-
-	// PendingReplace: port swap audits recorded since the last Stimulate/
-	// Resume, emitted as EventReplace before any other event (the swap takes
-	// effect now — each Stimulate/Resume snapshots the ports it starts with).
-	PendingReplace []ReplaceAudit
-
-	// PendingConfig: config swap audits recorded since the last Stimulate/
-	// Resume, emitted as EventConfig after EventReplace (the swap takes
-	// effect now — each Stimulate/Resume snapshots the config it starts
-	// with). Every "unique update" of the loop is traceable.
-	PendingConfig []ConfigAudit
-
-	// Host injected fixed parts
-	System string
-	Tools  []ToolSpec
-
-	// Reflection slot (host injected via BeforeStimulate write-back /
-	// base assembly): the Reflexion note passed through to every Think.
-	Reflection string
-
-	// Memories is this round's recall output: replaced wholesale before every
-	// Think, never accumulated and never carried into a Session — a resumed
-	// loop recalls against the round it resumes into.
-	Memories []Record
-
-	// outcome records how this invocation ended (first mark wins; zero =
-	// nothing terminal reached = consumer abort). Delivered by OnCycleEnd.
-	outcome CycleOutcome
-}
-
-// endWith records how the invocation ends; the first mark wins so a later
-// generic error can never overwrite a more specific terminal (e.g. the
-// MaxRounds classification of an ErrMaxRounds emission).
-func (lc *LoopContext) endWith(o CycleOutcome) {
-	if lc.outcome == 0 {
-		lc.outcome = o
-	}
-}
 
 // DecisionLoop is the pure orchestration engine.
 type DecisionLoop struct{}
@@ -141,6 +65,7 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
+	lc.Requests = slices.Clone(sess.requests)
 	// A tool wait consumes the response as the pending tool's structured result
 	// (rendering is the host's call). A pause injects nothing: the loop just
 	// continues. Both membrane asks resolve through the tri-state grammar below.
@@ -196,16 +121,19 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 }
 
 // cycleGuarantees returns the deferred cleanup shared by Cycle and Resume:
-// Remember, OnCycleEnd and AfterStimulate are guaranteed exactly once per
-// invocation — on normal completion, error path, suspension, or early consumer
-// stop (yield=false). Remember runs first so the organ sees the same terminal
-// the hooks do and its own failure cannot rewrite it. AfterStimulate is
+// answers to served peer requests, Remember, OnCycleEnd and AfterStimulate are
+// guaranteed exactly once per invocation — on normal completion, error path,
+// suspension, or early consumer stop (yield=false). Answers go first so the
+// memory organ and the hooks observe the same terminal the requester does.
+// Remember runs next so the organ sees the same terminal the hooks do and its
+// own failure cannot rewrite it. AfterStimulate is
 // protected from an OnCycleEnd panic via a nested defer. finalOutput is
 // dereferenced at cleanup time.
 func cycleGuarantees(ctx context.Context, lc *LoopContext, finalOutput *string) func() {
 	return func() {
 		defer func() { lc.Hooks.AfterStimulate(ctx, *finalOutput) }()
 		lc.endWith(OutcomeAborted) // no terminal reached: consumer stopped early
+		lc.answer(ctx, *finalOutput)
 		lc.remember(ctx, *finalOutput)
 		lc.Hooks.OnCycleEnd(ctx, *finalOutput, lc.outcome)
 	}
@@ -318,20 +246,14 @@ func announceDone(lc *LoopContext, b *actBatch) string {
 }
 
 // think runs one round's Think phase: context budget trimming, memory recall,
-// the StateThinking event, prompt assembly, Think with retry, AfterThink, the
-// usage event, then the output membrane and the round's text. It returns the
-// decision, or nil when the loop must end (an error was emitted, the membrane
-// suspended for confirmation, or the consumer stopped).
+// the inbound drain, the StateThinking event, prompt assembly, Think with
+// retry, AfterThink, the usage event, then the output membrane and the round's
+// text. It returns the decision, or nil when the loop must end (an error was
+// emitted, the membrane suspended for confirmation, or the consumer stopped).
 func (b *actBatch) think() (*Decision, bool) {
 	lc := b.lc
 
-	// Apply the regulator to both accumulating tracks before each Think
-	lc.metabolize()
-
-	// Fill this round's memory track before the prompt is assembled, so the
-	// BeforeThink hook sees what was recalled and may overwrite it.
-	if err := lc.recall(b.ctx); err != nil {
-		emitError(b.ctx, lc, b.yield, err)
+	if !b.prepare() {
 		return nil, false
 	}
 
@@ -373,4 +295,20 @@ func (b *actBatch) think() (*Decision, bool) {
 		return nil, false
 	}
 	return dec, true
+}
+
+// prepare reads the three inbound tracks a round starts from, before its prompt
+// is assembled: the regulator trims what accumulated, memory fills this round's
+// recall, and the inbox yields what the colony sent since the last Think. Doing
+// all three here is what lets the BeforeThink hook see (and rewrite) the round
+// as the Thinker will. It returns false when a failing recall ends the cycle.
+func (b *actBatch) prepare() bool {
+	lc := b.lc
+	lc.metabolize()
+	if err := lc.recall(b.ctx); err != nil {
+		emitError(b.ctx, lc, b.yield, err)
+		return false
+	}
+	lc.ingest()
+	return true
 }
