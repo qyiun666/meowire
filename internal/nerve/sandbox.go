@@ -38,11 +38,11 @@ func verdictOfName(name string) (Verdict, bool) {
 // security policies; the framework provides the interception point and audits
 // each decision via EventSandbox. A ruling outside the three named states is a
 // Deny as well — a value this build cannot name has not permitted anything.
-// A VerdictAsk suspends the loop — the host
-// resolves it through the same Resume channel as ask_user (empty response or a
-// "[denied: ...]" payload resolves the ask as a denial; any other response
-// approves). Bounds() declares the execution boundary, surfaced to the Thinker
-// via Prompt.Bounds once per Stimulate.
+// A VerdictAsk suspends the loop and the host resolves it through the same
+// Resume channel as ask_user: a Response stating a Deny refuses the call (or the
+// utterance), an answering Response without one grants it. Bounds() declares the
+// execution boundary, surfaced to the Thinker via Prompt.Bounds once per
+// Stimulate.
 type Sandbox interface {
 	Allow(ctx context.Context, a Action) (verdict Verdict, reason string, err error)
 	// Emit rules on one utterance before the framework writes it to the event

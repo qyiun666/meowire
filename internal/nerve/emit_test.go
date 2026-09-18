@@ -151,16 +151,18 @@ func TestEmitAskSuspendsWithDraftWithheld(t *testing.T) {
 }
 
 // TestEmitAskResumeArms closes the confirmation chain through the shared
-// tri-state grammar. The round had nothing left to execute, so the resumed cell
+// Response grammar. The round had nothing left to execute, so the resumed cell
 // says the outcome and finishes without another Think.
 func TestEmitAskResumeArms(t *testing.T) {
 	cases := []struct {
-		response string
+		name     string
+		response Response
 		wantSaid string
 	}{
-		{"go ahead", "pending draft"},
-		{"", "[sandbox-denied: declined]"},
-		{"[denied: not now]", "[sandbox-denied: not now]"},
+		{"answered", Response{Answer: "go ahead"}, "pending draft"},
+		{"silent", Response{}, "[sandbox-denied: declined]"},
+		{"refused", Response{Deny: "not now"}, "[sandbox-denied: not now]"},
+		{"refusal outranks an answer", Response{Answer: "go ahead", Deny: "not now"}, "[sandbox-denied: not now]"},
 	}
 	for _, c := range cases {
 		var seen []Utterance
@@ -175,7 +177,7 @@ func TestEmitAskResumeArms(t *testing.T) {
 		}
 		_, wait := runSuspendingCycle(t, lc)
 		if wait == nil {
-			t.Fatalf("%q: base cycle did not suspend", c.response)
+			t.Fatalf("%s: base cycle did not suspend", c.name)
 		}
 
 		thinks := 0
@@ -188,16 +190,16 @@ func TestEmitAskResumeArms(t *testing.T) {
 			}},
 			Act: mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 		}
-		events := collectResume(context.Background(), lc2, wait.Session, c.response)
+		events := collectResponse(context.Background(), lc2, wait.Session, c.response)
 		if thinks != 0 {
-			t.Fatalf("%q: resumed Think calls = %d, want 0 (the round already thought)", c.response, thinks)
+			t.Fatalf("%s: resumed Think calls = %d, want 0 (the round already thought)", c.name, thinks)
 		}
 		said := slices.IndexFunc(events, func(e Event) bool { return e.Kind == EventText })
 		if said < 0 || events[said].Text != c.wantSaid {
-			t.Fatalf("%q: said = %+v, want %q", c.response, events[said:], c.wantSaid)
+			t.Fatalf("%s: said = %+v, want %q", c.name, events[said:], c.wantSaid)
 		}
 		if last := events[len(events)-1]; last.Kind != EventDone || last.Output != c.wantSaid {
-			t.Fatalf("%q: last event = %+v, want EventDone(%q)", c.response, last, c.wantSaid)
+			t.Fatalf("%s: last event = %+v, want EventDone(%q)", c.name, last, c.wantSaid)
 		}
 	}
 }

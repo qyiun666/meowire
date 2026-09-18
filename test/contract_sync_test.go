@@ -27,6 +27,7 @@ const phaseHostPort = 2
 const (
 	eventGoPath  = "../internal/nerve/event.go"
 	stateGoPath  = "../internal/nerve/state.go"
+	portGoPath   = "../internal/nerve/port.go"
 	typesGoPath  = "../api/types.go"
 	nerveAgentMD = "../internal/nerve/agent.md"
 	hostMD       = "../host-integration.md"
@@ -171,6 +172,27 @@ func TestLoopStateContractSynced(t *testing.T) {
 	}
 }
 
+// TestWaitKindContractSynced guards the suspension-flavour enum (single source
+// of truth: internal/nerve/port.go). A flavour the api surface cannot name is a
+// suspension a host cannot read Session.Kind against, so it cannot tell which
+// field of a Resume Response its answer belongs in.
+func TestWaitKindContractSynced(t *testing.T) {
+	kinds := iotaConstNames(t, readContractFile(t, portGoPath), "WaitKind = iota")
+	if len(kinds) == 0 {
+		t.Fatal("no WaitKind flavours found")
+	}
+
+	types := readContractFile(t, typesGoPath)
+	aliasRe := regexp.MustCompile(`(\w+)\s+WaitKind = nerve\.(\w+)`)
+	var lhs, rhs []string
+	for _, m := range aliasRe.FindAllStringSubmatch(types, -1) {
+		lhs = append(lhs, m[1])
+		rhs = append(rhs, m[2])
+	}
+	assertSameSet(t, "api/types.go WaitKind aliases (left side)", lhs, kinds)
+	assertSameSet(t, "api/types.go WaitKind aliases (right side)", rhs, kinds)
+}
+
 // TestRequiredPortCountSyncedWithGuides pins the port count the guides
 // advertise to the blueprint: the Organs table of each host-integration guide
 // carries one required row per required phase-2 slot. A port added to the
@@ -194,7 +216,13 @@ func TestRequiredPortCountSyncedWithGuides(t *testing.T) {
 	} {
 		table := organsTable(t, tc.path)
 		rowRe := regexp.MustCompile("(?m)^\\| `\\w+`.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
-		if got := len(rowRe.FindAllString(table, -1)); got != want {
+		got := len(rowRe.FindAllString(table, -1))
+		// `ID` is a required assembly field, not a port: its row carries the
+		// same required mark as a port row but must not enter the port count
+		// (the blueprint's phase-2 slots have no ID entry to pair with).
+		idRe := regexp.MustCompile("(?m)^\\| `ID` \\|.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
+		got -= len(idRe.FindAllString(table, -1))
+		if got != want {
 			t.Errorf("%s advertises %d required organ rows, blueprint requires %d ports (%s)",
 				tc.path, got, want, strings.Join(names, "/"))
 		}

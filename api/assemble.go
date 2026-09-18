@@ -5,7 +5,6 @@
 package meowire
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,11 +16,16 @@ import (
 // Organs holds all host-provided ports (all required — no defaults, no stubs).
 // Unlike internal packages, which tolerate nil ports defensively, the api
 // layer rejects a missing port at assembly time.
-// Organs is carried by Blueprint; hosts write it once and reuse it for every
-// Agent instance — with one exception: a port that declares Bootable joins one
-// assembly per instance, so it is built per agent.
+// The wiring is carried by Blueprint and written once; the agent's name is not
+// — every instance the host creates declares its own ID, which is what the
+// events it emits and the suspension handles it produces are attributed to.
 type Organs struct {
-	ID      string         // Agent unique identifier (empty = "agent")
+	// ID names this agent: every event carries it, and a Session is only valid
+	// against the ID that produced it. It must be non-empty (New rejects an
+	// unnamed agent — a default shared by every instance would attribute one
+	// agent's events and handles to another) and unique among the agents a host
+	// runs at once. This is the one Organs field to vary per New.
+	ID      string
 	Think   Thinker        // Required
 	Act     Effector       // Required
 	Closer  Closer         // Required
@@ -80,11 +84,12 @@ func FullHooks(h Hooks) *Hooks {
 // snapshots the new values.
 type Config = nerve.LoopConfig
 
-// Blueprint is a host assembly blueprint instance: ports + config. Define
-// once, New many times — every instance shares the same wiring and is
-// validated the same way. Every wiring point is required (no optional
-// organs): missing ports and incomplete ports (a ContextBudget without a
-// Trimmer) abort New.
+// Blueprint is a host assembly blueprint instance: ports + config. Define the
+// wiring once, New many times — every instance shares it and is validated the
+// same way, with the one exception of Organs.ID, which names the instance and
+// so must differ per New. Every wiring point is required (no optional
+// organs): missing ports, an incomplete port (a ContextBudget without a
+// Trimmer) and an unnamed agent abort New.
 type Blueprint struct {
 	Organs Organs
 	Config Config
@@ -92,12 +97,14 @@ type Blueprint struct {
 
 // New creates a new Agent from a blueprint. Assembly runs in three steps:
 // validate against the wiring blueprint (error-level findings — missing or
-// incomplete ports — always abort), Boot every organ that declares the
-// capability (in PortOrder; a failure aborts and releases what the attempt
-// opened through the host's Closer), then construct the cell. Info findings
-// never block — hosts surface them via Validate / WiringDiagram /
+// incomplete ports, an unnamed agent — always abort), Boot every organ that
+// declares the capability (in PortOrder; a failure aborts and releases what the
+// attempt opened through the host's Closer), then construct the cell. Info
+// findings never block — hosts surface them via Validate / WiringDiagram /
 // RenderDiagram at assembly or test time.
-// There are no default implementations and no optional wiring points.
+// There are no default implementations and no optional wiring points, and no
+// default name: two agents sharing one Organs.ID is two agents claiming each
+// other's events and suspension handles.
 func New(b Blueprint) (*Agent, error) {
 	var errs []error
 	for _, is := range Validate(b.Organs, b.Config) {
@@ -114,7 +121,7 @@ func New(b Blueprint) (*Agent, error) {
 		return nil, err
 	}
 	c := &cell.Cell{
-		ID:       cmp.Or(o.ID, "agent"),
+		ID:       o.ID,
 		Identity: o.Identity,
 		Think:    o.Think,
 		Act:      o.Act,

@@ -36,7 +36,8 @@ type (
 	Action     = nerve.Action
 	Effect     = nerve.Effect
 	Usage      = nerve.Usage
-	Verdict    = nerve.Verdict // tri-state sandbox ruling (Deny / Allow / Ask)
+	Verdict    = nerve.Verdict  // tri-state sandbox ruling (Deny / Allow / Ask)
+	Response   = nerve.Response // what a suspended loop is answered with (see Session.Kind)
 
 	// Utterance is what the output half of the membrane (Sandbox.Emit) is
 	// asked to rule on: one round's generated text.
@@ -57,6 +58,7 @@ type (
 	SandboxVerdict = nerve.SandboxVerdict
 	WaitInput      = nerve.WaitInput // EventWaitInput/EventPaused payload: tool (zero for pause) + question + resume Session
 	Session        = nerve.Session   // opaque resume handle — save from EventWaitInput/EventPaused, pass to Resume
+	WaitKind       = nerve.WaitKind  // what a Session suspended for, which is what a Response answers
 	ReplaceAudit   = nerve.ReplaceAudit
 	ConfigAudit    = nerve.ConfigAudit
 )
@@ -72,7 +74,8 @@ func UnmarshalSession(data []byte) (Session, error) {
 // Event wire format — the portable shape of the event stream, for a host that
 // journals events or replays them in another process. Kinds, states and
 // rulings travel by name and every record names its version, so a stale stream
-// is rejected rather than reinterpreted.
+// is rejected rather than reinterpreted. Version 2 records carry the cell's
+// emission order (Seq) and moment (TS).
 type (
 	WireEvent   = nerve.WireEvent
 	WireErr     = nerve.WireErr
@@ -124,6 +127,15 @@ const (
 	EventPaused     EventKind = nerve.EventPaused
 	EventReplace    EventKind = nerve.EventReplace
 	EventConfig     EventKind = nerve.EventConfig
+)
+
+// Suspension flavours (Session.Kind): what the handle stopped for, which is what
+// decides how Resume reads the Response.
+const (
+	WaitPause     WaitKind = nerve.WaitPause     // gap pause: nothing is being asked
+	WaitTool      WaitKind = nerve.WaitTool      // a tool asked the outside world a question
+	WaitCallAsk   WaitKind = nerve.WaitCallAsk   // the membrane asked before executing a call
+	WaitUtterance WaitKind = nerve.WaitUtterance // the membrane asked before saying a draft
 )
 
 // Sandbox ruling constants (tri-state; the zero value is Deny — fail-closed).

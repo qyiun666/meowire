@@ -291,7 +291,7 @@ func toolSchemas(tools []meowire.ToolSpec) []funcSchema {
 }
 ```
 
-`ToolSpec.Input` 约定就是 JSON Schema 字符串（如 `{"type":"object","properties":{...}}`），所以**宿主不需要转换**——直接透传。参考 Step 7 的 `ToolSpec` 写法。
+`ToolSpec.Input` 约定就是 JSON Schema 字符串（如 `{"type":"object","properties":{...}}`）。**本参考实现的手写客户端不需要转换**——JSON 原文进、原文出（`Parameters: json.RawMessage(t.Input)`）；换成 openai-go 这类结构化 SDK 时，每轮把 Schema 文本 `json.Unmarshal` 进 `FunctionParameters`（见 [thinker-openai-go.md](thinker-openai-go.md) §5）。参考 Step 7 的 `ToolSpec` 写法。
 
 **Thinker 的四个铁律：**
 1. **必须监控 `ctx.Done`**——长请求可能被框架取消（Close、宿主取消）；Pause 从不阻塞迭代器（快照挂起，EventPaused 后正常结束），不会通过 ctx 取消来中断暂停
@@ -373,7 +373,7 @@ func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict,
 		return meowire.VerdictAllow, "", nil
 	}
 	if s.dangerous[a.Call.Name] {
-		// 挂起征询：reason 即问题文本，宿主经 Resume(sess, resp) 批准或拒绝
+		// 挂起征询：reason 即问题文本，宿主经 Resume(sess, Response{Answer/Deny}) 批准或拒绝
 		return meowire.VerdictAsk, "允许执行 " + a.Call.Name + " 吗？", nil
 	}
 	return meowire.VerdictDeny, "tool not in whitelist: "+a.Call.Name, nil
@@ -563,7 +563,7 @@ func main() {
 			fmt.Println("📦", ev.Effect.Result, ev.Effect.Err)
 		case meowire.EventSandbox:
 			fmt.Printf("🛡 %s %s ruling=%v reason=%q ask=%q\n", ev.Verdict.CellID, ev.Verdict.Call.Name, ev.Verdict.Ruling, ev.Verdict.Reason, ev.Verdict.Question)
-		case meowire.EventWaitInput: // 挂起：保存 Session，向用户展示问题；响应到达后 Resume(ctx, sess, ans) 续跑
+		case meowire.EventWaitInput: // 挂起：保存 Session，向用户展示问题；答复到达后 Resume(ctx, sess, resp) 续跑
 			fmt.Println("❓", ev.Wait.Call.Name, ev.Wait.Question)
 			pendingSession = ev.Wait.Session
 		case meowire.EventReplace: // 端口替换审计：模型切换闭环从这里取，不再手工维护状态机
@@ -608,7 +608,7 @@ func toolRegistry() map[string]toolFn {
 
 ### 8.1 多 agent = 多次 New（复用同一 Blueprint）
 
-一个 `Agent` 是一个内核；多 agent 就是多个 `Agent` 实例。Blueprint 一次定义，多处 `New`——注意 **`Organs.Context` 是切片、`Hooks` 闭包捕获**，同一 bp 的实例共享它们，所以多实例要各自覆写：
+一个 `Agent` 是一个内核；多 agent 就是多个 `Agent` 实例。Blueprint 一次定义，多处 `New`——注意 **`Organs.ID` 是实例身份（必填、各实例不得重名）**，且 `Organs.Context` 是切片、`Hooks` 闭包捕获，同一 bp 的实例共享它们，所以多实例要各自覆写：
 
 ```go
 func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
@@ -699,7 +699,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 7. **`ErrMaxRounds` 不是 bug**：最后一轮仍有工具调用时抛出；配合 Step-Resume（宿主保存进度 → 重新 `Stimulate` 传剩余任务）是预期用法
 8. **提前停止（宿主主动接管）**：`for range` 中 break 即放弃本轮，停止点之后的工具不执行——宿主主动接管（人工审批、异步任务）用此路径；工具请求输入（ask_user）的唯一形式是 `Effect.WaitInput` + `EventWaitInput`/`Resume`（上文 ②），不要用 break + `Stimulate` 模拟（`Session` 不透明，挂起上下文无法手工重建）
 9. **事件流是观察镜像**：不能往打开中的迭代器回喂数据；数据回喂走下一次 `Stimulate`
-10. **暂停 vs Step-Resume**：Pause 为快照挂起（EventPaused + Session，迭代器正常结束，`Resume(sess, "")` 续跑，不占轮次）；Step-Resume 放弃本轮无状态重来
+10. **暂停 vs Step-Resume**：Pause 为快照挂起（EventPaused + Session，迭代器正常结束，`Resume(sess, Response{})` 续跑，不占轮次）；Step-Resume 放弃本轮无状态重来
 
 ### 记忆与上下文
 
@@ -732,5 +732,6 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 | 文档 | 位置 | 内容 |
 |------|------|------|
 | 契约权威 | [host-integration.md](host-integration.md) | 所有接口签名、字段语义、事件序列、陷阱清单 |
+| Thinker 适配 | [thinker-openai-go.md](thinker-openai-go.md) | 把 `Thinker` 接到 `openai-go/v3` 的逐字段适配（本文 `llm.go` 手写客户端的 SDK 对照版） |
 | 协议映射 | [protocols.md](protocols.md) | MCP / A2A / AGENTS.md / Authority / 长时任务状态外化 |
 | 动态接线 | [wiring.md](host-integration.md#51-动态接线-replace运行时换器官) | `Replace` 运行时换端口 |

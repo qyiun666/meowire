@@ -148,24 +148,25 @@ func TestSandboxAskSuspendsLoop(t *testing.T) {
 	}
 }
 
-// TestSandboxAskResumeDeny verifies the denial arm: empty response (or a
-// "[denied: ...]" payload — the host's timeout recipe) resolves the ask as
-// a denial, the pending call gets a [sandbox-denied: ...] structured
-// feedback (input protocol and output feedback are distinct formats), the
-// tool never executes, and the loop digests to Done on the same round quota.
+// TestSandboxAskResumeDeny verifies the denial arm: a Response that states a
+// refusal — or says nothing at all — resolves the ask as a denial, the pending
+// call gets a [sandbox-denied: ...] structured feedback (the answer grammar and
+// the feedback text are distinct shapes), the tool never executes, and the loop
+// digests to Done on the same round quota.
 func TestSandboxAskResumeDeny(t *testing.T) {
 	cases := []struct {
-		resp   string
+		name   string
+		resp   Response
 		wantFb string
 	}{
-		{"", "[sandbox-denied: declined]"},
-		{"[denied: timeout]", "[sandbox-denied: timeout]"},
+		{"silent", Response{}, "[sandbox-denied: declined]"},
+		{"refused", Response{Deny: "timeout"}, "[sandbox-denied: timeout]"},
 	}
 	for _, c := range cases {
 		calls := []ToolCall{{ID: "t1", Name: "alpha"}, {ID: "t2", Name: "dangerous"}}
 		f := runAskCycle(t, calls, false)
 		if !f.suspended {
-			t.Fatalf("%q: base cycle did not suspend", c.resp)
+			t.Fatalf("%s: base cycle did not suspend", c.name)
 		}
 		lc2 := &LoopContext{
 			CellID:  "c1",
@@ -179,10 +180,10 @@ func TestSandboxAskResumeDeny(t *testing.T) {
 				return &Decision{Text: "digested"}, nil
 			}},
 		}
-		ev2 := collectResume(context.Background(), lc2, f.session, c.resp)
+		ev2 := collectResponse(context.Background(), lc2, f.session, c.resp)
 		last := ev2[len(ev2)-1]
 		if last.Kind != EventDone {
-			t.Fatalf("%q: resume ended with %v, want Done; kinds: %v", c.resp, last.Kind, kindsOf(ev2))
+			t.Fatalf("%s: resume ended with %v, want Done; kinds: %v", c.name, last.Kind, kindsOf(ev2))
 		}
 		var gotFb string
 		for _, e := range ev2 {
@@ -191,10 +192,10 @@ func TestSandboxAskResumeDeny(t *testing.T) {
 			}
 		}
 		if gotFb != c.wantFb {
-			t.Fatalf("%q: denial feedback = %q, want %q", c.resp, gotFb, c.wantFb)
+			t.Fatalf("%s: denial feedback = %q, want %q", c.name, gotFb, c.wantFb)
 		}
 		if slices.Contains(f.actLog, "dangerous") {
-			t.Fatalf("%q: dangerous executed despite denial; log %v", c.resp, f.actLog)
+			t.Fatalf("%s: dangerous executed despite denial; log %v", c.name, f.actLog)
 		}
 		// The ask chain closes with one terminal record carrying the verdict
 		// note — plain gate audits carry no reason and must not confuse it.
@@ -205,13 +206,13 @@ func TestSandboxAskResumeDeny(t *testing.T) {
 			}
 		}
 		if denies != 1 {
-			t.Fatalf("%q: resolve denies = %d, want 1 (chain closure)", c.resp, denies)
+			t.Fatalf("%s: resolve denies = %d, want 1 (chain closure)", c.name, denies)
 		}
 	}
 }
 
-// TestSandboxAskResumeApprove verifies the approval arm: a non-empty,
-// non-[denied response approves the call — BeforeAct then Act run the
+// TestSandboxAskResumeApprove verifies the approval arm: an answering Response
+// that states no refusal approves the call — BeforeAct then Act run the
 // pending call, the remaining calls follow, and the digest completes
 // without an extra round.
 func TestSandboxAskResumeApprove(t *testing.T) {

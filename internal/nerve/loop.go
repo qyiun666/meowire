@@ -15,6 +15,13 @@ import (
 // ErrMaxRounds is returned when the loop exhausts all rounds with pending tool calls.
 var ErrMaxRounds = errors.New("nerve: max rounds exceeded")
 
+// ErrCellClosed is returned when an invocation is asked of an agent that has
+// been closed. It is defined here rather than in the cell because a refusal
+// reaches the host through the event stream, and the event wire restores
+// framework errors by identity — a sentinel the wire cannot name would come
+// back as text the host cannot match.
+var ErrCellClosed = errors.New("nerve: agent closed")
+
 // ErrForeignSession is returned when Resume is handed a Session produced by a
 // different cell: the handle carries that cell's context, output and pending
 // calls, and replaying it against another cell's organs would run one agent's
@@ -40,14 +47,15 @@ func (DecisionLoop) Cycle(ctx context.Context, lc *LoopContext, yield func(Event
 }
 
 // Resume continues a suspended loop from the Session captured in
-// EventWaitInput: the external response is injected as the pending tool's
-// structured result (a ToolResults entry), the remaining tool calls of the
+// EventWaitInput: the response is the answer that suspension asked for (see
+// Response — Session.Kind says which field it reads). The pending tool's answer
+// becomes a structured ToolResults entry, the remaining tool calls of the
 // suspended round run first, then the round loop resumes
 // from the suspended round — the Think that digests the response uses the
 // suspended round's quota, so the suspension consumes no extra round. The
 // event stream is isomorphic with Stimulate (same hooks, same guarantees). A
 // zero-value Session is rejected with an error event.
-func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, response string, yield func(Event) bool) {
+func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, resp Response, yield func(Event) bool) {
 	var finalOutput string
 	defer cycleGuarantees(ctx, lc, &finalOutput)()
 	if !sess.valid() {
@@ -65,15 +73,28 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	lc.Plan = sess.plan
 	lc.Context = slices.Clone(sess.context)
 	lc.ToolResults = slices.Clone(sess.toolResults)
-	// A tool wait consumes the response as the pending tool's structured result
-	// (rendering is the host's call). A pause injects nothing: the loop just
-	// continues. Both membrane asks resolve through the tri-state grammar below.
-	if sess.kind == waitTool && sess.pending.ID != "" {
-		lc.ToolResults = append(lc.ToolResults, ToolResult{
-			ID:     sess.pending.ID,
-			Name:   sess.pending.Name,
-			Result: truncateText(response, lc.MaxToolOutput),
-		})
+	// Resuming the pause is the intent to continue, so this is where its
+	// request is backed out. Any other flavour keeps a standing pause request
+	// alone: it belongs to whichever loop is running, and eating it here would
+	// silently drop the host's Pause().
+	if sess.kind == WaitPause {
+		lc.clearPauseRequest()
+	}
+	// A tool wait consumes the answer as the pending tool's structured result
+	// (rendering is the host's call). The call ID is not a precondition: it is
+	// whatever the model emitted, and a provider that omits it must not cost the
+	// host its answer — the executed path records ToolResult.ID the same way
+	// (see feedback). A refusal is that call failing rather than answering, so it
+	// takes the arm every other resistance takes. A pause injects nothing: the
+	// loop just continues. Both membrane asks resolve below.
+	if sess.kind == WaitTool {
+		tr := ToolResult{ID: sess.pending.ID, Name: sess.pending.Name}
+		if reason, denied := statedDenial(resp); denied {
+			tr.Err = truncateText(reason, lc.MaxToolOutput)
+		} else {
+			tr.Result = truncateText(resp.Answer, lc.MaxToolOutput)
+		}
+		lc.ToolResults = append(lc.ToolResults, tr)
 	}
 	var out strings.Builder
 	out.Grow(256)
@@ -85,12 +106,12 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 	}
 
 	switch sess.kind {
-	case waitCallAsk:
-		if !b.resolveCallAsk(sess, response) {
+	case WaitCallAsk:
+		if !b.resolveCallAsk(sess, resp) {
 			return
 		}
-	case waitUtterance:
-		done, ok := b.resolveUtteranceAsk(sess, response)
+	case WaitUtterance:
+		done, ok := b.resolveUtteranceAsk(sess, resp)
 		if !ok {
 			return
 		}
@@ -207,7 +228,7 @@ func roundLoop(lc *LoopContext, startRound int, b *actBatch) (finalOutput string
 		waiting, ok := b.run()
 		if !ok || waiting != nil {
 			// Suspended for external input: the iterator ends normally and the
-			// host resumes via Resume(sess, response).
+			// host resumes via Resume(sess, resp).
 			return ""
 		}
 	}

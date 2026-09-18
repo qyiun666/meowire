@@ -87,7 +87,7 @@ func (b *actBatch) utter(dec *Decision) bool {
 	switch ruling {
 	case VerdictAsk:
 		// The round's tool calls were never gated; they wait behind the draft.
-		_, _ = b.suspend(suspension{remaining: dec.ToolCalls, question: say, kind: waitUtterance, utterance: dec.Text})
+		_, _ = b.suspend(suspension{remaining: dec.ToolCalls, question: say, kind: WaitUtterance, utterance: dec.Text})
 		return false
 	case VerdictDeny:
 		b.lc.Context = append(b.lc.Context, say)
@@ -136,20 +136,29 @@ func consultEmit(ctx context.Context, lc *LoopContext, u Utterance) (ruling Verd
 	return ruling, reason, "", nil
 }
 
-// resolveAsk is the confirmation response grammar shared by both ask chains: an
-// empty response denies as "declined", a "[denied: ...]" payload denies with
-// that text, anything else approves (the second return value is the denial text
-// to land, or the response itself when approved).
-func resolveAsk(response string) (Verdict, string) {
-	resp := strings.TrimSpace(response)
-	switch {
-	case resp == "":
-		return VerdictDeny, deniedText("declined")
-	case strings.HasPrefix(resp, "[denied:"):
-		return VerdictDeny, "[sandbox-denied" + strings.TrimPrefix(resp, "[denied")
-	default:
-		return VerdictAllow, resp
+// statedDenial reads the response as a refusal: a whitespace-only reason is not
+// one, so an ask answered with nothing to say declines.
+func statedDenial(resp Response) (string, bool) {
+	if reason := strings.TrimSpace(resp.Deny); reason != "" {
+		return reason, true
 	}
+	return "", false
+}
+
+// resolveAsk is the confirmation response grammar shared by both ask chains: a
+// stated denial refuses with that reason, an answer that says nothing declines,
+// and any other answer approves (the second return value is the denial text to
+// land, or the answer itself when approved). The host's answer is never parsed
+// for a directive inside it — a text that happens to begin with the denial
+// prefix is the answer, not a refusal wearing an answer.
+func resolveAsk(resp Response) (Verdict, string) {
+	if reason, denied := statedDenial(resp); denied {
+		return VerdictDeny, deniedText(reason)
+	}
+	if answer := strings.TrimSpace(resp.Answer); answer != "" {
+		return VerdictAllow, answer
+	}
+	return VerdictDeny, deniedText("declined")
 }
 
 // resolveCallAsk closes a pre-execution confirmation chain: the approved call
@@ -157,8 +166,8 @@ func resolveAsk(response string) (Verdict, string) {
 // would ask forever), a denial lands its feedback in place. Either arm yields
 // the terminal EventSandbox closing the chain. It returns false when the caller
 // must stop — the consumer left, or the arm suspended again.
-func (b *actBatch) resolveCallAsk(sess Session, response string) bool {
-	ruling, text := resolveAsk(response)
+func (b *actBatch) resolveCallAsk(sess Session, resp Response) bool {
+	ruling, text := resolveAsk(resp)
 	if !b.yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
 		CellID: b.lc.CellID, Call: sess.pending, Ruling: ruling, Reason: text,
 	}}) {
@@ -180,8 +189,8 @@ func (b *actBatch) resolveCallAsk(sess Session, response string) bool {
 // also joins the context track, so the brain reads it next Think). It reports
 // done when the round had nothing left to execute — the cycle ends there rather
 // than entering another Think — and ok=false when the consumer stopped.
-func (b *actBatch) resolveUtteranceAsk(sess Session, response string) (done, ok bool) {
-	ruling, text := resolveAsk(response)
+func (b *actBatch) resolveUtteranceAsk(sess Session, resp Response) (done, ok bool) {
+	ruling, text := resolveAsk(resp)
 	if !b.yield(Event{Kind: EventSandbox, Verdict: &SandboxVerdict{
 		CellID: b.lc.CellID, Ruling: ruling, Reason: text,
 	}}) {

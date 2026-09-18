@@ -19,3 +19,11 @@ type ContextBudget struct {
 	Trimmer     func([]string, int) []string
 	TrimResults func([]ToolResult, int) []ToolResult
 }
+
+// CompleteBudget reports whether the regulator can regulate: a trimmer per
+// growing track and a positive limit. The api's Validate and the cell's
+// Replace assertion both ask here, so the assembly-time rule and the
+// runtime-swap rule are one rule.
+func CompleteBudget(b *ContextBudget) bool {
+	return b != nil && b.Trimmer != nil && b.TrimResults != nil && b.MaxTokens > 0
+}

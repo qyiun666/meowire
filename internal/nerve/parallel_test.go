@@ -6,6 +6,7 @@ package nerve
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -290,6 +291,108 @@ func TestParallelActsBatchDenialIsolation(t *testing.T) {
 	last := events[len(events)-1]
 	if last.Kind != EventDone {
 		t.Fatalf("last event = %+v, want EventDone (a denial must not kill the batch)", last)
+	}
+}
+
+// denyAskSandbox denies the call named "blocked", asks on "dangerous", and
+// allows everything else — one batch that meets both a refusal and a
+// confirmation in the gate phase.
+type denyAskSandbox struct{}
+
+func (denyAskSandbox) Allow(ctx context.Context, a Action) (Verdict, string, error) {
+	switch a.Call.Name {
+	case "blocked":
+		return VerdictDeny, "blocked calls are forbidden", nil
+	case "dangerous":
+		return VerdictAsk, "confirm dangerous?", nil
+	}
+	return VerdictAllow, "", nil
+}
+
+func (denyAskSandbox) Bounds() string { return "deny-ask" }
+
+func (denyAskSandbox) Emit(context.Context, Utterance) (Verdict, string, error) {
+	return VerdictAllow, "", nil
+}
+
+// TestParallelActsAskTailExcludesDenied: the snapshot tail an ask suspends
+// with carries the siblings that have neither been refused nor executed — a
+// sibling the membrane denied before the ask is excluded (its feedback landed
+// in place), the asked call is the pending one, and a sibling behind the ask
+// rides the tail unexecuted.
+func TestParallelActsAskTailExcludesDenied(t *testing.T) {
+	var actLog []string
+	calls := 0
+	lc := &LoopContext{
+		CellID:       "c1",
+		Input:        "deny-then-ask",
+		MaxRounds:    2,
+		ParallelActs: true,
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			calls++
+			if calls == 1 {
+				return &Decision{Text: "run", ToolCalls: []ToolCall{
+					{ID: "t1", Name: "blocked"}, {ID: "t2", Name: "dangerous"}, {ID: "t3", Name: "gamma"},
+				}}, nil
+			}
+			return &Decision{Text: "done"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			actLog = append(actLog, a.Call.Name)
+			return &Effect{Result: a.Call.Name}, nil
+		}},
+		Sandbox: denyAskSandbox{},
+	}
+	events := collectEvents(context.Background(), lc)
+
+	// Every call is announced in call order before anything else happens.
+	var announced []string
+	for _, e := range events {
+		if e.Kind == EventToolCall && e.ToolCall != nil {
+			announced = append(announced, e.ToolCall.Name)
+		}
+	}
+	if !slices.Equal(announced, []string{"blocked", "dangerous", "gamma"}) {
+		t.Fatalf("announced = %v, want [blocked dangerous gamma]", announced)
+	}
+
+	// The denied sibling's refusal landed in place before the suspension.
+	var denialFB int
+	for _, e := range events {
+		if e.Kind == EventToolResult && e.Effect != nil && e.Effect.Err == "[sandbox-denied: blocked calls are forbidden]" {
+			denialFB++
+		}
+	}
+	if denialFB != 1 {
+		t.Fatalf("denial feedback events = %d, want 1 (denied before the ask)", denialFB)
+	}
+
+	waitIdx := slices.IndexFunc(events, func(e Event) bool { return e.Kind == EventWaitInput })
+	if waitIdx < 0 {
+		t.Fatalf("no EventWaitInput; kinds: %v", kindsOf(events))
+	}
+	w := events[waitIdx].Wait
+	if w.Call.ID != "t2" || w.Question != "confirm dangerous?" {
+		t.Fatalf("WaitInput call = %+v, want pending t2 with the ask question", w.Call)
+	}
+	if w.Session.Kind() != WaitCallAsk {
+		t.Fatalf("Session.Kind() = %v, want WaitCallAsk", w.Session.Kind())
+	}
+	// The tail: the un-gated sibling behind the ask rides it; the denied
+	// sibling before the ask does not.
+	rem := w.Session.RemainingCalls()
+	if len(rem) != 1 || rem[0].ID != "t3" {
+		t.Fatalf("RemainingCalls = %+v, want [t3 gamma] only", rem)
+	}
+	// The ask stops the batch before the execution phase, and the iterator
+	// ends quietly.
+	if len(actLog) != 0 {
+		t.Fatalf("actLog = %v, want nothing executed before the ask", actLog)
+	}
+	for _, e := range events {
+		if e.Kind == EventDone || e.Kind == EventError {
+			t.Fatalf("suspension must end quietly, got %v; kinds: %v", e.Kind, kindsOf(events))
+		}
 	}
 }
 

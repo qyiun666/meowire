@@ -46,18 +46,18 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
   （异步任务、人工接管、`ErrMaxRounds` 续跑），再 `Stimulate` 继续。工具请求输入（ask_user）
   不在此列，走下面的统一挂起-恢复协议（唯一形式）
-- **统一挂起-恢复** —— 四种挂起共用同一条快照 + 恢复路径：
+- **统一挂起-恢复** —— 四种挂起共用同一条快照 + 恢复路径，答复统一用一个类型化的 `Response{Answer, Deny}`，由 `Session.Kind()` 决定这条句柄读哪个字段：
   - **ask_user**：工具返回 `Effect{WaitInput: 问题}`，循环产出 `EventState(StateWaiting)` +
     `EventWaitInput`（工具、问题、不透明 `Session`）后**迭代器正常结束** ——不阻塞、不占轮次、
-    等待期间不触发 budget。`Agent.Resume(ctx, sess, response)` 续跑：响应以挂起工具的结构化
-    结果进入循环（`Prompt.ToolResults` 条目，ID 保留），先执行剩余工具，再从挂起轮继续。
+    等待期间不触发 budget。`Agent.Resume(ctx, sess, Response{Answer: 文本})` 续跑：答复以挂起工具的结构化
+    结果进入循环（`Prompt.ToolResults` 条目，ID 保留），`Response{Deny: 原因}` 则把该调用记为失败（拒绝是工具失败，不是工具输出），先执行剩余工具，再从挂起轮继续。
   - **Pause**：`Agent.Pause()` 在间隙点（每轮 Think 前 / 每个工具执行前）生效，循环产出
     `EventState(StatePaused)` + `EventPaused`（Session 快照）后迭代器正常结束 ——
-    `Agent.Resume(ctx, sess, "")` 续跑（无 pending 工具可注入）。暂停点在工具执行前时，
+    `Agent.Resume(ctx, sess, Response{})` 续跑（什么都没被问，Response 不被读取）。暂停点在工具执行前时，
     当前工具计入快照，Resume 先执行它。
   - **可持久化**：`Session.Marshal()` / `UnmarshalSession` 提供带版本号的 JSON 持久化 ——
     挂起或暂停的循环可跨进程存活（对齐主流 checkpoint/resume）。
-  超时由宿主控制（默认拒绝）；替代旧的在 Effector 内同步阻塞做法
+  超时由宿主控制（默认拒绝）；等待以挂起表达，从不在 Effector 内同步阻塞（阻塞会拖住 Close 的等待）
 - **两侧三态裁决与反思原语** —— `Sandbox.Allow`（工具执行前）与 `Sandbox.Emit`（该轮文本
   被听到前）各返回 `Verdict`：`VerdictDeny`（零值，fail-closed）/ `VerdictAllow` / `VerdictAsk`，
   三态之外的值同样按 Deny 处置——本构建叫不出名字的值不可能"允许"什么；ask 经与 ask_user
@@ -69,9 +69,15 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   Thinker —— 文本轨（`Context`）只保留宿主基底与 sandbox 裁决
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
+- **并行工具批（可选）** —— `Config.ParallelActs` 并发执行一轮的多个独立工具调用
+  （串行门禁 → 并行 Act → 按调用序串行反馈）；事件与钩子保持串行。默认关闭；要求
+  并发安全的 Effector。`MaxParallelActs` 限制同批同时执行的调用数；
+  `Session.RemainingCalls()` 暴露挂起时尚未执行的调用（无剩余时为空）
 - **历史由宿主管理**（MemHop 模式）—— 上下文累积与记忆注入都是你的职责
 - **扁平多 agent 模型** —— 一个 `Agent` 就是一个内核；多 agent 是宿主 `New` 出多个实例，子 agent 由宿主
   工具（`spawn_agent`）产生并消费其事件流。内核不做 agent 间通信，也绝不做框架级嵌套
+- 每个实例必须有自己的 `Organs.ID`（必填无默认）：`New` 拒绝无名 agent——它是每个事件的署名、每个
+  `Session` 归属核对的依据
 - **阻力是反馈，不是失败** —— 被拒绝的工具、工具错误、目标繁忙都以 `EventToolResult`
   反馈回流循环，循环继续
 
@@ -83,7 +89,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   `Budget.Trimmer` 调用都是无条件的。
 - **`Blueprint.Strict` 已移除** —— 不再有 warn 级可提升，删除 `Blueprint` 字面量中的该字段。
 - **`ContextBudget` 完整性强制** —— Trimmer 为 nil 或 MaxTokens <= 0 装配失败
-  （不裁剪的预算不是预算）。
+  （不裁剪的预算不是预算）；`TrimResults` 后来并入同一条规则 —— 两条累积轨各要一个裁剪器。
 - **`Replace` 拒绝 nil/不完整端口** —— 换入的器官必须完整。
 - **`Sandbox` 必须实现 `Bounds() string`** —— 返回执行边界描述；
   框架每次 `Stimulate` 快照一次，通过 `Prompt.Bounds` 以只读方式提供给 hook 与 Thinker：
@@ -183,9 +189,10 @@ func (memory) Recall(context.Context, meowire.MemoryQuery) ([]meowire.Record, er
 func (memory) Remember(context.Context, meowire.CycleFacts) error { return nil }
 
 func main() {
-	// Blueprint：一次定义，多次 New（每个实例一个独立内核）
+	// Blueprint：接线一次定义，多次 New —— 每个实例换自己的 Organs.ID
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
+		ID:      "agent-001", // 必填：事件署名与挂起句柄归属都按它判定
 		Think:   thinker{},
 		Act:     effector{},
 		Closer:  closer{},
@@ -237,7 +244,7 @@ func main() {
 停止迭代器，在宿主侧处理（异步工具、人工接管、外部服务），自行保存进度，然后再次
 `Stimulate`。每次 `Stimulate` 都是无状态步骤 —— 这是宿主主动接管、长任务和重试的实现方式。
 工具请求输入（ask_user）**不在此列**：工具返回 `Effect{WaitInput: 问题}`，循环携带不透明
-`Session` 挂起，宿主经 `Agent.Resume(ctx, sess, response)` 续跑（见下文“统一挂起-恢复”）。
+`Session` 挂起，宿主经 `Agent.Resume(ctx, sess, resp)` 续跑（见下文“统一挂起-恢复”）。
 两条路径互斥；用 break + `Stimulate` 模拟 ask_user 会丢失挂起上下文（`Session` 不透明，
 无法手工重建）。
 
@@ -246,19 +253,21 @@ func main() {
 四种挂起 —— 工具请求输入（ask_user）、执行前征询、文本征询（两侧都是 `VerdictAsk`）与宿主请求暂停（Pause）—— 共用同一机制：
 循环产出携带不透明 `Session` 快照的挂起事件后**迭代器正常结束**；宿主保存 Session
 （可选经 `Session.Marshal()` / `UnmarshalSession` 跨进程持久化恢复），然后调用
-`Agent.Resume(ctx, sess, response)` 从挂起点继续 —— 不占轮次、等待期间不触发 budget。
+`Agent.Resume(ctx, sess, resp)` 从挂起点继续 —— 不占轮次、等待期间不触发 budget。
 
-- **ask_user**：`Effect{WaitInput: 问题}` → `EventState(StateWaiting)` + `EventWaitInput`；
-  响应以挂起工具的结构化结果注入。
-- **Pause**：`Agent.Pause()` 在间隙点生效 → `EventState(StatePaused)` + `EventPaused`；
-  `Resume(sess, "")` 续跑，不注入任何内容（无 pending 工具）。暂停点在工具执行前时，
+`resp`（一个 `Response`）的含义由 `Session.Kind()` 决定，与答复文本长什么样无关：
+
+- **ask_user**（`WaitTool`）：`Effect{WaitInput: 问题}` → `EventState(StateWaiting)` + `EventWaitInput`；
+  `Response{Answer: 文本}` 以挂起工具的结构化结果注入，`Response{Deny: 原因}` 把该调用记为失败。
+- **Pause**（`WaitPause`）：`Agent.Pause()` 在间隙点生效 → `EventState(StatePaused)` + `EventPaused`；
+  `Resume(sess, Response{})` 续跑，不注入任何内容（什么都没被问）。暂停点在工具执行前时，
   当前工具（及其后的调用）计入 `Session.remaining`，Resume 先执行它们。
-- **膜征询**：`Sandbox.Allow`（工具执行前）或 `Sandbox.Emit`（该轮文本被听到前）返回 `VerdictAsk` → 同样的 `EventState(StateWaiting)` +
-  `EventWaitInput`（问题来自裁决 reason；文本征询的 `Call` 为零值，草稿扣在 `Session` 里）；响应语法与 ask_user 一致 —— 空串拒绝
-  （`[sandbox-denied: declined]`）、`[denied:` 前缀按文本拒绝（反馈落库为
-  `[sandbox-denied: ...]` 规范形式）、其余任何响应批准：放行 pending
-  调用（不再重新过门禁）或按原稿说出被扣住的草稿（不重跑该轮 Think）。
-- `Agent.Resume` 自动清除失效的暂停请求；`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
+- **膜征询**（`WaitCallAsk` / `WaitUtterance`）：`Sandbox.Allow`（工具执行前）或 `Sandbox.Emit`（该轮文本被听到前）返回 `VerdictAsk` → 同样的 `EventState(StateWaiting)` +
+  `EventWaitInput`（问题来自裁决 reason；文本征询的 `Call` 为零值，草稿扣在 `Session` 里）；`Deny` 按该原因拒绝（反馈落库为
+  `[sandbox-denied: ...]` 规范形式），`Deny` 为空且 `Answer` 非空即批准：放行 pending
+  调用（不再重新过门禁）或按原稿说出被扣住的草稿（不重跑该轮 Think）；零值 `Response` 记为拒绝
+  （`[sandbox-denied: declined]`）—— 答复是一个裁决，不是拿去匹配的字符串。
+- 恢复 pause 挂起会清掉那一次暂停请求，恢复后的循环不会在首个间隙点再次挂起；恢复其余成因的挂起不动暂停请求。`Agent.Unpause()` 只能撤销尚未生效的暂停请求。
 - Session 单次使用：重复恢复会重放剩余工具调用（宿主责任）。
   暂停从不打断执行中的 Think/Act：它只在间隙点被兑现。
 

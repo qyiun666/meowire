@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -21,8 +23,8 @@ func wireEvents() []Event {
 	eff := &Effect{Result: "42 hits", Err: "denied", WaitInput: "confirm?"}
 	sess := Session{cell: "c1", round: 2, input: "go", plan: "p", context: []string{"a"}, output: "o",
 		pending: *call, remaining: []ToolCall{{ID: "t2"}}, toolResults: []ToolResult{{ID: "t1", Result: "r"}},
-		kind: waitUtterance, utterance: "draft"}
-	return []Event{
+		kind: WaitUtterance, utterance: "draft"}
+	out := []Event{
 		{Kind: EventText, CellID: "c1", Text: "thinking"},
 		{Kind: EventToolCall, CellID: "c1", ToolCall: call},
 		{Kind: EventToolResult, CellID: "c1", ToolCall: call, Effect: eff},
@@ -38,6 +40,13 @@ func wireEvents() []Event {
 		// A restored event carries its own loss report onward.
 		{Kind: EventText, CellID: "c1", Text: "restored", Dropped: []string{"err.identity"}},
 	}
+	// Emission order and moment travel on every record (wire version 2), so
+	// each case carries a distinct pair the round trip has to bring back.
+	for i := range out {
+		out[i].Seq = uint64(i + 1)
+		out[i].TS = 1700000000000 + int64(i)
+	}
+	return out
 }
 
 // TestEventWireRoundTrip: every kind survives encode → decode unchanged,
@@ -78,13 +87,16 @@ func TestEventWireDropsNothingForFrameworkValues(t *testing.T) {
 }
 
 // TestEventVersionMismatchRejected: a record from another wire version is
-// rejected, never read as a best-effort match.
+// rejected, never read as a best-effort match. The rejected versions are
+// derived from the build's own, so a version bump cannot quietly turn this
+// guard into a test of the current version alone — and the version just
+// retired (a journal written before the bump) is among them.
 func TestEventVersionMismatchRejected(t *testing.T) {
 	data, err := EncodeEvent(Event{Kind: EventText, Text: "x"})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	for _, version := range []int{0, 2} {
+	for _, version := range []int{0, eventVersion - 1, eventVersion + 1} {
 		tampered := tamperedRecord(data, map[string]any{"version": float64(version)})
 		if _, err := DecodeEvent(tampered); err == nil {
 			t.Errorf("version %d decoded without complaint", version)
@@ -118,7 +130,7 @@ func TestUnknownKindRejected(t *testing.T) {
 // TestSentinelErrorSurvivesWire: a framework error comes back as the identical
 // value, so a host's errors.Is keeps working across a journal.
 func TestSentinelErrorSurvivesWire(t *testing.T) {
-	for _, sentinel := range []error{ErrMaxRounds, ErrForeignSession} {
+	for _, sentinel := range []error{ErrMaxRounds, ErrForeignSession, ErrCellClosed} {
 		wrapped := fmt.Errorf("loop ended: %w", sentinel)
 		got, err := DecodeEvent(mustEncode(t, Event{Kind: EventError, Err: wrapped}))
 		if err != nil {
@@ -183,7 +195,7 @@ func TestBareJSONErrorFieldWouldLoseText(t *testing.T) {
 // than the suspension handle it carries.
 func TestSessionInsideEventStillGuardsVersion(t *testing.T) {
 	tampered := tamperedRecord(mustEncode(t, Event{Kind: EventWaitInput, Wait: &WaitInput{
-		CellID: "c1", Session: Session{cell: "c1", round: 1, kind: waitTool, pending: ToolCall{ID: "t1"}},
+		CellID: "c1", Session: Session{cell: "c1", round: 1, kind: WaitTool, pending: ToolCall{ID: "t1"}},
 	}}), map[string]any{"wait": map[string]any{"session": map[string]any{"version": float64(99)}}})
 	if _, err := DecodeEvent(tampered); err == nil {
 		t.Fatal("a foreign Session version inside an event was accepted")
@@ -226,7 +238,7 @@ func TestEnumNamesCoverEveryValue(t *testing.T) {
 	}{
 		{"loop state", loopStateNames, int(StateError) + 1},
 		{"ruling", verdictNames, int(VerdictAsk) + 1},
-		{"wait kind", waitKindNames, int(waitUtterance) + 1},
+		{"wait kind", waitKindNames, int(WaitUtterance) + 1},
 	} {
 		if len(tb.names) != tb.n {
 			t.Errorf("%d %s names for %d values", len(tb.names), tb.what, tb.n)
@@ -329,7 +341,7 @@ func TestUnnamedRulingRefusedAtEncode(t *testing.T) {
 	if _, err := EncodeEvent(Event{Kind: EventText, Text: "x", State: StateWaiting}); err == nil {
 		t.Fatal("a state value on a text event was encoded by dropping it")
 	}
-	// A value past the end of a name table used to encode as "unknown" — a record
+	// A value past the end of a name table would otherwise encode as "unknown" — a record
 	// whose own name guarantees DecodeEvent will refuse it. Better no entry than a
 	// poison entry.
 	if _, err := EncodeEvent(Event{Kind: EventState, State: LoopState(42)}); err == nil {
@@ -389,4 +401,64 @@ func fieldNames(typ reflect.Type) []string {
 		names = append(names, typ.Field(i).Name)
 	}
 	return names
+}
+
+// TestEveryFrameworkSentinelHasAWireName pins the frameworkErrs table against
+// every sentinel the package declares. A sentinel missing from that table
+// degrades to text across a journal, and the host's errors.Is then answers
+// false on a record the framework itself wrote — the quietest possible failure.
+func TestEveryFrameworkSentinelHasAWireName(t *testing.T) {
+	declared := declaredSentinels(t)
+	if len(declared) == 0 {
+		t.Fatal("the scan found no sentinels: the pattern no longer matches how they are declared")
+	}
+	named := wireNamedSentinels(t, "eventwire.go")
+	for _, name := range declared {
+		if !slices.Contains(named, name) {
+			t.Fatalf("sentinel %s has no frameworkErrs entry: events carrying it lose their identity across a journal", name)
+		}
+	}
+}
+
+var sentinelDecl = regexp.MustCompile(`(?m)^var (Err\w+) = errors\.New\(`)
+
+var sentinelWireEntry = regexp.MustCompile(`\{"[\w-]+", (Err\w+)\}`)
+
+// declaredSentinels scans the package's non-test sources for the error values
+// the framework raises.
+func declaredSentinels(t *testing.T) []string {
+	t.Helper()
+	files, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	var out []string
+	for _, f := range files {
+		name := f.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		out = append(out, sentinelsIn(t, name, sentinelDecl)...)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// wireNamedSentinels scans the wire table for the sentinels it can restore.
+func wireNamedSentinels(t *testing.T, file string) []string {
+	t.Helper()
+	return sentinelsIn(t, file, sentinelWireEntry)
+}
+
+func sentinelsIn(t *testing.T, file string, pattern *regexp.Regexp) []string {
+	t.Helper()
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	var out []string
+	for _, m := range pattern.FindAllStringSubmatch(string(src), -1) {
+		out = append(out, m[1])
+	}
+	return out
 }

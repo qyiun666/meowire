@@ -1188,7 +1188,7 @@ func TestDecisionLoopAfterActReceivesErr(t *testing.T) {
 // TestDecisionLoopPauseSuspends verifies a pause requested at a gap point
 // yields EventState(StatePaused) + EventPaused with a Session snapshot and
 // ends the iterator normally (no Done, no Error) — the unified
-// suspension-resume path: the host resumes via Resume(sess, "").
+// suspension-resume path: the host resumes via Resume(sess, Response{}).
 func TestDecisionLoopPauseSuspends(t *testing.T) {
 	var paused atomic.Bool
 	var executed []string
@@ -1251,7 +1251,7 @@ func TestDecisionLoopPauseSuspends(t *testing.T) {
 		t.Fatalf("pause session pending = %+v, want zero value (pause has no pending tool)", sess.pending)
 	}
 
-	// The paused run continues via Resume(sess, ""): the tool runs first,
+	// The paused run continues via Resume(sess, Response{}): the tool runs first,
 	// then the loop re-enters Think and completes normally.
 	paused.Store(false)
 	resumeEvents := collectResume(context.Background(), lc, sess, "")

@@ -28,7 +28,9 @@ import (
 
 // eventVersion is the event wire format version. Bump it on any incompatible
 // change to WireEvent's shape; DecodeEvent refuses anything else.
-const eventVersion = 1
+// Version 2 carries the per-cell emission order (Seq) and the emission moment
+// (TS) that a journal needs to tell a gap from a quiet run.
+const eventVersion = 2
 
 // WireEvent is one Event as it travels. The field set mirrors Event exactly (a
 // guard test fails on drift in either direction); three fields change shape on
@@ -39,6 +41,8 @@ type WireEvent struct {
 	Version  int           `json:"version"`
 	Kind     string        `json:"kind"`
 	CellID   string        `json:"cellId,omitempty"`
+	Seq      uint64        `json:"seq"`
+	TS       int64         `json:"ts"`
 	Text     string        `json:"text,omitempty"`
 	ToolCall *ToolCall     `json:"toolCall,omitempty"`
 	Effect   *Effect       `json:"effect,omitempty"`
@@ -89,6 +93,7 @@ var frameworkErrs = []struct {
 }{
 	{"max-rounds", ErrMaxRounds},
 	{"foreign-session", ErrForeignSession},
+	{"cell-closed", ErrCellClosed},
 }
 
 func wireOfErr(err error) *WireErr {
@@ -145,6 +150,8 @@ func EncodeEvent(e Event) ([]byte, error) {
 		Version:  eventVersion,
 		Kind:     kind,
 		CellID:   e.CellID,
+		Seq:      e.Seq,
+		TS:       e.TS,
 		Text:     e.Text,
 		ToolCall: e.ToolCall,
 		Effect:   e.Effect,
@@ -238,6 +245,8 @@ func DecodeEvent(data []byte) (Event, error) {
 	e := Event{
 		Kind:     kind,
 		CellID:   w.CellID,
+		Seq:      w.Seq,
+		TS:       w.TS,
 		Text:     w.Text,
 		ToolCall: w.ToolCall,
 		Effect:   w.Effect,

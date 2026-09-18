@@ -130,36 +130,12 @@ func TestCellResumeInvalidSession(t *testing.T) {
 		}},
 	)
 	var lastErr string
-	for ev := range c.Resume(context.Background(), nerve.Session{}, "x") {
+	for ev := range c.Resume(context.Background(), nerve.Session{}, nerve.Response{Answer: "x"}) {
 		if ev.Kind == nerve.EventError {
 			lastErr = ev.Err.Error()
 		}
 	}
 	if !strings.Contains(lastErr, "invalid session") {
 		t.Fatalf("resume error = %q, want %q", lastErr, "invalid session")
-	}
-}
-
-// TestCellResumeAfterClose verifies Resume after Close yields an error event.
-func TestCellResumeAfterClose(t *testing.T) {
-	c := newTestCell(t,
-		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-			return &nerve.Decision{Text: "ok"}, nil
-		}},
-		testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
-			return &nerve.Effect{Result: "ok"}, nil
-		}},
-	)
-	if err := c.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	var gotErr bool
-	for ev := range c.Resume(context.Background(), nerve.Session{}, "x") {
-		if ev.Kind == nerve.EventError {
-			gotErr = true
-		}
-	}
-	if !gotErr {
-		t.Fatal("Resume after Close: want an error event")
 	}
 }

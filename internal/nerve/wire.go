@@ -195,6 +195,6 @@ func Connectome() []WirePoint {
 		{ID: "G1", Name: "PauseGate", Phase: 1, Category: CategoryDecide,
 			TargetID: "timing", Target: "loop timing", Semantics: SemGate,
 			Required: false,
-			Desc:     "api-injected automatically; honors Pause at gap points"},
+			Desc:     "api-injected automatically; honors Pause at gap points and clears the request only when the pause it honored is resumed"},
 	}
 }

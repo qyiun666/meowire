@@ -15,7 +15,15 @@ type Event struct {
 	// every event as it leaves, so an event keeps its author once it is
 	// written to a log, replayed in another process, or merged with another
 	// agent's events.
-	CellID   string
+	CellID string
+	// Seq and TS are stamped by the cell at the same boundary as CellID, for
+	// the same reason: a journal has to say which event it holds and in what
+	// order the kernel emitted it. Seq is 1-based and strictly increasing per
+	// cell across Stimulate and Resume, so a host that persists the stream can
+	// tell a gap from a quiet run; it restarts with the process, where TS is
+	// what orders two streams written by different cells.
+	Seq      uint64 // emission order within the producing cell (0 = not stamped by a cell)
+	TS       int64  // Unix milliseconds at emission
 	Kind     EventKind
 	Text     string          // KindText: LLM text output
 	ToolCall *ToolCall       // KindToolCall: the call; KindToolResult: echoes the call for ID association
@@ -105,7 +113,7 @@ var eventKindNames = []string{
 
 // String returns the kind's wire name. Kinds travel by name, not by number, so
 // inserting or reordering the iota cannot silently reinterpret a stored stream
-// (same discipline as the Session's waitKind names).
+// (same discipline as the Session's WaitKind names).
 func (k EventKind) String() string {
 	if name := nameOf(eventKindNames, k); name != "" {
 		return name

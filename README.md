@@ -56,12 +56,12 @@ you can rely on.
 - **Step-Resume** — each `Stimulate` is one stateless step; stop the iterator, do host-side work
   (async tool, manual takeover, `ErrMaxRounds` continuation), then `Stimulate` again. Tool-requested
   input (`ask_user`) is not done this way — see Suspension-resume below (the only form)
-- **Unified suspension-resume** — one snapshot + resume path for all four suspension flavours:
-  - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, response)` continues: the response enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), remaining tools run first, then the loop resumes from the suspended round.
-  - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, "")` continues (no pending tool to inject). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
-  - **Membrane ask**: a tri-state ruling — `Sandbox.Allow` before a call runs, or `Sandbox.Emit` before a round's text is heard — yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason; an `Emit` ask withholds the draft inside the `Session`). Resolution follows one shared response grammar — "" denies (`[sandbox-denied: declined]`), a `[denied:` prefix denies with that text (the feedback lands in the canonical `[sandbox-denied: ...]` form), any other response approves: the pending call runs without re-gating, or the withheld draft is said as generated without another Think.
+- **Unified suspension-resume** — one snapshot + resume path for all four suspension flavours. A suspended loop is answered with one typed `Response{Answer, Deny}`, and `Session.Kind()` says which field that handle reads:
+  - **ask_user**: a tool returns `Effect{WaitInput: question}` and the loop yields `EventState(StateWaiting)` + `EventWaitInput` (tool, question, opaque `Session`) and ends the iterator normally — no blocking, no extra round, no budget during the wait. `Agent.Resume(ctx, sess, Response{Answer: ...})` continues: the answer enters the loop as the pending tool's structured result (`Prompt.ToolResults` entry, ID preserved), a `Response{Deny: why}` records that call as failed instead, remaining tools run first, then the loop resumes from the suspended round.
+  - **Pause**: `Agent.Pause()` is honored at gap points (before each Think / tool execution); the loop yields `EventState(StatePaused)` + `EventPaused` (Session snapshot) and ends the iterator normally — `Agent.Resume(ctx, sess, Response{})` continues (nothing is being asked, so the Response is not read). A pause before a tool keeps that tool in the snapshot, so Resume runs it first.
+  - **Membrane ask**: a tri-state ruling — `Sandbox.Allow` before a call runs, or `Sandbox.Emit` before a round's text is heard — yields the same StateWaiting + EventWaitInput pair (the question is the ruling's reason; an `Emit` ask withholds the draft inside the `Session`). Resolution is one ruling, never a string match inside the host's text: `Response{Deny: why}` refuses (the pending call gets `[sandbox-denied: why]` feedback), an empty `Deny` with a non-empty `Answer` approves — the pending call runs without re-gating, or the withheld draft is said as generated without another Think. The zero `Response` declines (`[sandbox-denied: declined]`), so failing to answer fails closed.
   - **Persistent**: `Session.Marshal()` / `UnmarshalSession` give versioned JSON persistence — a suspended or paused loop survives process restarts (alignment with mainstream checkpoint/resume).
-  Timeouts are host-controlled (default deny); replaces the old host-side synchronous block
+  Timeouts are host-controlled (default deny); the wait is a suspension, never a synchronous block inside the Effector (a block would hold up the Close wait)
 - **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
   (`ToolResult{ID, Name, Result, Err}`, single track; `call_xxx` IDs preserved);
   rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the
@@ -104,7 +104,8 @@ you can rely on.
 - **`Blueprint.Strict` removed** — with no warn level left there is nothing
   to promote; drop the field from `Blueprint` literals.
 - **`ContextBudget` completeness enforced** — nil Trimmer or MaxTokens <= 0
-  fails assembly (a budget that does not trim is not a budget).
+  fails assembly (a budget that does not trim is not a budget); `TrimResults` was later
+  brought under the same rule — each growing track needs its own trimmer.
 - **`Replace` rejects nil/incomplete ports** — swapped organs must be
   complete.
 - **`Sandbox` requires `Bounds() string`** — return the execution boundary
@@ -207,9 +208,11 @@ func (memory) Recall(context.Context, meowire.MemoryQuery) ([]meowire.Record, er
 func (memory) Remember(context.Context, meowire.CycleFacts) error { return nil }
 
 func main() {
-	// Blueprint: define once, New many times (flat-model multi-agent)
+	// Blueprint: define the wiring once, New many times — varying Organs.ID per
+	// instance (flat-model multi-agent)
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
+			ID:      "agent-001", // required: events and resume handles are attributed to it
 			Think:   thinker{},
 			Act:     effector{},
 			Closer:  closer{},
@@ -264,7 +267,7 @@ Stop the iterator, do host-side work (async tool, manual approval, external serv
 progress, then call `Stimulate` again. Each `Stimulate` is a stateless step — this is the way to
 implement host-driven takeover, long-running tasks, and retries. Tool-requested input (`ask_user`)
 is **not** done this way: a tool returns `Effect{WaitInput: question}` and the loop suspends with an
-opaque `Session` — resume it via `Agent.Resume(ctx, sess, response)` (see Suspension-resume above).
+opaque `Session` — resume it via `Agent.Resume(ctx, sess, resp)` (see Suspension-resume above).
 The two paths are mutually exclusive; a break-based `ask_user` would lose the suspended context
 (the `Session` is opaque and cannot be rebuilt by hand).
 
@@ -274,19 +277,26 @@ All four suspension flavours — tool-requested input (ask_user), a membrane ask
 (`VerdictAsk`), and host-requested pause — share one
 mechanism: the loop yields a suspension event carrying an opaque `Session` snapshot and ends the
 iterator normally; the host saves the Session (optionally persisting it via `Session.Marshal()` /
-`UnmarshalSession` for cross-process recovery), then calls `Agent.Resume(ctx, sess, response)` to
+`UnmarshalSession` for cross-process recovery), then calls `Agent.Resume(ctx, sess, resp)` to
 continue from the suspended point — no extra round, no budget during the wait.
 
-- **ask_user**: `Effect{WaitInput: question}` → `EventState(StateWaiting)` + `EventWaitInput`;
-  the response is injected as the pending tool's structured result.
-- **Pause**: `Agent.Pause()` honored at gap points → `EventState(StatePaused)` + `EventPaused`;
-  `Resume(sess, "")` continues without injecting anything (no pending tool). A pause before a tool
+What `resp` (a `Response`) means is decided by `Session.Kind()`, never by the text of the answer:
+
+- **ask_user** (`WaitTool`): `Effect{WaitInput: question}` → `EventState(StateWaiting)` +
+  `EventWaitInput`; `Response{Answer: text}` is injected as the pending tool's structured result,
+  `Response{Deny: why}` records that call as failed — a refusal is a tool failure, not tool output.
+- **Pause** (`WaitPause`): `Agent.Pause()` honored at gap points → `EventState(StatePaused)` +
+  `EventPaused`; `Resume(sess, Response{})` continues without injecting anything (nothing was asked).
+  A pause before a tool
   keeps that tool (and the calls after it) in `Session.remaining`, so Resume runs them first.
-- **Membrane ask**: `Sandbox.Allow` or `Sandbox.Emit` returning `VerdictAsk` → the same
+- **Membrane ask** (`WaitCallAsk` / `WaitUtterance`): `Sandbox.Allow` or `Sandbox.Emit` returning
+  `VerdictAsk` → the same
   `EventState(StateWaiting)` + `EventWaitInput` pair (question from the ruling's reason, and an
-  `Emit` ask carries no `Call`); the response grammar matches ask_user.
-- `Agent.Resume` clears a stale pause request automatically; `Agent.Unpause()` only backs out a
-  pause request that has not taken effect yet.
+  `Emit` ask carries no `Call`); a `Deny` refuses with that reason, a non-empty `Answer` with no
+  `Deny` approves, and the zero `Response` declines — the answer is a ruling, not a string to match.
+- Resuming a pause backs out that pause request, so the resumed loop does not suspend again at its
+  first gap point; resuming any other suspension leaves a standing request alone. `Agent.Unpause()`
+  only backs out a pause request that has not taken effect yet.
 - The Session is single-use: resuming it twice re-executes the remaining tool calls (host
   responsibility). A pause never interrupts a running Think/Act: it is honored at a gap point.
 
@@ -316,6 +326,8 @@ agents stays with the host**.
   (`test/wiring_free_test.go` guards that boundary mechanically)
 - To connect agents, do it in the host: feed A's output into B's `Stimulate`, or register B as a
   tool of A
+- `Organs.ID` names one instance and has no default: `New` rejects an unnamed agent, because that
+  is the identity every event carries and every `Session` is checked against
 
 ## Development
 

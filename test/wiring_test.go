@@ -82,6 +82,27 @@ func TestWiringDiagramThroughFacade(t *testing.T) {
 	}
 }
 
+// TestNewRejectsAnonymousAgent: an agent that cannot name itself cannot
+// attribute its own events, and cannot tell whether a suspension handle is its
+// own. New aborts rather than handing every instance of a reused Blueprint the
+// same default name.
+func TestNewRejectsAnonymousAgent(t *testing.T) {
+	o := fullOrgans()
+	o.ID = ""
+	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
+		t.Fatal("New with no ID should error")
+	}
+	found := false
+	for _, is := range meowire.Validate(o, meowire.Config{}) {
+		if is.Level == meowire.LevelError && strings.Contains(is.Msg, "ID") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Validate should error about the unnamed agent")
+	}
+}
+
 // TestRenderDiagramThroughFacade: the ASCII graph renders through the
 // facade with headers, nodes and slot ids.
 func TestRenderDiagramThroughFacade(t *testing.T) {

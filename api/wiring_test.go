@@ -31,6 +31,7 @@ func fullHooks() *Hooks {
 
 func fullOrgans() Organs {
 	return Organs{
+		ID:      "test-agent",
 		Think:   testutil.Thinker{Fn: func(ctx context.Context, p *Prompt) (*Decision, error) { return &Decision{Text: "ok"}, nil }},
 		Act:     testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
 		Closer:  &testutil.Closer{},

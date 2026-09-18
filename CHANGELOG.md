@@ -5,7 +5,65 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.9] - 2026-09-18
+
+### Added
+
+- **The event line orders itself** — `Event.Seq` (1-based, strictly increasing per cell across
+  `Stimulate` and `Resume`) and `Event.TS` (Unix milliseconds) are stamped where `CellID` already
+  was: at the cell boundary, on every event, including the refusal a closed agent raises. A host
+  journaling one agent's stream can now tell "nothing happened" from "a record went missing", and a
+  log holding several agents can order each one's records without guessing. The event wire moves to
+  **version 2**: a journal written under version 1 is refused rather than reinterpreted, so a host
+  that kept v1 records reads them with the build that wrote them.
+- **A suspension names what it is asking for** — `Session.Kind()` reports the flavour
+  (`WaitPause` / `WaitTool` / `WaitCallAsk` / `WaitUtterance`, all named on the api surface).
+  `WaitInput.Call` + `WaitInput.Question` were the only clues, and they are identical for a tool
+  that asked the outside world and a membrane asking permission to run that tool — a host could not
+  render one a text box and the other a yes/no without remembering which organ it was waiting on.
+  The kind already rode the saved handle (name-encoded, version-guarded); it is now readable.
+
+### Changed
+
+- **`Resume` answers with a `Response`, not a string (Breaking)** — `Resume(ctx, sess, resp
+  Response)`, where `Response{Answer, Deny string}`. The string carried three meanings by prefix
+  sniffing: empty declined, a `[denied:` prefix denied with that text, anything else approved. So an
+  answer that happened to begin with the kernel's own denial marker was silently re-ruled as a
+  refusal — a host pasting back a log line, a quote, or a translated veto was not answering the
+  question it was asked — and a refusal of `ask_user` had nowhere to go except the pending tool's
+  **result** text, so the model read "the human said no" as output the tool produced. Now the two
+  intents are separate fields: `Deny` refuses (a tool wait records that call as failed in
+  `ToolResults.Err`, an ask gets `[sandbox-denied: reason]` feedback), `Answer` answers, and an
+  answer is never parsed for a directive inside it. The zero `Response` still declines both membrane
+  asks, so failing to answer still fails closed. Hosts migrate `Resume(sess, "")` →
+  `Resume(sess, Response{})`, `Resume(sess, "[denied: timeout]")` → `Resume(sess, Response{Deny:
+  "timeout"})`, and any other text → `Resume(sess, Response{Answer: text})`.
+- **`Organs.ID` is required — there is no default name** — `New` rejects an unnamed agent with an
+  error-level assembly finding, the same discipline as a missing organ. The default was `"agent"`,
+  and the documented multi-agent pattern is one `Blueprint` `New`ed many times: every instance
+  therefore shared one identity, and the guard that refuses a suspension handle belonging to another
+  cell (`ErrForeignSession`) silently no-ops between same-named siblings. `ID` is now what it always
+  claimed to be — the identity events are attributed to and a `Session` is checked against — and it
+  is the one `Organs` field to vary per `New`. Hosts that relied on the default must name each
+  instance.
+- **`Resume` clears only the pause it is answering** — resuming a pause-backed suspension backs out
+  that request; resuming a tool wait or either membrane ask leaves a standing pause request alone.
+  Previously any `Resume` cleared the flag, so an unrelated answer could silently swallow a `Pause()`
+  aimed at the loop that was running.
+
+### Fixed
+
+- **An answer to a call-ID-less tool wait is no longer dropped** — a suspension raised by a model
+  that omits `ToolCall.ID` (common outside the OpenAI-shaped providers) resumed with the response
+  discarded: the pending tool's `ToolResults` entry was skipped, so the loop went on thinking nobody
+  had answered. The injection now depends on the suspension's flavour alone, matching the executed
+  path, which never required an ID.
+- **`ErrCellClosed` is one value, matchable everywhere it appears** — a `Stimulate` or `Resume`
+  overtaken by `Close` yielded a text-only error the host could not identify: `errors.Is(ev.Err,
+  meowire.ErrCellClosed)` answered false on the framework's own refusal. The sentinel now lives in
+  the kernel, the api re-exports it (as it already did for `ErrMaxRounds` and `ErrForeignSession`),
+  it is in the event wire's name table so a journaled refusal comes back by identity, and the agent
+  keeps one closed flag instead of two that could disagree mid-call.
 
 ### Removed
 
@@ -78,7 +136,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Every event additionally carries `CellID`, stamped by the cell at its boundary, so one log can hold
   events from several agents and still say who spoke.
 - **`thinker-openai-go.md`** — 把 `Thinker` 接到一个真实 LLM SDK（`openai-go/v3`）的适配文档，
-  SDK 签名逐条对 module cache 源码核实：`Prompt` 13 个字段的完整落点表、
+  SDK 签名逐条对 module cache 源码核实：`Prompt` 11 个字段的完整落点表、
   `assistant(tool_calls)` 与 `tool` 必须成对这条承重约束的宿主侧做法（内核只回声 `ID/Name/Result/Err`）、
   两层重试不要相乘（SDK 默认 2 次 × 内核 `MaxRetries` 无退避重投）、`*openai.Error` 的断言形状、
   流式累加与**出口膜在整轮文本之后才裁决**的时序后果

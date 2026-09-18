@@ -11,7 +11,9 @@ import (
 	"slices"
 )
 
-// MethodSpec is a method specification (gene Method capability projection, describes only).
+// MethodSpec describes one built-in capability the agent has. The framework
+// never produces or interprets the list — the host composes it and the Thinker
+// renders it, so it describes only.
 type MethodSpec struct {
 	Name   string
 	Desc   string
@@ -25,7 +27,7 @@ type Prompt struct {
 	// Fixed part (set at construction, unchanged per cycle)
 	System   string       // System instructions (host injected)
 	Identity string       // Identity description text (host composed)
-	Methods  []MethodSpec // Built-in capability description (gene projection, describes only)
+	Methods  []MethodSpec // Built-in capability description (host composed, describes only)
 	Tools    []ToolSpec   // Available tool list (host defined)
 	Context  []string     // Context (host-injected base + sandbox denials; tool results live in ToolResults)
 	Bounds   string       // Execution boundary description (Sandbox.Bounds snapshot, host defined)
@@ -34,9 +36,10 @@ type Prompt struct {
 	Input string // Current stimulus text
 	Plan  string // Task plan/progress (host injected, brain can update)
 	// Reflection carries the host's reflexion note (e.g. a failure
-	// post-mortem from the previous attempt). Injected via BeforeStimulate /
-	// base assembly, passed through verbatim every round — the Reflexion
-	// loop's standard slot, so hosts never invent private prompt channels.
+	// post-mortem from the previous attempt). Injected via the
+	// BeforeStimulate prototype, passed through verbatim every round — the
+	// Reflexion loop's standard slot, so hosts never invent private prompt
+	// channels.
 	Reflection string
 
 	// Structured tool feedback accumulated within this cycle (see ToolResult).
@@ -123,7 +126,7 @@ type Action struct {
 // WaitInput, when non-empty, suspends the loop: the tool requests external
 // input (the field carries the question text). The loop yields
 // EventWaitInput with a Session snapshot and ends the iterator normally;
-// the host collects the input and resumes via Resume(sess, response). A
+// the host collects the input and hands it back as Resume's Response. A
 // WaitInput declared while err is non-nil wins over the error (it is an
 // explicit intent); a nil Effect is never treated as a suspension.
 type Effect struct {
@@ -135,10 +138,12 @@ type Effect struct {
 
 // WaitInput is the EventWaitInput payload: why the loop stopped for input and
 // the resume handle. The host saves Session and passes it back to Resume once
-// the answer arrives. Call and Question describe the flavour: a tool wait names
-// the tool and its question, a pre-execution membrane ask names the pending
-// call and the confirmation prompt, an utterance membrane ask carries no call at
-// all, and a pause carries neither.
+// the answer arrives. Call and Question describe what is being asked: a tool
+// wait names the tool and its question, a pre-execution membrane ask names the
+// pending call and the confirmation prompt, an utterance membrane ask carries no
+// call at all, and a pause carries neither. The two look-alike cases (a tool's
+// own question and a pre-execution confirmation) are told apart by
+// Session.Kind, which is also what says which Response field the answer needs.
 type WaitInput struct {
 	CellID   string
 	Call     ToolCall // the tool that requested input (zero for an utterance ask or a pause)
@@ -150,8 +155,9 @@ type WaitInput struct {
 // suspension point (round, accumulated context, remaining tool calls,
 // accumulated output, plan, input). It is produced by the framework inside
 // EventWaitInput and EventPaused and consumed by Resume; hosts only save it
-// and pass it back — its fields are unexported and must not be inspected or
-// mutated (persistence round-trips through Marshal/UnmarshalSession).
+// and pass it back — its fields are unexported, read only through the
+// accessors below, and never mutated (persistence round-trips through
+// Marshal/UnmarshalSession).
 // A Session belongs to the cell that suspended it: Resume rejects a handle
 // that another cell produced, because replaying it would run the first cell's
 // round on the second cell's organs. It is single-use too — resuming twice
@@ -167,18 +173,18 @@ type Session struct {
 	remaining   []ToolCall   // tool calls after the suspending one
 	toolResults []ToolResult // accumulated structured tool feedback at suspension
 	cell        string       // owning cell: Resume refuses a handle from another cell
-	kind        waitKind     // why the loop stopped for input
-	utterance   string       // withheld text, kind == waitUtterance
+	kind        WaitKind     // why the loop stopped for input
+	utterance   string       // withheld text, kind == WaitUtterance
 }
 
-// waitKind classifies one suspension — what the resumed response is for.
-type waitKind int
+// WaitKind classifies one suspension — what the resumed Response answers.
+type WaitKind int
 
 const (
-	waitPause     waitKind = iota // gap pause: nothing is being asked, the loop just waits
-	waitTool                      // a tool requested external input (response = its result)
-	waitCallAsk                   // the membrane asked before executing pending (tri-state resolve)
-	waitUtterance                 // the membrane asked before saying utterance (tri-state resolve)
+	WaitPause     WaitKind = iota // gap pause: nothing is being asked, the loop just waits
+	WaitTool                      // a tool requested external input (Response.Answer is its result)
+	WaitCallAsk                   // the membrane asked before executing pending (approve or deny)
+	WaitUtterance                 // the membrane asked before saying utterance (approve or deny)
 )
 
 // waitKindNames is the wire name of each suspension flavour, indexed by value:
@@ -186,14 +192,35 @@ const (
 // cannot silently reinterpret a saved handle.
 var waitKindNames = []string{"pause", "tool", "call-ask", "utterance-ask"}
 
+// Response is the answer a suspension asked for, or the reason it is refused.
+// Which field is read depends on what the handle suspended for (Session.Kind),
+// and the two are mutually exclusive: stating a refusal refuses the suspension
+// however the answer is worded.
+//
+//   - WaitTool: Answer becomes the pending tool's structured result; a non-empty
+//     Deny records the call as failed with that reason instead.
+//   - WaitCallAsk / WaitUtterance: Deny refuses — the pending call is not
+//     executed, the withheld draft is replaced by the denial — and an empty Deny
+//     with a non-empty Answer grants it, the Answer kept as the closing audit
+//     record's reason.
+//   - WaitPause: nothing is being asked, so neither field is read.
+//
+// The zero value is fail-closed wherever a refusal is possible: it declines both
+// membrane asks. A tool wait resumed with the zero value gets an empty answer,
+// which is what the host asked for by resuming it.
+type Response struct {
+	Answer string // what the question was answered with
+	Deny   string // non-empty = refuse it, for this reason
+}
+
 // wireName is the enum's JSON identity. "" means the value is not a flavour this
 // build knows, which Marshal refuses rather than writing out as a pause.
-func (k waitKind) wireName() string { return nameOf(waitKindNames, k) }
+func (k WaitKind) wireName() string { return nameOf(waitKindNames, k) }
 
 // waitKindOf decodes a wire name; an unknown name is reported as not-a-kind
 // (the caller rejects the handle rather than guessing a flavour).
-func waitKindOf(name string) (waitKind, bool) {
-	return valueOfName[waitKind](waitKindNames, name)
+func waitKindOf(name string) (WaitKind, bool) {
+	return valueOfName[WaitKind](waitKindNames, name)
 }
 
 // sessionVersion is the Session serialization format version. Bump it on
@@ -215,7 +242,7 @@ type sessionJSON struct {
 	Pending     ToolCall     `json:"pending"`
 	Remaining   []ToolCall   `json:"remaining"`
 	ToolResults []ToolResult `json:"toolResults"`
-	Ask         string       `json:"ask"`       // waitKind wire name
+	Ask         string       `json:"ask"`       // WaitKind wire name
 	Utterance   string       `json:"utterance"` // withheld text (ask == "utterance-ask")
 }
 
@@ -293,6 +320,14 @@ func UnmarshalSession(data []byte) (Session, error) {
 // and a zero-value Session has round 0. context may be nil (a host that
 // injects no base context) — Resume appends onto nil slices fine.
 func (s Session) valid() bool { return s.round >= 1 }
+
+// Kind reports what this handle suspended for, which is what tells a host the
+// shape of the Response Resume will read: an ask wants a ruling (its Question is
+// a yes/no), a tool wait wants content, a pause wants neither. The handle is the
+// authority on this — the same fact a host could infer from WaitInput.Call is
+// ambiguous between a tool's own question and a pre-execution confirmation, and
+// a handle restored from a journal has no wait event beside it at all.
+func (s Session) Kind() WaitKind { return s.kind }
 
 // RemainingCalls returns a clone of the tool calls still pending at the
 // suspension point (empty when nothing is left to run). Hosts use it in the

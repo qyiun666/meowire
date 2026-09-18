@@ -102,11 +102,18 @@ func TestUnmarshalSessionInvalidPayload(t *testing.T) {
 	}
 }
 
-// collectResume runs Resume and returns all yielded events.
+// collectResume runs Resume answering with response text and returns all yielded
+// events. Tests whose answer is content rather than a ruling use this; a test
+// about what a refusal means calls collectResponse directly.
 func collectResume(ctx context.Context, lc *LoopContext, sess Session, response string) []Event {
+	return collectResponse(ctx, lc, sess, Response{Answer: response})
+}
+
+// collectResponse runs Resume with an explicit Response and returns every event.
+func collectResponse(ctx context.Context, lc *LoopContext, sess Session, resp Response) []Event {
 	fillRequired(lc)
 	var events []Event
-	(DecisionLoop{}).Resume(ctx, lc, sess, response, func(e Event) bool {
+	(DecisionLoop{}).Resume(ctx, lc, sess, resp, func(e Event) bool {
 		events = append(events, e)
 		return true
 	})
@@ -279,6 +286,44 @@ func TestDecisionLoopResumeFeedbackForm(t *testing.T) {
 	}
 	if nextResults[0].ID != "t1" || nextResults[0].Name != "ask_user" || nextResults[0].Result != "yes" || nextResults[0].Err != "" {
 		t.Fatalf("post-resume ToolResults[0] = %+v, want t1/ask_user/Result=yes", nextResults[0])
+	}
+}
+
+// TestDecisionLoopResumeFeedbackFormWithoutCallID verifies a call-ID-less
+// suspension answers the same way: ToolCall.ID is whatever the model emitted,
+// and a provider that omits it must not cost the host its answer. The Name is
+// the identity that survives, exactly as on the executed path.
+func TestDecisionLoopResumeFeedbackFormWithoutCallID(t *testing.T) {
+	thinks := 0
+	var nextResults []ToolResult
+	lc := &LoopContext{
+		CellID: "c1",
+		Input:  "work",
+		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
+			thinks++
+			if thinks == 1 {
+				return &Decision{Text: "ask", ToolCalls: []ToolCall{{Name: "ask_user"}}}, nil
+			}
+			nextResults = append([]ToolResult(nil), p.ToolResults...)
+			return &Decision{Text: "final"}, nil
+		}},
+		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+			return &Effect{WaitInput: "q?"}, nil
+		}},
+	}
+	_, wait := runSuspendingCycle(t, lc)
+	if wait.Session.RemainingCalls() != nil && len(wait.Session.RemainingCalls()) != 0 {
+		t.Fatalf("remaining = %v, want none", wait.Session.RemainingCalls())
+	}
+	events := collectResume(context.Background(), lc, wait.Session, "yes")
+	if events[len(events)-1].Kind != EventDone {
+		t.Fatalf("last event = %+v, want EventDone; events: %v", events[len(events)-1], kindsOf(events))
+	}
+	if len(nextResults) != 1 {
+		t.Fatalf("post-resume ToolResults = %+v, want the answer injected despite the empty call ID", nextResults)
+	}
+	if nextResults[0].ID != "" || nextResults[0].Name != "ask_user" || nextResults[0].Result != "yes" {
+		t.Fatalf("post-resume ToolResults[0] = %+v, want /ask_user/Result=yes", nextResults[0])
 	}
 }
 

@@ -5,13 +5,15 @@
 package meowire
 
 import (
-	"errors"
-
 	"github.com/qyiun666/meowire/internal/nerve"
 )
 
-// ErrCellClosed is returned when Stimulate is called on a closed agent.
-var ErrCellClosed = errors.New("meow: agent closed")
+// ErrCellClosed is what every refusal of a closed agent carries: Stimulate and
+// Resume yield it as an EventError, Replace returns it. It is defined in the
+// kernel and re-exported here for the same reason as the two below — internal/
+// cannot be imported, so the errors.Is the documentation promises has to be
+// spelled against a value the host can actually name.
+var ErrCellClosed = nerve.ErrCellClosed
 
 // ErrMaxRounds is returned when the loop exhausts all rounds with pending tool calls.
 var ErrMaxRounds = nerve.ErrMaxRounds

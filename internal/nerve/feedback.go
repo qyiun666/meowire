@@ -60,7 +60,7 @@ func (b *actBatch) run() (waiting *WaitInput, ok bool) {
 		}
 		switch g.ruling {
 		case VerdictAsk:
-			w, yOk := b.suspend(suspension{pending: tc, remaining: b.calls[i+1:], question: g.question, kind: waitCallAsk})
+			w, yOk := b.suspend(suspension{pending: tc, remaining: b.calls[i+1:], question: g.question, kind: WaitCallAsk})
 			if !yOk {
 				return nil, false
 			}
@@ -122,7 +122,7 @@ func (b *actBatch) admitted(tc ToolCall, tail []ToolCall) (*WaitInput, bool) {
 	// never suspends. The suspending call gets no AfterAct/EventToolResult —
 	// its result arrives through Resume.
 	if eff != nil && eff.WaitInput != "" {
-		w, yOk := b.suspend(suspension{pending: tc, remaining: tail, question: eff.WaitInput, kind: waitTool})
+		w, yOk := b.suspend(suspension{pending: tc, remaining: tail, question: eff.WaitInput, kind: WaitTool})
 		if !yOk {
 			return nil, false
 		}

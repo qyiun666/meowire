@@ -12,10 +12,25 @@ import (
 // checks it at gap points (before each Think and before each tool execution);
 // a pending pause yields EventState(StatePaused) + EventPaused with a Session
 // snapshot and ends the iterator normally — the host resumes via
-// Resume(sess, ""), the same channel a tool wait uses.
+// Resume(sess, Response{}), the same channel a tool wait uses.
 type PauseGate struct {
 	// IsPaused reports whether a pause has been requested.
 	IsPaused func() bool
+	// Clear backs out the request. The loop calls it only when resuming a
+	// pause it just honored — an answered tool wait or membrane ask has no
+	// claim on a request aimed at whatever loop is running. Nil = the gate
+	// cannot be cleared.
+	Clear func()
+}
+
+// clearPauseRequest backs out a pause request the resumed suspension was
+// answering, so the loop does not immediately suspend again at its first gap
+// point. A loop without a gate, or with a gate that cannot be cleared, has
+// nothing to do here.
+func (lc *LoopContext) clearPauseRequest() {
+	if lc.Pause != nil && lc.Pause.Clear != nil {
+		lc.Pause.Clear()
+	}
 }
 
 // pause checks the gate at a gap point. When a pause is pending it yields
@@ -32,7 +47,7 @@ func (b *actBatch) pause(remaining []ToolCall) bool {
 	if !b.yield(Event{Kind: EventState, State: StatePaused}) {
 		return false
 	}
-	w := b.snapshot(suspension{remaining: remaining, kind: waitPause})
+	w := b.snapshot(suspension{remaining: remaining, kind: WaitPause})
 	lc.endWith(OutcomeSuspended) // a Resume will continue this cycle
 	if !b.yield(Event{Kind: EventPaused, Wait: w}) {
 		return false
@@ -48,8 +63,8 @@ type suspension struct {
 	pending   ToolCall
 	remaining []ToolCall
 	question  string
-	kind      waitKind
-	utterance string // withheld text (kind == waitUtterance)
+	kind      WaitKind
+	utterance string // withheld text (kind == WaitUtterance)
 }
 
 // snapshot freezes the loop state into a WaitInput handle — the single

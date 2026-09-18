@@ -72,7 +72,7 @@ func hookBeforeStimulate(ctx context.Context, lc *LoopContext) error {
 }
 
 // emitError sets the error state, yields EventState(StateError) + EventError,
-// then calls OnError hook if set (only when events are delivered normally;
+// then calls the OnError hook (only when events are delivered normally;
 // a consumer abort does not trigger OnError).
 // OnCycleEnd is guaranteed by Cycle's defer.
 // NOTE: callers always return immediately after calling emitError.
@@ -85,7 +85,5 @@ func emitError(ctx context.Context, lc *LoopContext, yield func(Event) bool, err
 	if !yield(Event{Kind: EventError, Err: err}) {
 		return
 	}
-	if lc.Hooks.OnError != nil {
-		lc.Hooks.OnError(ctx, err)
-	}
+	lc.Hooks.OnError(ctx, err)
 }

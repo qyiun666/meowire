@@ -140,9 +140,11 @@ func slotFilled(o Organs, id string) bool {
 // Validate compares a host assembly against the wiring blueprint and returns
 // all findings:
 //
-//   - error: a required slot is not wired, or a wired port is incomplete
+//   - error: a required slot is not wired, a wired port is incomplete
 //     (ContextBudget without a Trimmer / MaxTokens — a budget that does not
-//     trim is not a budget). New rejects these.
+//     trim is not a budget), or the agent is unnamed (Organs.ID is what events
+//     are attributed to and what a suspension handle is checked against). New
+//     rejects these.
 //   - info: notable defaults (empty Identity/Tools/Context, default rounds).
 //
 // Hosts call Validate at assembly/test time to surface info findings; New
@@ -172,12 +174,24 @@ func Validate(o Organs, cfg Config) []Issue {
 	// error: Budget present but incomplete — a trimmer per growing track is the
 	// organ's function and MaxTokens its limit; either missing means the budget
 	// cannot regulate what reaches the brain.
-	if o.Budget != nil && (o.Budget.Trimmer == nil || o.Budget.TrimResults == nil || o.Budget.MaxTokens <= 0) {
+	if o.Budget != nil && !nerve.CompleteBudget(o.Budget) {
 		issues = append(issues, Issue{
 			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "P6",
 			Msg:   "ContextBudget must have a Trimmer, a TrimResults and MaxTokens > 0 (a budget that does not trim both tracks is not a budget)",
+		})
+	}
+
+	// error: an unnamed agent. ID is the identity every event carries and every
+	// suspension handle is checked against; a default shared by all instances
+	// would hand one agent's handle to another, so the name is required rather
+	// than guessed.
+	if o.ID == "" {
+		issues = append(issues, Issue{
+			ID:    "assembly",
+			Level: LevelError,
+			Msg:   "Organs.ID is empty (an agent must name itself; the ID is what events are attributed to and what a Session is checked against)",
 		})
 	}
 

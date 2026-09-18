@@ -6,7 +6,6 @@ package meowire
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"sync/atomic"
@@ -16,12 +15,12 @@ import (
 )
 
 // Agent is the facade — the sole entry point for the host.
-// cell and closer are set once at construction and never replaced;
-// only closed and the pause state need synchronization.
+// cell and closer are set once at construction and never replaced; whether the
+// agent is open is the cell's fact (one flag, not a second copy that could
+// disagree with it mid-call), and only the pause request lives here.
 type Agent struct {
 	cell   *cell.Cell
 	closer Closer
-	closed atomic.Bool
 
 	paused atomic.Bool // pause request flag (atomic; consumed at gap points)
 }
@@ -40,18 +39,18 @@ const (
 // Replace swaps one runtime port (see the Slot* constants above; the blueprint
 // owns the set). It takes effect at the next Stimulate — each Stimulate builds
 // a fresh LoopContext, so an in-flight Stimulate keeps the ports it started
-// with. This is the dynamic-wiring counterpart of synaptic plasticity: hosts
-// swap organs between stimuli (another LLM, a stricter permission policy)
-// without rebuilding the agent. Closer is never swappable (resource
-// binding). Safe for concurrent use; after Close it refuses the swap and leaves
-// the incoming port untouched. Returns the previous port value (nil if none was
+// with. It is how a host changes its agent's mind or its policy between
+// stimuli — another LLM, a stricter permission membrane — without rebuilding
+// the agent. Closer is never swappable (it is the resource binding). Safe for
+// concurrent use; after Close it refuses the swap and leaves the incoming port
+// untouched. Returns the previous port value (nil if none was
 // set); wrong slot or port type returns an error. An incoming organ that
 // implements Bootable is brought up only once the slot has accepted it, and a
 // Boot failure leaves the wiring exactly as it was — a dead replacement never
 // takes effect mid-round, and a mistyped slot name never spends the organ's one
 // startup.
 func (a *Agent) Replace(slot string, port any) (any, error) {
-	if a.closed.Load() {
+	if a.cell.IsClosed() {
 		return nil, fmt.Errorf("meow: replace %s: %w", slot, ErrCellClosed)
 	}
 	if err := a.cell.CheckSwap(slot, port); err != nil {
@@ -74,13 +73,7 @@ func (a *Agent) Replace(slot string, port any) (any, error) {
 // the stop point do not execute (see doc.go: event stream & resume model).
 func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 	return func(yield func(Event) bool) {
-		closed := a.closed.Load()
-		c := a.cell
-		if closed {
-			yield(Event{Kind: EventError, Err: ErrCellClosed, CellID: c.ID})
-			return
-		}
-		for ev := range c.Stimulate(ctx, text) {
+		for ev := range a.cell.Stimulate(ctx, text) {
 			if !yield(ev) {
 				return
 			}
@@ -89,27 +82,25 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 }
 
 // Resume continues a suspended loop from the Session captured in an
-// EventWaitInput or EventPaused event: for a tool suspension (EventWaitInput)
-// the external response is injected as the pending tool's structured result
-// (a Prompt.ToolResults entry); for a pause suspension (EventPaused) the
-// response must be empty — the loop just continues. The suspended round's
-// remaining tool calls run first, then the round loop resumes from the
-// suspended round — the suspension consumes no extra round and no budget.
+// EventWaitInput or EventPaused event, answering it with the Response that
+// suspension asked for — Session.Kind says which field of the Response it reads
+// (see Response). For a tool suspension (EventWaitInput) the answer is injected
+// as the pending tool's structured result (a Prompt.ToolResults entry); for a
+// pause suspension (EventPaused) nothing is asked, so the Response is not read.
+// Resuming a pause backs out that pause request; resuming any other flavour
+// leaves a standing request alone, for whichever loop is running to honor at its
+// next gap point.
+// The suspended round's remaining tool calls run first, then the round loop
+// resumes from the suspended round — the suspension consumes no extra round
+// and no budget.
 // The event stream is isomorphic with Stimulate (same hooks, same
-// guarantees, same consumption model); timeouts are host-controlled
-// (resume with "[denied: timeout]"). The Session is single-use: resuming it
-// twice re-executes the remaining tool calls (host responsibility). Yields
-// ErrCellClosed after Close.
-func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.Seq[Event] {
+// guarantees, same consumption model); timeouts are host-controlled — refuse the
+// suspension with a Response stating why (Deny: "timeout"). The Session is
+// single-use: resuming it twice re-executes the remaining tool calls (host
+// responsibility). Yields ErrCellClosed after Close.
+func (a *Agent) Resume(ctx context.Context, sess Session, resp Response) iter.Seq[Event] {
 	return func(yield func(Event) bool) {
-		if a.closed.Load() {
-			yield(Event{Kind: EventError, Err: ErrCellClosed, CellID: a.cell.ID})
-			return
-		}
-		// Resuming is the intent to continue — clear any stale pause request
-		// so the resumed loop does not suspend again at its first gap point.
-		a.paused.Store(false)
-		for ev := range a.cell.Resume(ctx, sess, response) {
+		for ev := range a.cell.Resume(ctx, sess, resp) {
 			if !yield(ev) {
 				return
 			}
@@ -117,9 +108,10 @@ func (a *Agent) Resume(ctx context.Context, sess Session, response string) iter.
 	}
 }
 
-// ID returns the agent's cell identity, fixed at assembly: Organs.ID, or
-// "agent" when that was left empty. The host uses it to name this agent in its
-// own logs and routing; the framework only stamps events with it.
+// ID returns the agent's cell identity, fixed at assembly as Organs.ID (which
+// New requires to be non-empty). The host uses it to name this agent in its own
+// logs and routing; the framework stamps every event with it and checks every
+// suspension handle against it.
 func (a *Agent) ID() string { return a.cell.ID }
 
 // UpdateConfig swaps the scalar loop configuration wholesale (zero-value
@@ -131,9 +123,6 @@ func (a *Agent) ID() string { return a.cell.ID }
 // updates (a zero field resets to its default). Safe for concurrent use; a
 // no-op after Close.
 func (a *Agent) UpdateConfig(cfg Config) {
-	if a.closed.Load() {
-		return
-	}
 	a.cell.UpdateConfig(cfg)
 }
 
@@ -143,22 +132,17 @@ func (a *Agent) GetConfig() Config {
 }
 
 // Close shuts down the agent: subsequent Stimulate and Resume calls yield
-// ErrCellClosed and Replace refuses the swap.
+// ErrCellClosed and Replace refuses the swap. The host Closer runs once, on the
+// call that performed the transition.
 func (a *Agent) Close() error {
-	if !a.closed.CompareAndSwap(false, true) {
+	if !a.cell.Close() {
 		return nil
 	}
-	var errs []error
-	if err := a.cell.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("meow: cell: %w", err))
+	if a.closer == nil {
+		return nil
 	}
-	if a.closer != nil {
-		if err := a.closer.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("meow: closer: %w", err))
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	if err := a.closer.Close(); err != nil {
+		return fmt.Errorf("meow: closer: %w", err)
 	}
 	return nil
 }
@@ -166,10 +150,10 @@ func (a *Agent) Close() error {
 // Pause requests a pause. It takes effect at the next gap point (before a
 // Think or before a tool execution): the loop yields EventState(StatePaused)
 // + EventPaused with a Session snapshot and ends the iterator normally —
-// the host resumes via Resume(sess, ""). An in-flight Think/Act is not
+// the host resumes via Resume(sess, Response{}). An in-flight Think/Act is not
 // interrupted. Idempotent and safe for concurrent use; a no-op after Close.
 func (a *Agent) Pause() {
-	if a.closed.Load() {
+	if a.cell.IsClosed() {
 		return
 	}
 	a.paused.Store(true)
@@ -178,10 +162,10 @@ func (a *Agent) Pause() {
 // Unpause clears a pending pause request before it takes effect (the
 // counterpart of Pause). Once the loop has honored the pause (EventPaused
 // yielded with a Session), clearing the request does not resume it — the
-// host must call Resume(sess, ""). Idempotent and safe for concurrent use;
+// host must call Resume(sess, Response{}). Idempotent and safe for concurrent use;
 // a no-op after Close.
 func (a *Agent) Unpause() {
-	if a.closed.Load() {
+	if a.cell.IsClosed() {
 		return
 	}
 	a.paused.Store(false)
@@ -189,9 +173,11 @@ func (a *Agent) Unpause() {
 
 // pauseGate builds a PauseGate bound to this Agent's pause state. It is
 // injected into the cell at assembly; each Stimulate gets a fresh gate so a
-// pause requested mid-Stimulate is honored at the next gap point.
+// pause requested mid-Stimulate is honored at the next gap point. The loop
+// clears the request only when it resumes the pause that honored it.
 func (a *Agent) pauseGate() *nerve.PauseGate {
 	return &nerve.PauseGate{
 		IsPaused: a.paused.Load,
+		Clear:    func() { a.paused.Store(false) },
 	}
 }

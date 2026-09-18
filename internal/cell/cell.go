@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/qyiun666/meowire/internal/nerve"
 )
@@ -42,7 +43,8 @@ type Cell struct {
 	Context []string // Default context (host injected)
 
 	closed atomic.Bool
-	wireMu sync.Mutex // guards runtime-swappable ports, Config, and pendingReplace
+	seq    atomic.Uint64 // emission order of every event this cell lets out
+	wireMu sync.Mutex    // guards runtime-swappable ports, Config, and pendingReplace
 	// pendingReplace: port swap audits recorded by Replace, drained into the
 	// LoopContext of the next Stimulate/Resume (the moment the swap takes
 	// effect) and emitted as EventReplace.
@@ -61,9 +63,8 @@ type Cell struct {
 func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
 		yield = c.authored(yield)
-		closed := c.closed.Load()
-		if closed {
-			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
+		if c.IsClosed() {
+			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: stimulate: %w", nerve.ErrCellClosed)})
 			return
 		}
 		lc := c.snapshot(text)
@@ -80,12 +81,11 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 // snapshot, pending Replace audits, and config are taken exactly like
 // Stimulate — a concurrent Replace/UpdateConfig takes effect here, never
 // mid-flight.
-func (c *Cell) Resume(ctx context.Context, sess nerve.Session, response string) iter.Seq[nerve.Event] {
+func (c *Cell) Resume(ctx context.Context, sess nerve.Session, resp nerve.Response) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
 		yield = c.authored(yield)
-		closed := c.closed.Load()
-		if closed {
-			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: closed")})
+		if c.IsClosed() {
+			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: resume: %w", nerve.ErrCellClosed)})
 			return
 		}
 		lc := c.snapshot("")
@@ -93,16 +93,20 @@ func (c *Cell) Resume(ctx context.Context, sess nerve.Session, response string) 
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: nil Think or Act port")})
 			return
 		}
-		nerve.DecisionLoop{}.Resume(ctx, lc, sess, response, yield)
+		nerve.DecisionLoop{}.Resume(ctx, lc, sess, resp, yield)
 	}
 }
 
-// authored returns a yield that stamps every event with this cell's ID. The
-// loop yields many events from many places; authorship is the cell's fact, so
-// the cell owns it once at its boundary instead of every producer repeating it.
+// authored returns a yield that stamps every event with the facts of its
+// passage through this cell: which cell spoke, in what order, and when. The
+// loop yields from many places; these three belong to the boundary, so one
+// writer owns them and an event keeps them once it is journaled, replayed in
+// another process, or merged with another agent's stream.
 func (c *Cell) authored(yield func(nerve.Event) bool) func(nerve.Event) bool {
 	return func(e nerve.Event) bool {
 		e.CellID = c.ID
+		e.Seq = c.seq.Add(1)
+		e.TS = time.Now().UnixMilli()
 		return yield(e)
 	}
 }
@@ -165,7 +169,7 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 // moment the swap takes effect) — the counterpart of Replace's EventReplace
 // audit. Safe for concurrent use; a no-op after Close.
 func (c *Cell) UpdateConfig(cfg nerve.LoopConfig) {
-	if c.closed.Load() {
+	if c.IsClosed() {
 		return
 	}
 	c.wireMu.Lock()
@@ -240,7 +244,7 @@ var swapSlots = map[string]swapSpec{
 // trimmer and the limit must be positive.
 func assertBudget(p any) (any, error) {
 	b, ok := p.(*nerve.ContextBudget)
-	if !ok || b == nil || b.Trimmer == nil || b.TrimResults == nil || b.MaxTokens <= 0 {
+	if !ok || !nerve.CompleteBudget(b) {
 		return nil, fmt.Errorf("cell.Replace: budget: got %T, want a complete non-nil ContextBudget (Trimmer, TrimResults, MaxTokens > 0)", p)
 	}
 	return b, nil
@@ -271,8 +275,8 @@ func (c *Cell) Replace(slot string, port any) (any, error) {
 	}
 	c.wireMu.Lock()
 	defer c.wireMu.Unlock()
-	if c.closed.Load() {
-		return nil, fmt.Errorf("cell.Replace: cell %s is closed", c.ID)
+	if c.IsClosed() {
+		return nil, fmt.Errorf("cell.Replace: cell %s: %w", c.ID, nerve.ErrCellClosed)
 	}
 	spec := swapSlots[slot]
 	old := spec.load(c)
@@ -329,8 +333,14 @@ func completeHooks(h *nerve.Hooks) bool {
 		h.OnError != nil && h.OnCycleEnd != nil
 }
 
-// Close marks the cell as closed (idempotent).
-func (c *Cell) Close() error {
-	c.closed.Store(true)
-	return nil
+// Close marks the cell as closed and reports whether this call performed the
+// transition — the facade runs the host Closer exactly once, on that answer.
+// Idempotent and safe for concurrent use.
+func (c *Cell) Close() bool {
+	return c.closed.CompareAndSwap(false, true)
 }
+
+// IsClosed reports whether the cell has been closed. Every refusal an actor
+// asks of a closed cell carries nerve.ErrCellClosed, so the host matches the
+// condition by identity rather than by the wording of one call site.
+func (c *Cell) IsClosed() bool { return c.closed.Load() }

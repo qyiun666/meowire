@@ -237,7 +237,7 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 	if !ok {
 		t.Fatalf("no suspension in %v", j.kinds)
 	}
-	j.watch(a.Resume(ctx, sess, "confirmed"))
+	j.watch(a.Resume(ctx, sess, meowire.Response{Answer: "confirmed"}))
 
 	// The two runtime audits take effect on the next run, and the pause is
 	// honored at its first gap point — Replace, Config, State, Paused.
@@ -250,7 +250,7 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 	if !ok {
 		t.Fatalf("no pause in %v", j.kinds)
 	}
-	j.watch(a.Resume(ctx, paused, ""))
+	j.watch(a.Resume(ctx, paused, meowire.Response{}))
 
 	// The error arm: a loop that outlives its rounds while tools are pending.
 	b, err := testNew(testOrgans(meowire.Organs{

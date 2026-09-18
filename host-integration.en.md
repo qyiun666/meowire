@@ -52,13 +52,13 @@ type Thinker interface {
 | `Identity` | Identity description text (host composed, e.g. "You are meow, role assistant, warm tone") | Host, fixed at construction |
 | `Methods` | Built-in capability description (gene projection, describes only; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
 | `Tools` | Available tool list (function schemas) | Host, fixed at construction |
-| `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results no longer enter the text track | Host base + framework appends |
+| `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results never enter the text track | Host base + framework appends |
 | `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Reflection` | Self-review note from the previous round (Reflexion slot, passed through verbatim) | Host (write-back in `BeforeStimulate`) |
 | `Memories` | This round's recalled experience records (`Memory.Recall` output; replaced wholesale per round, never accumulated, never enters a Session snapshot) | Framework, before each Think |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
-| `Plan` | Task plan/progress text | Host, updatable via Hooks |
+| `Plan` | Task plan/progress text | Host, via `Hooks.BeforeThink` (`p.Plan` is pointer-writable, effective next round); pairs with a host `update_plan` tool for a closed loop (§7.3 ③) |
 
 **Return `Decision` fields:**
 
@@ -94,7 +94,7 @@ type Effector interface {
 | `Action.Call` | Tool call `{ID, Name, Args}`, `Args` is a JSON string |
 | `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the host's call) |
 | `Effect.Err` | Tool-side error text (truncated into `ToolResults.Err`; non-empty `Err` = the call failed) |
-| `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the response and calls `agent.Resume(sess, response)` (see §6.4) |
+| `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the answer and calls `agent.Resume(sess, meowire.Response{Answer: text})` (see §6.4) |
 | return error | Execution-layer error (also written to `ToolResults.Err`; the loop continues) |
 
 **Host responsibilities:**
@@ -102,8 +102,9 @@ type Effector interface {
 - Multi-agent tools live here: the `spawn_agent` tool itself `New`s an `Agent`, consumes
   its `Stimulate` stream and hands the result back as an ordinary `Effect.Result`
   (see §7.2) — the kernel never learns a second instance exists
-  (blocking drags the Close wait; the suspension is expressed by the framework so the
-  UI can show "the cat is waiting for an answer"), see §6.4
+- `ask_user`-style tools: **return `&Effect{WaitInput: question}` instead of blocking
+  synchronously** (blocking drags the Close wait; the suspension is expressed by the
+  framework so the UI can show "the cat is waiting for an answer"), see §6.4
 - Tool failures can be returned as `Effect{Err: ...}` instead of an error; both
   flow back as structured `ToolResults` entries and the loop continues
   (**resistance is feedback, not failure**)
@@ -130,18 +131,21 @@ agent.Unpause()   // clear a pause request that has not taken effect yet (back o
   the loop checks it at two gap points (before each Think, before each tool execution)
 - **Snapshot suspension (non-blocking)**: an honored pause yields
   `EventState(StatePaused)` → `EventPaused` (carrying a Session snapshot) and **ends
-  the iterator normally**; the host resumes via `agent.Resume(sess, "")` (empty
-  response — there is no pending tool to inject into) — the same Session/Resume path
-  as ask_user (LangGraph-interrupt-style single suspension primitive)
+  the iterator normally**; the host resumes via `agent.Resume(sess, meowire.Response{})`
+  (nothing is being asked, so neither Response field is read) — the same Session/Resume
+  path as ask_user (LangGraph-interrupt-style single suspension primitive)
 - **Tool-gap pause**: the pause point sits before the tool runs, so the snapshot records
   the current tool and the calls after it into Session.remaining; Resume runs them
   first, then re-enters Think (the current tool has not run yet — nothing is lost)
 - Pause state is **Agent-level and survives across Stimulate calls**: a Stimulate
   started while paused first suspends at its entry gap point (StatePaused + EventPaused)
 - `Pause` / `Unpause` are **idempotent and concurrency-safe**; no-ops after `Close`
-- **`Resume` clears the pause request automatically**: resuming is the intent to
-  continue, so the resumed loop does not suspend again at its first gap point;
-  `Unpause` is only for backing out before the pause takes effect
+- **`Resume` clears only the pause request it is answering**: resuming a pause is
+  the intent to continue, so that loop does not suspend again at its first gap point;
+  resuming any other flavour (tool input, either membrane ask) leaves a standing pause
+  request alone — it belongs to whichever loop is running, and an unrelated answer
+  swallowing it would be a silent loss. `Unpause` is only for backing out before the
+  pause takes effect
 - Difference from Step-Resume: Step-Resume abandons the round and restarts
   statelessly; Pause **keeps the in-cycle state (Session snapshot) and suspends
   in place**, resuming without consuming a round
@@ -294,7 +298,7 @@ o.Act     = meowire.FallbackEffector(localTools, remoteTools)  // one pair of ha
 
 ```go
 o := meowire.Organs{
-    ID:      "agent-001",                       // unique ID; empty = "agent"
+    ID:      "agent-001",                       // required, unique per live agent (no default)
     Think:   myThinker,                         // required
     Act:     myEffector,                        // required
     Closer:  myCloser,                          // required
@@ -315,7 +319,7 @@ o := meowire.Organs{
 
 | Field | Type | Content | Required |
 |-------|------|---------|----------|
-| `ID` | string | Unique agent ID; empty = `"agent"`. The framework only uses it to author events (`Event.CellID`); the host uses it to tell its own instances apart | no |
+| `ID` | string | Unique agent ID, **required with no default** — name each instance when one `Blueprint` is `New`ed many times; the framework authors events by it (`Event.CellID`) and checks suspension handles against it, and the host uses it to tell its own instances apart | **yes** |
 | `Think` | Thinker | LLM wrapper | **yes** |
 | `Act` | Effector | Tool execution | **yes** |
 | `Closer` | Closer | Resource cleanup | **yes** |
@@ -383,9 +387,9 @@ bp := meowire.Blueprint{Organs: organs, Config: cfg}
 agent, err := meowire.New(bp)
 ```
 
-- **Blueprint is define-once, assemble-many**: the same `bp` can `New` multiple independent Agent instances (flat-model multi-agent)
+- **Blueprint is define-once, assemble-many**: the same `bp` can `New` multiple independent Agent instances (flat-model multi-agent), but `Organs.ID` names one instance — every `New` must give it a different one
 - `New` validates against the **assembly graph** (blueprint = data-object nodes + slot edges), two levels only:
-  - `error` (missing required port / missing hook callback / incomplete Budget): **always blocks**, returns `meow: required port X not injected`
+  - `error` (missing required port / missing hook callback / incomplete Budget / empty `Organs.ID`): **always blocks**, returns `meow: required port X not injected`
     (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
   - `info` (empty Identity/Tools/Context, default rounds, ParallelActs without a concurrency-safe
     Effector): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
@@ -447,7 +451,7 @@ EventState(thinking) → [EventUsage] → EventSandbox(utterance ruling) → Eve
 
 ```
 … → EventState(paused) → EventPaused(Session snapshot) → iterator ends normally (no Done/Error)
-→ host calls Resume(sess, "") → remaining tools run first → back to EventState(thinking) → original sequence continues
+→ host calls Resume(sess, Response{}) → remaining tools run first → back to EventState(thinking) → original sequence continues
 ```
 
 **Suspension path (tool returns `Effect.WaitInput`; the iterator ends normally; see §6.4):**
@@ -462,7 +466,7 @@ EventState(thinking) → [EventUsage] → EventSandbox(utterance ruling) → Eve
 ```
 EventState(thinking) → [EventUsage] → EventSandbox(ask) → EventState(waiting)
   → EventWaitInput(question + withheld draft inside the Session, zero Call) → iterator ends normally
-→ host calls Resume(sess, answer) → EventSandbox(terminal) → EventText(draft as generated, or the veto text)
+→ host calls Resume(sess, Response{Answer: ...}) → EventSandbox(terminal) → EventText(draft as generated, or the veto text)
   → [that round's tools run as usual → back to EventState(thinking)] or [nothing left → EventState(done) → EventDone]
 ```
 
@@ -482,10 +486,13 @@ EventState(error) → EventError(Err)
 
 ### 6.2 `Event` fields (only the fields for the Kind are set; the rest are zero values)
 
-Two fields are not kind-specific: `CellID` names the cell that produced the event (stamped on every
-event at the cell boundary, including the error a closed agent raises), and `Dropped` names values
-that could not cross the event wire (§6.5) — the loop itself never fills it, so a non-empty
-`Dropped` means "this event was restored from a log".
+Three pieces of information are not kind-specific: `CellID` names the cell that produced the
+event, `Seq` gives its emission order **within that cell** (1-based, strictly increasing across
+Stimulate and Resume, restarting with the process) and `TS` is the emission moment (Unix
+milliseconds) — all three are stamped at the cell boundary, including the error a closed agent
+raises, so a journal can tell "this agent had nothing to say" from "a record went missing".
+`Dropped` names values that could not cross the event wire (§6.5) — the loop itself never fills
+it, so a non-empty `Dropped` means "this event was restored from a log".
 
 | Kind | Active field | Content |
 |------|--------------|---------|
@@ -497,8 +504,8 @@ that could not cross the event wire (§6.5) — the loop itself never fills it, 
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
 | `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
-| `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — three causes (a tool's own request: `Call` + question; a pre-execution confirmation: `Call` + question; an utterance confirmation: zero `Call` + question); the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, response)` |
-| `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty) — the host saves the Session and resumes via `agent.Resume(sess, "")` (the same channel every suspension uses) |
+| `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — the four flavours are named by `Session.Kind()` (`WaitTool` a tool's own request, `WaitCallAsk` a pre-execution confirmation, `WaitUtterance` an utterance confirmation, `WaitPause` a pause); `Call` + `Question` say who is asked, not which of the first two it is; the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, resp)` |
+| `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty, `Session.Kind() == WaitPause`) — the host saves the Session and resumes via `agent.Resume(sess, meowire.Response{})` (the same channel every suspension uses) |
 | `EventReplace` | `Replace *ReplaceAudit` | Port-swap audit: `ReplaceAudit{CellID, Slot, OldType, NewType}` — the swapped ports named by Go type, not held (the record outlives the swap and must stay serializable; `Replace` returns the previous port to the caller); emitted at the start of the next Stimulate/Resume (the moment the swap takes effect), persistable |
 | `EventConfig` | `Config *ConfigAudit` | Config-swap audit: `ConfigAudit{CellID, Old LoopConfig, New LoopConfig}`; emitted at the start of the next Stimulate/Resume after EventReplace, persistable |
 
@@ -564,9 +571,9 @@ for ev := range agent.Stimulate(ctx, "tidy the desktop") {
         go func() {                     // timeout is host-controlled (default deny)
             select {
             case ans := <-ui.Answer():
-                answerCh <- ans
+                answerCh <- meowire.Response{Answer: ans}
             case <-time.After(60 * time.Second):
-                answerCh <- "[denied: timeout]"
+                answerCh <- meowire.Response{Deny: "timeout"}
             }
         }()
     }
@@ -598,21 +605,26 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   and if nothing else was pending the cycle closes with Done
 - **Pause = the same suspension mechanism**: yields `EventState(StatePaused)` →
   `EventPaused` (Session snapshot, Call zero value) and ends the iterator normally;
-  `agent.Resume(sess, "")` continues without injecting anything (no pending tool); when
+  `agent.Resume(sess, meowire.Response{})` continues without injecting anything (nothing
+  was asked, so neither Response field is read); when
   the pause point is before a tool, the current tool is recorded in Session.remaining
   and Resume runs it first
 - **`Session` is an opaque value object** (snapshot of round/context/remaining tool calls/
-  accumulated output): the host only saves and returns it, never inspects it;
+  accumulated output): the host only saves and returns it, reading it through the
+  accessors below and never mutating it;
   **it belongs to the cell that suspended it** — `Resume` rejects a handle another cell
   returned (`ErrForeignSession`; replaying it would run A's round on B's organs);
   **single-use** — resuming twice re-executes the remaining tool calls (duplicate side
   effects; host responsibility)
-- **`sess.RemainingCalls()`**: the sole sanctioned read-only probe — a clone of
+- **`sess.Kind()`**: reports which flavour suspended the loop, which is what decides how
+  the Resume `Response` is read (`WaitTool` wants content, an ask wants a ruling, a pause
+  wants neither)
+- **`sess.RemainingCalls()`**: a clone of
   the calls not yet executed at the suspension point (empty when nothing is left): a
   pause snapshot keeps the whole unexecuted batch (Resume replays it); a WaitInput
   suspension inside a `ParallelActs` batch is empty (the batch fully executed — Resume
-  only injects the response, never replays)
-- **Persistence**: `sess.Marshal()` produces versioned JSON bytes (version 3 carries the
+  only injects the answer, never replays)
+- **Persistence**: `sess.Marshal()` produces versioned JSON bytes (the version carries the
   owning cell, the wait kind and the withheld draft); the host
   persists them; after a restart `meowire.UnmarshalSession(data)` restores the handle
   and Resume continues — suspensions and pauses recover across processes; a version
@@ -621,24 +633,26 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   the response uses the suspended round's quota (`MaxRounds` is not extra-consumed)
 - **No budget during the wait**: no Think happens while waiting, the trimmers are not called;
   it runs before the next Think after resume
-- **Response grammar (three-state ruling for both membrane asks, verbatim injection for ask_user)**:
-  **Sandbox asks** resolve by the three-state ruling: an **empty string** = deny (the call side
-  gets `[sandbox-denied: declined]` feedback, the text side gets that text in place of the draft);
-  a **`[denied:` prefix** = deny with that text (timeout recipe
-  `[denied: timeout]` as shown above; it lands in the canonical `[sandbox-denied: ...]`
-  form); **any other response** = approve — the pending call executes without re-gating, a
-  withheld draft is said as generated.
-  **ask_user** responses are written as the suspended call's structured result in `ToolResults`
+- **Answer grammar (one typed `Response`; `Session.Kind()` says which field it reads)**:
+  a **non-empty `Deny`** refuses, and the reason lands in the shape each flavour owns — the
+  call side gets `[sandbox-denied: reason]` feedback, the text side gets that text in place
+  of the draft, a tool's own question records the call as failed in `ToolResults.Err` (a
+  refusal is a tool failure, not tool output); an **empty `Deny` with a non-empty
+  `Answer`** approves — the pending call executes without re-gating, a withheld draft is
+  said as generated. The **zero `Response`** declines
+  (`[sandbox-denied: declined]`), so not answering fails closed.
+  **ask_user** answers are written as the suspended call's structured result in `ToolResults`
   (`ID` = the call's `call_xxx`), visible to the first Think after resume — an empty
-  string is an empty result; a denial is expressed in the response text itself — the
-  `[denied: timeout]` recipe lands as tool feedback the model reads.
-  Timeouts are host-controlled (default deny)
+  `Answer` is an empty result. An answer is never parsed for a directive inside it: text the
+  host put in `Answer` stays text even when it begins with `[denied:`.
+  Timeouts are host-controlled (default deny: `Response{Deny: "timeout"}`)
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think
 - **Resume hooks are identical to Stimulate** (`BeforeStimulate` fires as usual; with
   host append semantics `Session.Context` merges naturally with retrieval results);
-  `Close` makes Resume yield `ErrCellClosed`; `Session` is an in-memory handle — it
-  dies on host restart (treat as timeout-deny)
+  `Close` makes Resume yield `ErrCellClosed`; `Session` is an in-memory handle — surviving
+  a process restart is what `Marshal()` + `UnmarshalSession()` are for (see Persistence);
+  a handle that was never saved is treated as timeout-deny
 - **Division of labor with `BeforeThink`**: `BeforeThink` rewrites this round's
   Prompt (it replaces `p.Context` as a whole slice); `Resume` injects the suspension response (structured result in `ToolResults`) — no overlap
 
@@ -657,7 +671,7 @@ ev, err := meowire.DecodeEvent(line)
 - Every record carries `WireEvent.Version`; a mismatch is rejected, never read as a close enough
   match. Kinds, states and membrane rulings travel **by name**, so reordering an enum in a new
   release cannot silently reinterpret a log written by the last one
-- `EventError` identity: a framework sentinel (`ErrMaxRounds`, `ErrForeignSession`) comes back as
+- `EventError` identity: a framework sentinel (`ErrMaxRounds`, `ErrForeignSession`, `ErrCellClosed`) comes back as
   the identical value — wrapped text included, so `errors.Is` still holds. Any other error (a host's
   own `rate limited`) returns as the same **text** only, and the event lists `err.identity` in
   `Dropped` — the loss is reported instead of hiding behind a false comparison
@@ -690,7 +704,8 @@ or an extra neighbour-facing field on `Organs`, fails the build).
 **Flat model**: one `Agent` = one kernel, and the host owns every instance. Sub-agents are
 created inside host Effector tools (`New(bp) → Stimulate → consume the stream`), transparent to
 the main loop; if A must wait for B, make B a tool of A. One `Blueprint` can `New` many times,
-but each instance shares its `Organs.Context` slice and `Hooks` closures, so a second agent
+but `Organs.ID` names the instance (events are attributed to it and a Session is checked against
+it) and each instance shares its `Organs.Context` slice and `Hooks` closures, so a second agent
 overrides them per instance (see [reference-host.md](reference-host.md) Step 8).
 
 ### 7.3 Multi-agent state visibility: the host-side trio
@@ -940,7 +955,7 @@ func main() {
    same Agent is stimulated concurrently
 3. **Host ports must respect ctx cancellation**; `ask_user` must never block
    inside Effector (framework-level suspension protocol, §6.4) — the host-side
-   wait timeout is self-controlled (default deny `[denied: timeout]`)
+   wait timeout is self-controlled (default deny: `Resume(sess, Response{Deny: "timeout"})`)
 4. **`Organs.Context` is a slice**: update it to the latest history via
    `BeforeThink` before each Think (MemHop)
 5. **`ErrMaxRounds` is not a bug**: it fires when the last round has pending
@@ -970,6 +985,8 @@ func main() {
 | README (zh-CN) | [README.zh-CN.md](README.zh-CN.md) | Chinese quick start + concept overview |
 | Host Integration Guide (zh-CN) | [host-integration.md](host-integration.md) | Chinese integration contract |
 | Reference Host (zh-CN) | [reference-host.md](reference-host.md) | Step-by-step runnable AI host (LLM, tools, permissions, memory, multi-agent, persistence) |
+| Thinker Adapter (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) (zh-CN) | Field-by-field `Thinker` adaptation to a real LLM SDK (`openai-go/v3`) |
+| Protocol Mapping Guide | [protocols.md](protocols.md) (zh-CN) | Host-side mapping to MCP / A2A / AGENTS.md / Authority |
 | api module context | [api/agent.md](api/agent.md) | Long-term api package context, key decisions, pitfalls |
 | Decision loop source | [internal/nerve/loop.go](internal/nerve/loop.go) | Loop orchestration (Think→Act→yield) |
 | Integration tests | [test/](test/) | End-to-end behavior (lifecycle, port injection, event sequences) |

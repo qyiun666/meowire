@@ -6,6 +6,7 @@ package cell
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/qyiun666/meowire/internal/nerve"
@@ -79,7 +80,8 @@ func TestCellStimulate(t *testing.T) {
 	}
 }
 
-// TestCellClose verifies Close marks the cell as closed.
+// TestCellClose verifies Close marks the cell as closed and reports which call
+// did it — the facade runs the host Closer exactly once, on that answer.
 func TestCellClose(t *testing.T) {
 	c := newTestCell(t,
 		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
@@ -90,18 +92,19 @@ func TestCellClose(t *testing.T) {
 		}},
 	)
 
-	if c.closed.Load() {
+	if c.IsClosed() {
 		t.Fatal("cell should not be closed initially")
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if !c.Close() {
+		t.Fatal("the first Close must report that it closed the cell")
 	}
-	if !c.closed.Load() {
+	if !c.IsClosed() {
 		t.Fatal("cell should be closed after Close()")
 	}
 }
 
-// TestCellCloseIdempotent verifies Close can be called multiple times without error.
+// TestCellCloseIdempotent verifies Close can be called repeatedly and only the
+// call that performed the transition reports it.
 func TestCellCloseIdempotent(t *testing.T) {
 	c := newTestCell(t,
 		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
@@ -112,14 +115,126 @@ func TestCellCloseIdempotent(t *testing.T) {
 		}},
 	)
 
-	if err := c.Close(); err != nil {
-		t.Fatalf("first close: %v", err)
+	if !c.Close() {
+		t.Fatal("first Close must report the transition")
 	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
+	if c.Close() {
+		t.Fatal("second Close must report that the cell was already closed")
 	}
-	if !c.closed.Load() {
+	if !c.IsClosed() {
 		t.Fatal("cell should be closed")
+	}
+}
+
+// TestClosedCellRefusesByIdentity verifies every refusal a closed cell makes
+// carries the framework sentinel. The host matches "this agent is closed" with
+// errors.Is and cannot import internal/, so the value must be the one the api
+// re-exports — not a per-site message that only looks like one.
+func TestClosedCellRefusesByIdentity(t *testing.T) {
+	c := newTestCell(t,
+		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+			return &nerve.Decision{Text: "ok"}, nil
+		}},
+		testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+			return &nerve.Effect{Result: "ok"}, nil
+		}},
+	)
+	c.Close()
+
+	var evs []nerve.Event
+	for ev := range c.Resume(context.Background(), nerve.Session{}, nerve.Response{}) {
+		evs = append(evs, ev)
+	}
+	if len(evs) != 1 || evs[0].Kind != nerve.EventError {
+		t.Fatalf("resume on a closed cell = %+v, want one EventError", evs)
+	}
+	if !errors.Is(evs[0].Err, nerve.ErrCellClosed) {
+		t.Fatalf("closed-cell resume err = %v, want it to match nerve.ErrCellClosed", evs[0].Err)
+	}
+
+	if _, err := c.Replace("think", testutil.Thinker{}); !errors.Is(err, nerve.ErrCellClosed) {
+		t.Fatalf("Replace after Close = %v, want it to match nerve.ErrCellClosed", err)
+	}
+}
+
+// TestStimulateAfterCloseYieldsSentinel is the focused half of the identity
+// contract above: the yielded EventError must match the sentinel.
+func TestStimulateAfterCloseYieldsSentinel(t *testing.T) {
+	c := newTestCell(t,
+		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+			return &nerve.Decision{Text: "ok"}, nil
+		}},
+		testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+			return &nerve.Effect{Result: "ok"}, nil
+		}},
+	)
+	c.Close()
+
+	var evs []nerve.Event
+	for ev := range c.Stimulate(context.Background(), "go") {
+		evs = append(evs, ev)
+	}
+	if len(evs) != 1 || evs[0].Kind != nerve.EventError {
+		t.Fatalf("stimulate on a closed cell = %+v, want one EventError", evs)
+	}
+	if !errors.Is(evs[0].Err, nerve.ErrCellClosed) {
+		t.Fatalf("closed-cell event err = %v, want it to match nerve.ErrCellClosed", evs[0].Err)
+	}
+	// The wire is where identity has to survive a process: a journaled
+	// refusal must come back matchable, not as text.
+	b, err := nerve.EncodeEvent(evs[0])
+	if err != nil {
+		t.Fatalf("EncodeEvent: %v", err)
+	}
+	back, err := nerve.DecodeEvent(b)
+	if err != nil {
+		t.Fatalf("DecodeEvent: %v", err)
+	}
+	if !errors.Is(back.Err, nerve.ErrCellClosed) {
+		t.Fatalf("restored event err = %v, want the sentinel back by identity (dropped: %v)", back.Err, back.Dropped)
+	}
+}
+
+// TestCellStampsSequence verifies the cell stamps every event it lets out with
+// an emission order and an emission moment, and that the count keeps running
+// across invocations. The pair is what lets a host's journal tell "a record of
+// this agent is missing" from "this agent had nothing to say".
+func TestCellStampsSequence(t *testing.T) {
+	c := newTestCell(t,
+		testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+			return &nerve.Decision{Text: "ok"}, nil
+		}},
+		testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+			return &nerve.Effect{Result: "ok"}, nil
+		}},
+	)
+
+	var seq []uint64
+	var ts []int64
+	for _, text := range []string{"one", "two"} {
+		for ev := range c.Stimulate(context.Background(), text) {
+			seq = append(seq, ev.Seq)
+			ts = append(ts, ev.TS)
+		}
+	}
+	if len(seq) < 4 {
+		t.Fatalf("events = %d, want a stream long enough to order", len(seq))
+	}
+	for i, s := range seq {
+		if s == 0 {
+			t.Fatalf("event %d carries no Seq: the cell must stamp emission order", i)
+		}
+		if i > 0 && s <= seq[i-1] {
+			t.Fatalf("Seq %d did not follow %d: emission order must strictly increase", s, seq[i-1])
+		}
+	}
+	for i, m := range ts {
+		if m <= 0 {
+			t.Fatalf("event %d carries no emission moment (TS = %d)", i, m)
+		}
+		if i > 0 && m < ts[i-1] {
+			t.Fatalf("TS went backwards: %d after %d", m, ts[i-1])
+		}
 	}
 }
 
@@ -191,7 +306,7 @@ func textOf(c *Cell, input string) string {
 }
 
 // TestCellReplaceThink: swapping the Think port takes effect at the next
-// Stimulate and returns the previous port (dynamic wiring / plasticity).
+// Stimulate and returns the previous port (dynamic wiring).
 func TestCellReplaceThink(t *testing.T) {
 	first := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
 		return &nerve.Decision{Text: "old-brain"}, nil
@@ -252,8 +367,8 @@ func TestCellReplaceAfterClose(t *testing.T) {
 	c := newTestCell(t, think, testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
 		return &nerve.Effect{Result: "ok"}, nil
 	}})
-	if err := c.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if !c.Close() {
+		t.Fatal("Close must report the transition")
 	}
 	old, err := c.Replace("think", testutil.Thinker{})
 	if err == nil || old != nil {

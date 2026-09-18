@@ -70,13 +70,7 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 		}
 		switch g.ruling {
 		case VerdictAsk:
-			tail := make([]ToolCall, 0, len(b.calls)-1)
-			for j, other := range b.calls {
-				if j != i && !denied[j] {
-					tail = append(tail, other)
-				}
-			}
-			w, yOk := b.suspend(suspension{pending: tc, remaining: tail, question: g.question, kind: waitCallAsk})
+			w, yOk := b.suspend(suspension{pending: tc, remaining: askTail(b.calls, i, denied), question: g.question, kind: WaitCallAsk})
 			return nil, w, !yOk
 		case VerdictDeny:
 			if !b.refuse(tc, deniedText(g.reason)) {
@@ -94,6 +88,20 @@ func (b *actBatch) gatePhase() (batch []batchEntry, suspended *WaitInput, stop b
 		}
 	}
 	return batch, nil, false
+}
+
+// askTail collects the snapshot tail an ask suspends with: every sibling that
+// is neither the asked call itself (that one is pending) nor already refused
+// (its feedback landed in place). Siblings behind the ask were never gated, so
+// they ride the tail unexecuted.
+func askTail(calls []ToolCall, skip int, denied []bool) []ToolCall {
+	tail := make([]ToolCall, 0, len(calls)-1)
+	for j, other := range calls {
+		if j != skip && !denied[j] {
+			tail = append(tail, other)
+		}
+	}
+	return tail
 }
 
 // execPhase runs one goroutine per admitted call, at most lc.MaxParallelActs of
@@ -154,7 +162,7 @@ func (b *actBatch) feedbackPhase(batch []batchEntry, results []batchOutcome) (*W
 	if suspendAt < 0 {
 		return nil, true
 	}
-	w, yOk := b.suspend(suspension{pending: batch[suspendAt].call, question: results[suspendAt].eff.WaitInput, kind: waitTool})
+	w, yOk := b.suspend(suspension{pending: batch[suspendAt].call, question: results[suspendAt].eff.WaitInput, kind: WaitTool})
 	if !yOk {
 		return nil, false
 	}

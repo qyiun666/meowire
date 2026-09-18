@@ -12,7 +12,7 @@ type LoopContext struct {
 	CellID   string
 	Identity string
 
-	// Built-in capability description (gene projection, describes only)
+	// Built-in capability description (host composed, describes only)
 	Methods []MethodSpec
 
 	// Required ports
@@ -59,8 +59,8 @@ type LoopContext struct {
 	System string
 	Tools  []ToolSpec
 
-	// Reflection slot (host injected via BeforeStimulate write-back /
-	// base assembly): the Reflexion note passed through to every Think.
+	// Reflection slot (host injected via the BeforeStimulate write-back):
+	// the Reflexion note passed through to every Think.
 	Reflection string
 
 	// Memories is this round's recall output: replaced wholesale before every

@@ -32,6 +32,7 @@ func fullHooks() *meowire.Hooks {
 // eight hook callbacks + a working ContextBudget trimmer).
 func fullOrgans() meowire.Organs {
 	return meowire.Organs{
+		ID: "test-agent",
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
 			return &meowire.Decision{Text: "ok"}, nil
 		}},
@@ -204,28 +205,6 @@ func TestOrgansID(t *testing.T) {
 	}
 	if gotCellID != "wired" {
 		t.Fatalf("CellID = %q, want %q", gotCellID, "wired")
-	}
-}
-
-// TestDefaultID verifies an empty ID defaults to "agent".
-func TestDefaultID(t *testing.T) {
-	var gotCellID string
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
-		}},
-		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
-			gotCellID = a.CellID
-			return &meowire.Effect{Result: "ok"}, nil
-		}},
-	}), meowire.Config{})
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	for range a.Stimulate(context.Background(), "work") {
-	}
-	if gotCellID != "agent" {
-		t.Fatalf("CellID = %q, want default %q", gotCellID, "agent")
 	}
 }
 

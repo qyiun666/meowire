@@ -27,7 +27,7 @@ func kinds(events []meowire.Event) []meowire.EventKind {
 
 // TestAgentPauseResumeMidLoop verifies Pause() takes effect at the next gap
 // point (before a tool execution): the loop yields StatePaused + EventPaused
-// with a Session and ends the iterator; Resume(sess, "") continues the loop
+// with a Session and ends the iterator; Resume(sess, Response{}) continues the loop
 // (unified suspension-resume path).
 func TestAgentPauseResumeMidLoop(t *testing.T) {
 	calls := 0
@@ -75,9 +75,13 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 		t.Fatalf("last event = %+v, want EventPaused (iterator ends on the pause); events: %v", last, kinds(events))
 	}
 
-	// The paused loop continues via Resume(sess, "") — no Unpause needed.
+	// The paused loop continues via Resume(sess, Response{}) — no Unpause needed,
+	// and the handle says for itself that this was the pause flavour.
+	if got := sess.Kind(); got != meowire.WaitPause {
+		t.Fatalf("Session.Kind() = %d, want meowire.WaitPause", got)
+	}
 	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, "") {
+	for ev := range a.Resume(context.Background(), sess, meowire.Response{}) {
 		if ev.Kind == meowire.EventDone {
 			gotDone = true
 		}
@@ -117,13 +121,64 @@ func TestAgentPauseSuspendsNewStimulate(t *testing.T) {
 
 	// Resume continues the suspended run (Resume clears the pause request).
 	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, "") {
+	for ev := range a.Resume(context.Background(), sess, meowire.Response{}) {
 		if ev.Kind == meowire.EventDone {
 			gotDone = true
 		}
 	}
 	if !gotDone {
 		t.Fatal("expected EventDone after Resume from entry pause")
+	}
+}
+
+// TestResumeOfToolWaitKeepsPauseRequest verifies resuming one suspension does
+// not consume a pause request aimed at the agent as a whole. A pause belongs to
+// whichever loop is running; answering an unrelated tool wait has no claim on
+// it, so the resumed round must honor the request at its next gap point instead
+// of running to Done with the operator's stop swallowed.
+func TestResumeOfToolWaitKeepsPauseRequest(t *testing.T) {
+	thinks := 0
+	a, err := testNew(testOrgans(meowire.Organs{
+		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
+			thinks++
+			if thinks == 1 {
+				return &meowire.Decision{Text: "ask", ToolCalls: []meowire.ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
+			}
+			return &meowire.Decision{Text: "final"}, nil
+		}},
+		Act: testutil.Effector{Fn: func(ctx context.Context, act meowire.Action) (*meowire.Effect, error) {
+			return &meowire.Effect{WaitInput: "question?"}, nil
+		}},
+	}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer a.Close()
+
+	var sess meowire.Session
+	var sawWait bool
+	for ev := range a.Stimulate(context.Background(), "work") {
+		if ev.Kind == meowire.EventWaitInput {
+			sess, sawWait = ev.Wait.Session, true
+		}
+	}
+	if !sawWait {
+		t.Fatal("the tool did not suspend the loop")
+	}
+
+	a.Pause() // stop requested while the tool wait is outstanding
+
+	var sawPaused, sawDone bool
+	for ev := range a.Resume(context.Background(), sess, meowire.Response{Answer: "yes"}) {
+		switch ev.Kind {
+		case meowire.EventPaused:
+			sawPaused = true
+		case meowire.EventDone:
+			sawDone = true
+		}
+	}
+	if sawDone || !sawPaused {
+		t.Fatalf("resumed stream: paused=%v done=%v, want the pending pause honored (done must not be reached)", sawPaused, sawDone)
 	}
 }
 

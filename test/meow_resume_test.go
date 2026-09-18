@@ -8,7 +8,6 @@ package meowire_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	meowire "github.com/qyiun666/meowire/api"
@@ -48,11 +47,16 @@ func TestAgentResumeFlow(t *testing.T) {
 	if !gotWait {
 		t.Fatal("no EventWaitInput yielded")
 	}
+	// The handle itself tells a host what it is waiting on, through the public
+	// surface: without this a host cannot tell which Response field it is filling.
+	if got := sess.Kind(); got != meowire.WaitTool {
+		t.Fatalf("Session.Kind() = %d, want meowire.WaitTool", got)
+	}
 
 	// Resume with the external response; the stream is isomorphic and the
 	// loop completes normally.
 	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, "yes") {
+	for ev := range a.Resume(context.Background(), sess, meowire.Response{Answer: "yes"}) {
 		if ev.Kind == meowire.EventDone {
 			gotDone = true
 		}
@@ -62,7 +66,11 @@ func TestAgentResumeFlow(t *testing.T) {
 	}
 }
 
-// TestAgentResumeAfterClose verifies Resume after Close yields ErrCellClosed.
+// TestAgentResumeAfterClose verifies Resume after Close yields an EventError
+// that matches ErrCellClosed. It matches by identity, not by value: the kernel
+// wraps its sentinel with the call site, and the api cannot import internal/,
+// so errors.Is against the re-exported value is the only way a host can name
+// this condition.
 func TestAgentResumeAfterClose(t *testing.T) {
 	a, err := testNew(testOrgans(meowire.Organs{
 		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
@@ -75,14 +83,23 @@ func TestAgentResumeAfterClose(t *testing.T) {
 	if err := a.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	var gotErr bool
-	for ev := range a.Resume(context.Background(), meowire.Session{}, "x") {
-		if ev.Kind == meowire.EventError && ev.Err == meowire.ErrCellClosed {
-			gotErr = true
+	var refused error
+	for ev := range a.Resume(context.Background(), meowire.Session{}, meowire.Response{Answer: "x"}) {
+		if ev.Kind == meowire.EventError {
+			refused = ev.Err
 		}
 	}
-	if !gotErr {
-		t.Fatal("Resume after Close: want ErrCellClosed")
+	if !errors.Is(refused, meowire.ErrCellClosed) {
+		t.Fatalf("Resume after Close yielded %v, want it to match ErrCellClosed", refused)
+	}
+	var stimErr error
+	for ev := range a.Stimulate(context.Background(), "go") {
+		if ev.Kind == meowire.EventError {
+			stimErr = ev.Err
+		}
+	}
+	if !errors.Is(stimErr, meowire.ErrCellClosed) {
+		t.Fatalf("Stimulate after Close yielded %v, want it to match ErrCellClosed", stimErr)
 	}
 }
 
@@ -146,7 +163,7 @@ func TestAgentUpdateConfigTakesEffect(t *testing.T) {
 	// MaxRounds=2 → 2 thinks, then ErrMaxRounds.
 	var gotMaxRounds bool
 	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventError && strings.Contains(ev.Err.Error(), "max rounds") {
+		if ev.Kind == meowire.EventError && errors.Is(ev.Err, meowire.ErrMaxRounds) {
 			gotMaxRounds = true
 		}
 	}
@@ -162,7 +179,7 @@ func TestAgentUpdateConfigTakesEffect(t *testing.T) {
 	cfg.MaxRounds = 4
 	a.UpdateConfig(cfg)
 	for ev := range a.Stimulate(context.Background(), "again") {
-		if ev.Kind == meowire.EventError && strings.Contains(ev.Err.Error(), "max rounds") {
+		if ev.Kind == meowire.EventError && errors.Is(ev.Err, meowire.ErrMaxRounds) {
 			gotMaxRounds = true
 		}
 	}
@@ -246,7 +263,7 @@ func TestForeignSessionIsMatchableAtTheFacade(t *testing.T) {
 	}
 
 	var refused error
-	for ev := range other.Resume(ctx, sess, "yes") {
+	for ev := range other.Resume(ctx, sess, meowire.Response{Answer: "yes"}) {
 		if ev.Kind == meowire.EventError {
 			refused = ev.Err
 		}
