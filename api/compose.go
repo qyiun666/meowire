@@ -10,14 +10,12 @@ package meowire
 import "github.com/qyiun666/meowire/internal/nerve"
 
 // Organ combinators (composition, not routing — the framework never learns
-// which member answered).
+// which member answered). The brain has no combinator: it is the bundled
+// organ, and there is nothing behind it to compose.
 var (
 	// GuardStack rules as one membrane: Deny beats Ask beats Allow, and the
 	// first Deny short-circuits the layers behind it.
 	GuardStack = nerve.GuardStack
-	// FallbackThinker tries brains in order until one answers; an execution
-	// error moves on, all failures are reported together.
-	FallbackThinker = nerve.FallbackThinker
 	// FallbackEffector tries tool ports in order until one executes; a tool
 	// that ran and refused (Effect.Err) is a result and never retried elsewhere.
 	FallbackEffector = nerve.FallbackEffector
@@ -30,5 +28,6 @@ var (
 type Bootable = nerve.Bootable
 
 // PortOrder reports the sequence the framework brings the required host ports
-// up in (blueprint order: Think, Act, Closer, Hooks, Sandbox, Budget, Mem).
+// up in (blueprint order: Act, Closer, Hooks, Sandbox, Budget, Mem — the brain
+// is built, not booted).
 func PortOrder() []string { return nerve.PortOrder() }

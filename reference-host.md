@@ -8,25 +8,24 @@
 ## 0. 心智模型（先读，30 秒）
 
 - **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间的一切通信（channel/HTTP/Redis 任选，框架不持有路由表）。
-- 框架只给循环（Think → Act → yield 事件流）；**LLM、工具、权限、记忆全是宿主实现**——七端口全部必填，没有默认实现。
+- 框架给循环（Think → Act → yield 事件流）和**内置大脑**（`Organs.Brain` 传参即得）；工具、权限、记忆是宿主实现——六端口 + Brain 参数全部必填，其余器官没有默认实现。
 - 宿主只需要掌握三个方法：`New`（装配）、`Stimulate`（跑一轮）、`Close`（关闭）。
 - **框架侧没有任何需要宿主持久化的自主变化值**：需要落盘的全是宿主自己的东西——历史/计划（`Organs.Context`）、记忆端口后面的库、以及 §8.3 的事件 WAL。
 - 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§9）。
 
-## 1. 步骤总览（8 步）
+## 1. 步骤总览（7 步）
 
 | 步骤 | 做什么 | 产出 |
 |------|--------|------|
 | 1 | 建项目，装 meowire | `go.mod` + 目录 |
-| 2 | 写 LLM 客户端（OpenAI 兼容，标准库实现） | `llm.go` |
-| 3 | **实现 Thinker**（核心：Prompt → messages → Decision） | `thinker.go` |
-| 4 | 实现 Effector（工具注册表 + 分发） | `effector.go` |
-| 5 | 实现 Sandbox（权限门）+ ContextBudget（两轨调节器） | `guards.go` |
-| 6 | 实现 Memory 端口（Recall/Remember）+ Hooks | `memory.go` |
-| 7 | 组装 Blueprint，New + 事件循环 | `main.go` |
-| 8 | 扩展多 agent（宿主组合多实例）+ 事件日志（状态外化） | `multi.go` |
+| 2 | **填 Brain 参数**（内置大脑：BaseURL/Key/Model/Stream/Mode——Mode 选 wire，默认 chat） | 无需写文件 |
+| 3 | 实现 Effector（工具注册表 + 分发） | `effector.go` |
+| 4 | 实现 Sandbox（权限门）+ ContextBudget（两轨调节器） | `guards.go` |
+| 5 | 实现 Memory 端口（Recall/Remember）+ Hooks | `memory.go` |
+| 6 | 组装 Blueprint，New + 事件循环 | `main.go` |
+| 7 | 扩展多 agent（宿主组合多实例）+ 事件日志（状态外化） | `multi.go` |
 
-每步代码都可独立编译。最终完整代码约 500 行。
+每步代码都可独立编译。最终完整代码约 300 行（LLM 对接已由框架内置）。
 
 ---
 
@@ -40,268 +39,40 @@ go get github.com/qyiun666/meowire
 ```
 myhost/
 ├── go.mod
-├── main.go        # 组装 + 运行（Step 7）
-├── llm.go         # LLM 客户端（Step 2）
-├── thinker.go     # Thinker 端口（Step 3）
-├── effector.go    # Effector 端口（Step 4）
-├── guards.go      # Sandbox + ContextBudget（Step 5）
-└── memory.go      # Memory 端口 + Hooks（Step 6）
+├── main.go        # 组装 + 运行（Step 6）
+├── effector.go    # Effector 端口（Step 3）
+├── guards.go      # Sandbox + ContextBudget（Step 4）
+└── memory.go      # Memory 端口 + Hooks（Step 5）
 ```
 
 ---
 
-## Step 2：LLM 客户端（OpenAI 兼容）
+## Step 2：填 Brain 参数（内置大脑）
 
-用标准库 `net/http` 实现，零第三方依赖（宿主想用官方 SDK 也可以，接口一样）。任何 OpenAI 兼容端点都可用：`https://api.openai.com/v1`、DeepSeek、Ollama（`http://localhost:11434/v1`）、Qwen 等，换 `baseURL` + `apiKey` 即可。
+LLM 对接已由框架内置：`internal/brain` 是全仓唯一 import openai-go 的包，宿主经
+`Organs.Brain` 传四个参数，组合根构造注入——不写 Thinker、不写 LLM 客户端、不 import
+任何 SDK。
 
 ```go
-// llm.go
-package main
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"time"
-)
-
-// ---- 与 LLM API 交互的最小结构 ----
-
-type chatMsg struct {
-	Role    string          `json:"role"` // system / user / assistant / tool
-	Content string          `json:"content"`
-	Tools   []toolCallMsg   `json:"tool_calls,omitempty"` // assistant 回复中的工具调用
-	ToolID  string          `json:"tool_call_id,omitempty"`
-	Name    string          `json:"name,omitempty"`
-}
-
-type toolCallMsg struct {
-	ID       string   `json:"id"`
-	Type     string   `json:"type"`
-	Function toolFunc `json:"function"`
-}
-
-type toolFunc struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // JSON 字符串
-}
-
-// function schema（对应 meowire.ToolSpec 的投影）
-type funcSchema struct {
-	Type       string         `json:"type"`                 // "function"
-	Function   funcDetail     `json:"function"`
-}
-
-type funcDetail struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"` // 直接内嵌 ToolSpec.Input 的 JSON Schema（见 Step 3 的 toolSchemas）
-}
-
-type chatRequest struct {
-	Model    string      `json:"model"`
-	Messages []chatMsg   `json:"messages"`
-	Tools    []funcSchema `json:"tools,omitempty"` // 无工具时省略（部分厂商空数组会报错）
-}
-
-type chatResp struct {
-	Choices []struct {
-		Message chatMsg `json:"message"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
-}
-
-// llmClient：OpenAI 兼容 chat/completions 客户端
-type llmClient struct {
-	baseURL string // 如 https://api.openai.com/v1
-	apiKey  string
-	model   string
-	http    *http.Client
-}
-
-func newLLMClient(baseURL, apiKey, model string) *llmClient {
-	return &llmClient{
-		baseURL: baseURL, apiKey: apiKey, model: model,
-		http: &http.Client{Timeout: 120 * time.Second},
-	}
-}
-
-// Chat 发起一次非流式补全。ctx 取消时立即返回（Thinker 依赖它响应框架取消）。
-func (c *llmClient) Chat(ctx context.Context, msgs []chatMsg, tools []funcSchema) (*chatResp, error) {
-	body, _ := json.Marshal(chatRequest{Model: c.model, Messages: msgs, Tools: tools})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("llm: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("llm: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("llm: status %d: %s", resp.StatusCode, b)
-	}
-	var out chatResp
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("llm: decode: %w", err)
-	}
-	return &out, nil
+brain := meowire.BrainConfig{
+    BaseURL: os.Getenv("LLM_BASE_URL"), // 空 = 官方 OpenAI 端点；DeepSeek/Ollama/Qwen 换这里
+    Key:     os.Getenv("LLM_API_KEY"),
+    Model:   os.Getenv("LLM_MODEL"),
+    Stream:  true, // SSE 传输（可选）
 }
 ```
 
-**坑**：`resp.Body` 必须读完再关（这里是 decode 读完）；`ctx` 必须传 `NewRequestWithContext`，否则框架取消 Think 时你的 HTTP 请求不会中断。
+流式增量（可选）：`ctx = meowire.WithSink(ctx, sink)` 挂在 `Stimulate` 的 context 上，
+delta 在出口膜裁决之前送达；`EventText`（整段、已过膜）到达时整段替换已推内容。
+
+大脑把 `Prompt` 的 11 个字段渲染成 messages、把回复折成 `Decision`（含工具调用与
+token 用量），被膜拒掉的调用以 `[sandbox-denied: ...]` 走 Context 轨、配对从
+`ToolResults` 单批重建。逐字段行为与协议坑（版本差异、累加器、错误形状）见
+[thinker-openai-go.md](thinker-openai-go.md)——那是内置大脑的实现规格。
 
 ---
 
-## Step 3：Thinker —— AI 对接核心（本文重点）
-
-Thinker 的职责一句话：**把 `meowire.Prompt` 渲染成 LLM messages，把 LLM 回复翻译成 `meowire.Decision`**。框架只认这两个数据包，中间全部宿主自由发挥。
-
-```go
-// thinker.go
-package main
-
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-
-	meowire "github.com/qyiun666/meowire/api"
-)
-
-type thinker struct {
-	client *llmClient
-}
-
-func (t *thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err // 已取消就直接退，不白打 API
-	}
-	msgs := buildMessages(p)
-	tools := toolSchemas(p.Tools)
-	resp, err := t.client.Chat(ctx, msgs, tools)
-	if err != nil {
-		return nil, err // 框架会按 Config.MaxRetries 重试，并最终作为 EventError 透出
-	}
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("thinker: empty choices")
-	}
-	m := resp.Choices[0].Message
-
-	// 翻译：LLM 的工具调用 → meowire.ToolCall{ID, Name, Args}
-	var calls []meowire.ToolCall
-	for _, tc := range m.Tools {
-		calls = append(calls, meowire.ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
-	}
-
-	return &meowire.Decision{
-		Text:      m.Content,
-		ToolCalls: calls, // 空 = 循环结束（没有工具要调）
-		Usage: &meowire.Usage{
-			Prompt:     resp.Usage.PromptTokens,
-			Completion: resp.Usage.CompletionTokens,
-			Total:      resp.Usage.TotalTokens,
-		}, // 返回 nil 则跳过 EventUsage 计费事件
-	}, nil
-}
-```
-
-### Prompt → messages 渲染规则（宿主可自由定制，这里是推荐做法）
-
-| Prompt 字段 | 渲染为 | 说明 |
-|---|---|---|
-| `System` | `system` 消息 | 系统指令（角色、行为规则） |
-| `Identity` | 追加进 `system` | 身份描述文本 |
-| `Bounds` | 追加进 `system` | 执行边界（"只能访问 /workspace"）——让大脑知道限制 |
-| `Methods` | 追加进 `system` | 内置能力声明（只描述不执行） |
-| `Tools` | `tools` 参数 | function schema（Step 3 下） |
-| `Context` | 多条 `system`/`user` | 记忆基底 + 框架追加的 sandbox 裁决（工具结果不在文本轨） |
-| `ToolResults` | 追加进 `user` | 结构化工具结果（`[tool_call_id=xxx]` 标记条目，见下）——框架唯一反馈轨道，必须渲染 |
-| `Memories` | 追加进 `system` 或前置 `user` | 本轮召回结果（宿主决定编排位置；每轮整体替换，不累积） |
-| `Reflection` | 追加进 `system` | 宿主在 `BeforeStimulate` 写的本轮复盘笔记（空 = 无） |
-| `Input` | `user` 消息 | 本次刺激 |
-| `Plan` | 追加进 `user` | 任务计划 |
-
-上表是 `Prompt` 的**完整**字段清单：漏渲染哪个字段，那个器官这一轮就没有说话。
-下面的 `buildMessages` 只演示骨架（省略了后四个的拼接），逐字段落地见
-[thinker-openai-go.md](thinker-openai-go.md) §2。
-
-```go
-func buildMessages(p *meowire.Prompt) []chatMsg {
-	var sys bytes.Buffer // 需要 import bytes
-	fmt.Fprintf(&sys, "%s\n\n%s\n\n执行边界：%s", p.System, p.Identity, p.Bounds)
-	for _, m := range p.Methods {
-		fmt.Fprintf(&sys, "\n能力：%s — %s", m.Name, m.Desc)
-	}
-	msgs := []chatMsg{{Role: "system", Content: sys.String()}}
-	for _, c := range p.Context {
-		msgs = append(msgs, chatMsg{Role: "system", Content: "[上下文] " + c})
-	}
-	// 工具结果：结构化条目（user 内联，带 tool_call_id 标记）。
-	// 想升级为原生 tool 角色消息（OpenAI 系要求历史 assistant 消息
-	// 含对应 tool_calls）时，以 ID 关联即可——ID 已由框架透传。
-	var fb bytes.Buffer
-	for _, tr := range p.ToolResults {
-		if tr.Err != "" {
-			fmt.Fprintf(&fb, "\n[tool_call_id=%s][tool-result %s] error: %s", tr.ID, tr.Name, tr.Err)
-		} else {
-			fmt.Fprintf(&fb, "\n[tool_call_id=%s][tool-result %s] %s", tr.ID, tr.Name, tr.Result)
-		}
-	}
-	if fb.Len() > 0 {
-		msgs = append(msgs, chatMsg{Role: "user", Content: "[工具结果]" + fb.String()})
-	}
-	userText := p.Input
-	if p.Plan != "" {
-		userText += "\n[当前计划] " + p.Plan
-	}
-	msgs = append(msgs, chatMsg{Role: "user", Content: userText})
-	return msgs
-}
-```
-
-### Tools → function schema（`ToolSpec.Input` 本来就是 JSON Schema，直接内嵌）
-
-```go
-func toolSchemas(tools []meowire.ToolSpec) []funcSchema {
-	out := make([]funcSchema, 0, len(tools))
-	for _, t := range tools {
-		out = append(out, funcSchema{
-			Type: "function",
-			Function: funcDetail{
-				Name:        t.Name,
-				Description: t.Desc,
-				Parameters:  json.RawMessage(t.Input), // 原样内嵌 JSON Schema，LLM 据此生成参数
-			},
-		})
-	}
-	return out
-}
-```
-
-`ToolSpec.Input` 约定就是 JSON Schema 字符串（如 `{"type":"object","properties":{...}}`）。**本参考实现的手写客户端不需要转换**——JSON 原文进、原文出（`Parameters: json.RawMessage(t.Input)`）；换成 openai-go 这类结构化 SDK 时，每轮把 Schema 文本 `json.Unmarshal` 进 `FunctionParameters`（见 [thinker-openai-go.md](thinker-openai-go.md) §5）。参考 Step 7 的 `ToolSpec` 写法。
-
-**Thinker 的四个铁律：**
-1. **必须监控 `ctx.Done`**——长请求可能被框架取消（Close、宿主取消）；Pause 从不阻塞迭代器（快照挂起，EventPaused 后正常结束），不会通过 ctx 取消来中断暂停
-2. **流式输出在 Thinker 内部消费**（如推 WebSocket/SSE）；事件流的 `EventText` 永远整段文本
-3. **`ToolCalls` 为空 = 循环结束**——如果 LLM 没调工具也没给文本，会得到空输出但正常结束
-4. **并发安全**：同一 Agent 并发 `Stimulate` 时 Thinker 被并发调用（`llmClient` 无共享可变状态，天然安全）
-
----
-
-## Step 4：Effector —— 工具分发器
+## Step 3：Effector —— 工具分发器
 
 ```go
 // effector.go
@@ -337,11 +108,11 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 | `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归宿主 |
 | `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试；最终错误同样写入 `ToolResults.Err` |
 
-`spawn_agent` 这类工具在这里实现：工具自己 `New` 一个 `Agent`、消费它的 `Stimulate`、把最终输出作为普通 `Effect.Result` 交回主循环，见 Step 8。
+`spawn_agent` 这类工具在这里实现：工具自己 `New` 一个 `Agent`、消费它的 `Stimulate`、把最终输出作为普通 `Effect.Result` 交回主循环，见 Step 7。
 
 ---
 
-## Step 5：Sandbox + ContextBudget —— 两个守卫
+## Step 4：Sandbox + ContextBudget —— 两个守卫
 
 ```go
 // guards.go
@@ -420,7 +191,7 @@ func trimResults(rs []meowire.ToolResult, max int) []meowire.ToolResult {
 
 ---
 
-## Step 6：Memory 端口 + Hooks（经验回灌）
+## Step 5：Memory 端口 + Hooks（经验回灌）
 
 框架不存储记忆，但它规定**两个时点**：每轮 Think 前 `Recall`、每次调用的终点 `Remember`（P7，必填端口）。检索算法、写什么、留多久都在器官里。文本轨（`p.Context`）另由钩子注入（H1/H3），与 P7 的结构化轨分属两轨。
 
@@ -492,7 +263,7 @@ func buildHooks() *meowire.Hooks {
 
 ---
 
-## Step 7：组装 + 运行
+## Step 6：组装 + 运行
 
 ```go
 // main.go
@@ -502,20 +273,33 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time" // ToolTimeout 用
 
 	meowire "github.com/qyiun666/meowire/api"
 )
 
+var (
+	baseURL = envOr("LLM_BASE_URL", "") // 空 = 官方端点
+	apiKey  = os.Getenv("LLM_API_KEY")
+	model   = envOr("LLM_MODEL", "gpt-4o-mini")
+)
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+
 func main() {
-	client := newLLMClient("https://api.openai.com/v1", "sk-xxx", "gpt-4o-mini")
 	mem := &hostMemory{}
 
-	// ① Blueprint 一次定义 → 多 agent 复用（Step 8 的关键）
+	// ① Blueprint 一次定义 → 多 agent 复用（Step 7 的关键）
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 			ID:      "agent-main",
-			Think:   &thinker{client: client},
+			Brain:   meowire.BrainConfig{BaseURL: baseURL, Key: apiKey, Model: model, Stream: true},
 			Act:     &effector{registry: toolRegistry()},
 			Closer:  &noopCloser{},
 			Hooks:   buildHooks(),
@@ -604,7 +388,7 @@ func toolRegistry() map[string]toolFn {
 
 ---
 
-## Step 8：多 agent（宿主组合多实例）+ 事件日志
+## Step 7：多 agent（宿主组合多实例）+ 事件日志
 
 ### 8.1 多 agent = 多次 New（复用同一 Blueprint）
 
@@ -614,7 +398,7 @@ func toolRegistry() map[string]toolFn {
 func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
 	bp.Organs.ID = id
 	bp.Organs.Context = []string{}          // 每个 agent 独立历史
-	bp.Organs.Hooks = buildHooks()          // 钩子只管文本轨；记忆是端口（见 Step 6）
+	bp.Organs.Hooks = buildHooks()          // 钩子只管文本轨；记忆是端口（见 Step 5）
 	ag, err := meowire.New(bp)
 	if err != nil {
 		log.Fatal(err)
@@ -685,13 +469,13 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 
 ## 9. 集成注意事项（细节与坑）
 
-### LLM 对接
+### LLM 对接（内置大脑）
 
-1. **无工具时不要传 `tools` 参数**——部分厂商（Ollama 等）空数组报错；`toolSchemas` 返回空时省略字段
+1. **无工具时大脑自动省略 `tools` 字段**——部分厂商（Ollama 等）对空数组报错，内置大脑已处理
 2. **`ToolSpec.Input` 必须是合法 JSON Schema 字符串**——LLM 按它生成参数；写错 Schema 会导致工具调用 JSON 解析失败
 3. **LLM 返回的 `arguments` 是 JSON 字符串**，Effector 侧必须 `json.Unmarshal`；解析失败返回 `Effect{Err: ...}` 让 LLM 自我纠正（阻力是反馈）
-4. **流式输出在 Thinker 内部转发**（WebSocket/SSE/hub channel），事件流只承载整段 `EventText`——见 [host-integration.md §7.3](host-integration.md)
-5. **Thinker 必须响应 `ctx.Done`**：HTTP 用 `NewRequestWithContext`，SDK 用带 ctx 的方法；否则取消/暂停超时无法中断
+4. **流式增量走 `WithSink`**（挂在 Stimulate 的 ctx 上，先于出口膜裁决送达；`EventText` 整段到达时替换已推内容）——见 [host-integration.md §7.3](host-integration.md)
+5. **ctx 全程透传**：大脑与工具都吃 `Stimulate` 的 ctx；取消/暂停超时靠它落地
 
 ### 循环语义
 
@@ -732,6 +516,6 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 | 文档 | 位置 | 内容 |
 |------|------|------|
 | 契约权威 | [host-integration.md](host-integration.md) | 所有接口签名、字段语义、事件序列、陷阱清单 |
-| Thinker 适配 | [thinker-openai-go.md](thinker-openai-go.md) | 把 `Thinker` 接到 `openai-go/v3` 的逐字段适配（本文 `llm.go` 手写客户端的 SDK 对照版） |
+| 大脑规格 | [thinker-openai-go.md](thinker-openai-go.md) | 内置大脑的逐字段落点表与协议参考 |
 | 协议映射 | [protocols.md](protocols.md) | MCP / A2A / AGENTS.md / Authority / 长时任务状态外化 |
 | 动态接线 | [wiring.md](host-integration.md#51-动态接线-replace运行时换器官) | `Replace` 运行时换端口 |

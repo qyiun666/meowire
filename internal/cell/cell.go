@@ -208,11 +208,6 @@ func wantPort[T any](slot, want string, port any) (T, error) {
 }
 
 var swapSlots = map[string]swapSpec{
-	"think": {
-		assert: func(p any) (any, error) { return wantPort[nerve.Thinker]("think", "non-nil nerve.Thinker", p) },
-		load:   func(c *Cell) any { return c.Think },
-		store:  func(c *Cell, v any) { c.Think = v.(nerve.Thinker) },
-	},
 	"act": {
 		assert: func(p any) (any, error) { return wantPort[nerve.Effector]("act", "non-nil nerve.Effector", p) },
 		load:   func(c *Cell) any { return c.Act },

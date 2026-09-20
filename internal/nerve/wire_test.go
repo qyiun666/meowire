@@ -48,7 +48,7 @@ func TestEveryTargetIDResolves(t *testing.T) {
 }
 
 // TestConnectomeCoversAllSlots verifies the blueprint describes every
-// framework slot: six required ports, eight hooks, two built-ins.
+// framework slot: six required host ports, eight hooks, three built-ins.
 func TestConnectomeCoversAllSlots(t *testing.T) {
 	bp := Connectome()
 	byID := make(map[string]WirePoint, len(bp))
@@ -56,9 +56,9 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 		byID[wp.ID] = wp
 	}
 	want := []string{
-		"P1", "P2", "P3", "P4", "P5", "P5b", "P5c", "P6", "P6b", "P7", "P7b", // ports
+		"P2", "P3", "P4", "P5", "P5b", "P5c", "P6", "P6b", "P7", "P7b", // ports
 		"H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", // hooks
-		"F1", "G1", // framework built-ins
+		"F1", "F2", "G1", // framework built-ins (F2 = the bundled brain)
 	}
 	for _, id := range want {
 		if _, ok := byID[id]; !ok {
@@ -68,14 +68,16 @@ func TestConnectomeCoversAllSlots(t *testing.T) {
 }
 
 // TestConnectomeRequiredPorts verifies every wiring point is required: the
-// seven Organs ports, the eight hooks (all required since 1.2.0 — explicit
-// no-op, not absence) and the framework-built-in F1. Implied sub-slots ride
+// six Organs ports, the eight hooks (all required since 1.2.0 — explicit
+// no-op, not absence) and the framework built-ins F1 and F2 (the brain is
+// always wired; its parameters are checked by name). Implied sub-slots ride
 // their parent port.
 func TestConnectomeRequiredPorts(t *testing.T) {
 	required := map[string]bool{
-		"P1": true, "P2": true, "P3": true, "P4": true, "P5": true, "P6": true, "P7": true,
+		"P2": true, "P3": true, "P4": true, "P5": true, "P6": true, "P7": true,
 		"H1": true, "H2": true, "H3": true, "H4": true, "H5": true, "H6": true, "H7": true, "H8": true,
 		"F1": true, // built-in, always active
+		"F2": true, // the bundled brain, always wired
 	}
 	for _, wp := range Connectome() {
 		if wp.Required != required[wp.ID] {

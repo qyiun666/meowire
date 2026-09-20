@@ -1,18 +1,23 @@
 # Meowire
 
-Go 语言仿生 agent 编排基座 —— **纯装配，零默认实现。**
+Go 语言仿生 agent 编排基座 —— **自带大脑的骨架。**
 
 Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负责编排（Think → Act → 产出事件），
-其余全部交给你：LLM、工具、记忆、安全策略。框架不绑架你的技术栈 —— 只有一个干净、零依赖、
-值得信赖的循环。
+大脑随框架出厂（一个传参数就位、不用自己实现的 openai-go 客户端），其余交给你：
+工具、记忆、安全策略。框架不绑架你的技术栈 —— 只有一个干净、值得信赖的循环。
 
 > 需要 Go 1.27+（使用 `iter.Seq`）。
 
 ## 为什么选择 Meowire
 
-- **智能由你掌控。** Meowire 不提供 LLM 适配器、工具框架或记忆后端 —— 它注入七个宿主端口，
+- **大脑以参数到位。** `Organs.Brain{BaseURL, Key, Model, Stream, Mode}` 一填，组合根就把
+  内置的 openai-go 大脑构造好注入 —— 你不写 Thinker、不 import 任何 SDK；`Mode` 选 wire：
+  默认（零值同 1）走 chat completions，`BrainModeResponses` 走 Responses API，两根 wire 渲染同一份
+  无状态 Prompt、折回同一个 Decision；内核（循环、事件、端口）依旧纯标准库，provider 词汇止步于唯一一个内部包。
+- **其余由你掌控。** Meowire 不提供工具框架或记忆后端 —— 它注入六个宿主端口，
   期待你来实现它们。框架从不掩盖 agent 实际做了什么。
-- **零依赖。** 仅标准库。没有需要审计的传递依赖树。
+- **一枚依赖，锚死版本。** `github.com/openai/openai-go/v3`，锁 v3.61.0（选它是决策，
+  升它也是决策，从不自动跟随）；其余全是标准库。
 - **小巧可读。** 生产码约 4000 行（测试另计约 8500 行）。决策循环按关注点分文件（`internal/nerve/`：loop、gate、pause、retry、feedback、parallel）。
 - **内部完全封闭。** 所有实现位于 `internal/` 下 —— Go 编译器保证唯一可 import 的对外表面是
   `api/` 包（`New` / `Stimulate` / `Close` + 契约类型）。
@@ -31,16 +36,20 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **接线图检视** —— `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` 把装配视为
   图（数据对象节点 + 插槽边），供人或机器渲染
 - **动态接线（运行期换器官）** —— `Agent.Replace(slot, port)` 运行时替换
-  `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
-  每次成功替换以 `EventReplace` 在下次 Stimulate/Resume 开头审计产出
+  `Act`/`Sandbox`/`Budget`/`Mem`/`Hooks`；下次 `Stimulate` 生效，飞行中的 `Stimulate` 保留原端口；
+  每次成功替换以 `EventReplace` 在下次 Stimulate/Resume 开头审计产出。大脑没有插槽：
+  换模型是换参数重新 `New`，不是运行期换件
 - **运行期配置热更新** —— `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` 热调
   `MaxRounds` 等标量限制，免整 Agent 重建
-- **七个宿主注入端口，全部必填**（无 stub、无可选器官——内核不认识「邻居」，跨实例的事归宿主）：
-  `Thinker`（LLM）、`Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
+- **内置大脑 + 六个宿主端口，全部必填**（无 stub、无可选器官——内核不认识「邻居」，跨实例的事归宿主）：
+  大脑是 `Organs.Brain`（BaseURL/Key/Model/Stream/Mode，指向任意 OpenAI 兼容端点；Mode 默认 chat completions、可选 Responses API），其余
+  `Effector`（工具）、`Closer`（清理）、`Hooks`（拦截 ——
   全部八个回调 H1–H8 必填：显式 no-op，而非缺席）、`Sandbox`（权限膜）、
   `ContextBudget`（令牌调节器 —— 覆盖两条累积轨，必须有 Trimmer、TrimResults 与 MaxTokens）、
-  `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）
-- **一个端口后面放多个器官** —— `GuardStack` / `FallbackThinker` / `FallbackEffector` 把若干实现组合成循环看到的唯一一个器官，返回的**就是端口类型本身**：组合器官与单个器官接法一致，蓝图没有多出任何插槽
+  `Memory`（经验端口 —— 每轮 Think 前 `Recall`，每次调用终点 `Remember`）。
+  流式增量走 `meowire.WithSink(ctx, sink)` —— 在出口膜裁决之前送达宿主，`EventText`
+  （整段、已裁决）到达时整段替换已推内容
+- **一个端口后面放多个器官** —— `GuardStack` / `FallbackEffector` 把若干实现组合成循环看到的唯一一个器官，返回的**就是端口类型本身**：组合器官与单个器官接法一致，蓝图没有多出任何插槽
 - **器官可以在被使用之前先启动** —— 任何端口都可声明 `Bootable`；`New` 按 `PortOrder()`（蓝图自己蕴含的顺序，不是在旁边另抄一份）对每个声明者调用一次，`Replace` 在提交替换之前先启动。启动失败即中止装配，本次尝试打开的东西经宿主 `Closer` 释放 —— 框架依旧不关任何器官
 - **事件流可落盘** —— `EncodeEvent`/`DecodeEvent` 一条事件一条带版本的 JSON 记录，枚举按名字上线，框架错误按身份还原，名字表里拼不出来的枚举值编码时直接拒绝，过不去的值在事件的 `Dropped` 里点名；每条事件都带着产出它的 `CellID`，所以宿主把多个实例的日志写进一份文件也分得清谁说的
 - **Step-Resume** —— 每次 `Stimulate` 是一个无状态步骤；停止迭代器，在宿主侧处理
@@ -63,10 +72,10 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   三态之外的值同样按 Deny 处置——本构建叫不出名字的值不可能"允许"什么；ask 经与 ask_user
   相同的挂起-恢复协议征询确认，批准后才生效。`OnCycleEnd(ctx, output,
   outcome)` 以 `CycleOutcome`（Done/Suspended/MaxRounds/Error/Aborted）分类每轮结束方式；
-  `BeforeStimulate` 可写轮级反思便签到 `Prompt.Reflection`，全轮 Thinker 可见
+  `BeforeStimulate` 可写轮级反思便签到 `Prompt.Reflection`，全轮大脑可见
 - **结构化工具反馈** —— 工具结果以 `Prompt.ToolResults` 回流（`ToolResult{ID, Name, Result, Err}`，
   单一轨道；`call_xxx` ID 保留）；渲染（tool 角色消息、`[tool_call_id=xxx]` 标记、纯文本）归宿主
-  Thinker —— 文本轨（`Context`）只保留宿主基底与 sandbox 裁决
+  大脑 —— 文本轨（`Context`）只保留宿主基底与 sandbox 裁决
 - **工具级超时与重试** —— `Config.ToolTimeout` 约束每次工具执行；
   `ToolMaxRetries` 重试执行器错误（`Effect.Err` 业务错误永不重试）
 - **并行工具批（可选）** —— `Config.ParallelActs` 并发执行一轮的多个独立工具调用
@@ -92,7 +101,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
   （不裁剪的预算不是预算）；`TrimResults` 后来并入同一条规则 —— 两条累积轨各要一个裁剪器。
 - **`Replace` 拒绝 nil/不完整端口** —— 换入的器官必须完整。
 - **`Sandbox` 必须实现 `Bounds() string`** —— 返回执行边界描述；
-  框架每次 `Stimulate` 快照一次，通过 `Prompt.Bounds` 以只读方式提供给 hook 与 Thinker：
+  框架每次 `Stimulate` 快照一次，通过 `Prompt.Bounds` 以只读方式提供给 hook 与大脑：
   ```go
   func (s *MySandbox) Bounds() string { return "read-only /workspace" }
   ```
@@ -113,9 +122,10 @@ meowire (模块根)
 | `Agent` / `New` / `Stimulate` / `Close` | `api/` | 门面：整个对外表面 |
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | 纯编排：Think → Act → 产出事件 |
 | `Cell` | `internal/cell/cell.go` | 极简内核：ID + 端口 + 循环 |
-| `Thinker` / `Effector` / `Closer` | 端口 | 宿主提供的能力 |
+| `Brain` | `internal/brain` | 内置器官：openai-go chat completions，由组合根按 `Organs.Brain` 构造 |
+| `Effector` / `Closer` | 端口 | 宿主提供的能力 |
 | `Hooks` | 端口 | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
-| `Sandbox` | 守卫 | 循环两侧的权限膜：每次 Act 前 `Allow`、该轮文本被听到前 `Emit`；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给 Thinker |
+| `Sandbox` | 守卫 | 循环两侧的权限膜：每次 Act 前 `Allow`、该轮文本被听到前 `Emit`；`Bounds()` 经 `Prompt.Bounds` 把执行边界透传给大脑 |
 | `ContextBudget` | 守卫 | 每次 Think 前裁剪文本轨 `Context` 与结构化反馈轨 `ToolResults`（同一额度） |
 | `Memory` | 端口 | 把本轮召回写进 `Prompt.Memories`，并把结束那一轮的事实收回去 |
 | `Event` | 事件 | 循环的类型化观察镜像 |
@@ -132,7 +142,7 @@ go get github.com/qyiun666/meowire@latest
 import meowire "github.com/qyiun666/meowire/api"
 ```
 
-宿主侧完整集成契约 —— 七端口、逐字段语义、事件流与陷阱清单 —— 见
+宿主侧完整集成契约 —— 大脑参数、六端口、逐字段语义、事件流与陷阱清单 —— 见
 [宿主集成指南](host-integration.md)。
 
 ## 快速开始
@@ -143,16 +153,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	meowire "github.com/qyiun666/meowire/api"
 )
-
-// thinker 实现 meowire.Thinker —— LLM 端口。
-type thinker struct{}
-
-func (thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	return &meowire.Decision{Text: "Hello from meowire!"}, nil
-}
 
 // effector 实现 meowire.Effector —— 工具执行端口。
 type effector struct{}
@@ -193,7 +197,7 @@ func main() {
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 		ID:      "agent-001", // 必填：事件署名与挂起句柄归属都按它判定
-		Think:   thinker{},
+		Brain:   meowire.BrainConfig{Model: "gpt-5.2", Key: os.Getenv("OPENAI_API_KEY")}, // 内置大脑
 		Act:     effector{},
 		Closer:  closer{},
 		Hooks:   meowire.FullHooks(meowire.Hooks{}), // 八个回调，显式 no-op
@@ -313,7 +317,7 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | 宿主集成指南 | [host-integration.md](host-integration.md) |
-| Thinker 适配文档 | [thinker-openai-go.md](thinker-openai-go.md) — 以一个真实 SDK 为例逐字段落地 |
+| 大脑规格（openai-go） | [thinker-openai-go.md](thinker-openai-go.md) — 内置大脑的字段落点表与协议参考 |
 | 宿主参考实现 | [reference-host.md](reference-host.md) — 按步骤从零实现一个 AI 宿主 |
 | 协议映射指南 | [protocols.md](protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

@@ -41,13 +41,6 @@ func (l *lifecycleLog) close(name string) error {
 // Bootable probes: one per port whose carrier type the api test package may
 // define (Hooks and Budget are concrete structs, so they stay uninstrumented —
 // booting them is not something a host can declare either).
-type probeThinker struct{ log *lifecycleLog }
-
-func (p probeThinker) Think(context.Context, *Prompt) (*Decision, error) {
-	return &Decision{Text: "ok"}, nil
-}
-func (p probeThinker) Boot(context.Context) error { return p.log.boot("Think") }
-
 type probeEffector struct{ log *lifecycleLog }
 
 func (p probeEffector) Act(context.Context, Action) (*Effect, error) {
@@ -79,12 +72,11 @@ type probeCloser struct{ log *lifecycleLog }
 func (p *probeCloser) Boot(context.Context) error { return p.log.boot("Closer") }
 func (p *probeCloser) Close() error               { return p.log.close("Closer") }
 
-// bootableOrgans returns a complete assembly whose five instrumentable ports
-// all declare the lifecycle capability.
+// bootableOrgans returns a complete assembly whose four instrumentable host
+// ports all declare the lifecycle capability.
 func bootableOrgans() (Organs, *lifecycleLog) {
 	log := &lifecycleLog{}
 	o := fullOrgans()
-	o.Think = probeThinker{log}
 	o.Act = probeEffector{log}
 	o.Sandbox = probeSandbox{log}
 	o.Mem = probeMemory{log}
@@ -117,7 +109,7 @@ func TestBootsInPortOrder(t *testing.T) {
 
 	// The expectation is derived from the blueprint, not hardcoded: the
 	// instrumented ports in PortOrder sequence.
-	instrumented := map[string]bool{"Think": true, "Act": true, "Closer": true, "Sandbox": true, "Mem": true}
+	instrumented := map[string]bool{"Act": true, "Closer": true, "Sandbox": true, "Mem": true}
 	var want []string
 	for _, name := range PortOrder() {
 		if instrumented[name] {
@@ -211,20 +203,20 @@ func TestReplaceBootsBeforeSwapping(t *testing.T) {
 	defer a.Close()
 
 	nextLog := &lifecycleLog{}
-	next := probeThinker{nextLog}
-	old, err := a.Replace(SlotThink, next)
+	next := probeEffector{nextLog}
+	old, err := a.Replace(SlotAct, next)
 	if err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 	if old == nil {
 		t.Error("Replace must return the previous port")
 	}
-	if !slices.Equal(nextLog.boots, []string{"Think"}) {
+	if !slices.Equal(nextLog.boots, []string{"Act"}) {
 		t.Fatalf("replacement boot calls = %v, want exactly one", nextLog.boots)
 	}
 	// The swap landed: replacing it again returns the organ we just installed.
-	third := probeThinker{&lifecycleLog{}}
-	if back, err := a.Replace(SlotThink, third); err != nil || back != any(next) {
+	third := probeEffector{&lifecycleLog{}}
+	if back, err := a.Replace(SlotAct, third); err != nil || back != any(next) {
 		t.Fatalf("second Replace returned (%v, %v), want the first replacement back", back, err)
 	}
 }
@@ -239,19 +231,19 @@ func TestReplaceBootFailureLeavesWiringAlone(t *testing.T) {
 	}
 	defer a.Close()
 
-	healthy := probeThinker{&lifecycleLog{}}
-	if _, err := a.Replace(SlotThink, healthy); err != nil {
+	healthy := probeEffector{&lifecycleLog{}}
+	if _, err := a.Replace(SlotAct, healthy); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
-	brokenLog := &lifecycleLog{failBoot: "Think"}
-	if _, err := a.Replace(SlotThink, probeThinker{brokenLog}); err == nil {
+	brokenLog := &lifecycleLog{failBoot: "Act"}
+	if _, err := a.Replace(SlotAct, probeEffector{brokenLog}); err == nil {
 		t.Fatal("a replacement that failed to boot was accepted")
-	} else if !strings.Contains(err.Error(), "replace think") {
+	} else if !strings.Contains(err.Error(), "replace act") {
 		t.Errorf("error = %q, want the refused slot named", err)
 	}
 	// A successful Replace now must hand back the healthy organ, proving the
 	// broken one was never installed.
-	if back, err := a.Replace(SlotThink, probeThinker{&lifecycleLog{}}); err != nil || back != any(healthy) {
+	if back, err := a.Replace(SlotAct, probeEffector{&lifecycleLog{}}); err != nil || back != any(healthy) {
 		t.Fatalf("after a refused swap, Replace returned (%v, %v), want the healthy organ back", back, err)
 	}
 }
@@ -269,16 +261,16 @@ func TestReplaceRejectsBadSlotWithoutBooting(t *testing.T) {
 	defer a.Close()
 
 	log := &lifecycleLog{}
-	if _, err := a.Replace("thinking", probeThinker{log}); err == nil {
+	if _, err := a.Replace("acting", probeEffector{log}); err == nil {
 		t.Fatal("a slot the blueprint does not declare was accepted")
 	}
 	if len(log.boots) != 0 {
 		t.Fatalf("boot calls = %v, want none before a refused slot", log.boots)
 	}
-	if _, err := a.Replace(SlotThink, probeThinker{log}); err != nil {
+	if _, err := a.Replace(SlotAct, probeEffector{log}); err != nil {
 		t.Fatalf("replace after a refused slot: %v", err)
 	}
-	if !slices.Equal(log.boots, []string{"Think"}) {
+	if !slices.Equal(log.boots, []string{"Act"}) {
 		t.Errorf("boot calls = %v, want the organ booted once, at its real slot", log.boots)
 	}
 }
@@ -295,7 +287,7 @@ func TestReplaceAfterCloseRefusesOrgan(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	log := &lifecycleLog{}
-	if _, err := a.Replace(SlotThink, probeThinker{log}); !errors.Is(err, ErrCellClosed) {
+	if _, err := a.Replace(SlotAct, probeEffector{log}); !errors.Is(err, ErrCellClosed) {
 		t.Fatalf("Replace after Close = %v, want it to report the agent closed", err)
 	}
 	if len(log.boots) != 0 {

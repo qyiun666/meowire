@@ -104,10 +104,6 @@ func SwappableSlots() []string {
 func Connectome() []WirePoint {
 	return []WirePoint{
 		// --- ports (phase 2: host-implemented, all required) ---
-		{ID: "P1", Name: "Think", Phase: 2, Category: CategoryDecide,
-			TargetID: "prompt", Target: "Prompt (all fields) → Decision", Semantics: SemRead,
-			Required: true, Slot: "think",
-			Desc: "LLM reasoning port; host may run parallel candidates"},
 		{ID: "P2", Name: "Act", Phase: 2, Category: CategoryAct,
 			TargetID: "action", Target: "Action → Effect", Semantics: SemAct,
 			Required: true, Slot: "act",
@@ -192,6 +188,10 @@ func Connectome() []WirePoint {
 			TargetID: "toolresults", Target: "ToolResults", Semantics: SemAppend,
 			Required: true,
 			Desc:     "framework built-in: structured tool results appended each round (single feedback track)"},
+		{ID: "F2", Name: "Brain", Phase: 1, Category: CategoryDecide,
+			TargetID: "prompt", Target: "Prompt (all fields) → Decision", Semantics: SemRead,
+			Required: true,
+			Desc:     "framework built-in: the bundled openai brain, parameterized by Organs.Brain; no host slot, not swappable — a different model is a new assembly"},
 		{ID: "G1", Name: "PauseGate", Phase: 1, Category: CategoryDecide,
 			TargetID: "timing", Target: "loop timing", Semantics: SemGate,
 			Required: false,

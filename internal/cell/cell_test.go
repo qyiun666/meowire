@@ -152,7 +152,7 @@ func TestClosedCellRefusesByIdentity(t *testing.T) {
 		t.Fatalf("closed-cell resume err = %v, want it to match nerve.ErrCellClosed", evs[0].Err)
 	}
 
-	if _, err := c.Replace("think", testutil.Thinker{}); !errors.Is(err, nerve.ErrCellClosed) {
+	if _, err := c.Replace("act", testutil.Effector{}); !errors.Is(err, nerve.ErrCellClosed) {
 		t.Fatalf("Replace after Close = %v, want it to match nerve.ErrCellClosed", err)
 	}
 }
@@ -305,35 +305,22 @@ func textOf(c *Cell, input string) string {
 	return ""
 }
 
-// TestCellReplaceThink: swapping the Think port takes effect at the next
-// Stimulate and returns the previous port (dynamic wiring).
-func TestCellReplaceThink(t *testing.T) {
-	first := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-		return &nerve.Decision{Text: "old-brain"}, nil
+// TestReplaceRefusesBrainSlot: the brain is the bundled organ, not a slot —
+// a swap request for it is an unknown slot, and the cell is unchanged.
+func TestReplaceRefusesBrainSlot(t *testing.T) {
+	think := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+		return &nerve.Decision{Text: "unchanged"}, nil
 	}}
-	c := newTestCell(t, first, testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+	c := newTestCell(t, think, testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
 		return &nerve.Effect{Result: "ok"}, nil
 	}})
-	if got := textOf(c, "x"); got != "old-brain" {
-		t.Fatalf("before replace: text = %q, want old-brain", got)
+	if _, err := c.Replace("think", testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+		return &nerve.Decision{Text: "swapped"}, nil
+	}}); err == nil {
+		t.Fatal(`Replace("think") must error — the brain is not a swappable slot`)
 	}
-
-	second := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-		return &nerve.Decision{Text: "new-brain"}, nil
-	}}
-	old, err := c.Replace("think", second)
-	if err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-	oldThinker, ok := old.(testutil.Thinker)
-	if !ok {
-		t.Fatalf("old port = %T, want testutil.Thinker", old)
-	}
-	if dec, err := oldThinker.Think(context.Background(), &nerve.Prompt{}); err != nil || dec.Text != "old-brain" {
-		t.Fatalf("old port behaves like = (%v, %v), want old-brain text", dec, err)
-	}
-	if got := textOf(c, "x"); got != "new-brain" {
-		t.Fatalf("after replace: text = %q, want new-brain", got)
+	if got := textOf(c, "x"); got != "unchanged" {
+		t.Fatalf("after refused replace: text = %q, want unchanged", got)
 	}
 }
 
@@ -350,7 +337,7 @@ func TestCellReplaceErrors(t *testing.T) {
 	if _, err := c.Replace("closer", nil); err == nil {
 		t.Fatal("unknown slot should error")
 	}
-	if _, err := c.Replace("think", "not-a-thinker"); err == nil {
+	if _, err := c.Replace("act", "not-an-effector"); err == nil {
 		t.Fatal("wrong port type should error")
 	}
 	if got := textOf(c, "x"); got != "keep" {
@@ -370,7 +357,7 @@ func TestCellReplaceAfterClose(t *testing.T) {
 	if !c.Close() {
 		t.Fatal("Close must report the transition")
 	}
-	old, err := c.Replace("think", testutil.Thinker{})
+	old, err := c.Replace("act", testutil.Effector{})
 	if err == nil || old != nil {
 		t.Fatalf("Replace after Close = (%v, %v), want an error and no previous port", old, err)
 	}

@@ -10,12 +10,16 @@
 package meowire
 
 import (
+	"context"
+
+	"github.com/qyiun666/meowire/internal/brain"
 	"github.com/qyiun666/meowire/internal/nerve"
 )
 
-// Ports — host-provided capabilities (all required, no stubs).
+// Ports — host-provided capabilities (all required, no stubs). The brain is
+// not among them: it is the one organ the framework ships, parameterized by
+// Organs.Brain instead of implemented by the host.
 type (
-	Thinker       = nerve.Thinker
 	Effector      = nerve.Effector
 	Closer        = nerve.Closer
 	Hooks         = nerve.Hooks
@@ -24,6 +28,36 @@ type (
 	Memory        = nerve.Memory
 	PauseGate     = nerve.PauseGate
 )
+
+// The bundled brain's assembly parameters and streaming channel.
+type (
+	// BrainConfig parameterizes the bundled brain (the public face of
+	// brain.Config): endpoint, credential, model, the streaming switch and
+	// the wire selector.
+	BrainConfig = brain.Config
+	// BrainMode selects the wire the brain speaks (the public face of
+	// brain.Mode): chat completions or the Responses API. A transport
+	// choice, not a contract fork — both render the same Prompt statelessly
+	// and fold back into the same Decision.
+	BrainMode = brain.Mode
+	// Sink receives the brain's text deltas during a streaming round.
+	Sink = brain.Sink
+)
+
+// BrainMode constants. The zero value lands on chat: an assembly that never
+// sets a Mode still gets the default wire.
+const (
+	BrainModeChat      BrainMode = brain.ModeChat      // chat completions (default)
+	BrainModeResponses BrainMode = brain.ModeResponses // the Responses API wire
+)
+
+// WithSink mounts the streaming channel on the context handed to
+// Stimulate/Resume: the brain's text deltas reach the sink before the output
+// membrane rules, so a host showing them live replaces the whole segment when
+// EventText (whole, already ruled) arrives.
+func WithSink(ctx context.Context, sink Sink) context.Context {
+	return brain.WithSink(ctx, sink)
+}
 
 // Data packets exchanged with the host ports.
 type (

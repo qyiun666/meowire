@@ -18,7 +18,7 @@ import (
 // TestCloseBehavior verifies Close calls the host closer and subsequent Stimulate fails.
 func TestCloseBehavior(t *testing.T) {
 	cs := &testutil.Closer{}
-	a, err := testNew(testOrgans(meowire.Organs{Closer: cs}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{Closer: cs}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestCloseBehavior(t *testing.T) {
 
 // TestStimulateAfterClose verifies Stimulate on a closed agent yields EventError with ErrCellClosed.
 func TestStimulateAfterClose(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestStimulateAfterClose(t *testing.T) {
 // stream written to a log still says which cell spoke — including the event a
 // closed facade raises without ever running a loop.
 func TestEveryEventNamesItsAuthor(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{ID: "author"}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{ID: "author"}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestEveryEventNamesItsAuthor(t *testing.T) {
 // TestLiveStreamSurvivesWire: a real event stream is wire-ready end to end —
 // every event comes back equal, with no field reported as dropped.
 func TestLiveStreamSurvivesWire(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{ID: "wired"}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{ID: "wired"}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -210,23 +210,22 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 	ctx := context.Background()
 	j := &journal{t: t, kinds: map[meowire.EventKind]int{}}
 
-	plan := &meowire.Decision{
+	plan := testutil.FakeCompletion{
 		Text:  "planning",
-		Usage: &meowire.Usage{Prompt: 1, Completion: 2, Total: 3},
-		ToolCalls: []meowire.ToolCall{
+		Usage: testutil.FakeUsage{Prompt: 1, Completion: 2, Total: 3},
+		ToolCalls: []testutil.FakeCall{
 			{ID: "d1", Name: "danger"}, // denied by the membrane
 			{ID: "a1", Name: "asker"},  // asks, and the round suspends there
 		},
 	}
 
-	a, err := testNew(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(t, meowire.Organs{
 		ID:      "wire-all",
 		Sandbox: wireSandbox{},
-		Think:   countingThinker(plan, "finished"),
 		Act: testutil.Effector{Fn: func(_ context.Context, act meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "asked-" + act.Call.Name}, nil
 		}},
-	}), meowire.Config{MaxRounds: 4})
+	}, plan, testutil.FakeCompletion{Text: "finished"}), meowire.Config{MaxRounds: 4})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -241,7 +240,7 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 
 	// The two runtime audits take effect on the next run, and the pause is
 	// honored at its first gap point — Replace, Config, State, Paused.
-	if _, err := a.Replace(meowire.SlotThink, plainThinker("after the swap")); err != nil {
+	if _, err := a.Replace(meowire.SlotMem, testutil.Memory{}); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 	a.UpdateConfig(meowire.Config{MaxRounds: 4})
@@ -253,9 +252,9 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 	j.watch(a.Resume(ctx, paused, meowire.Response{}))
 
 	// The error arm: a loop that outlives its rounds while tools are pending.
-	b, err := testNew(testOrgans(meowire.Organs{
-		ID: "wire-err", Think: countingThinker(plan, "still busy"), Sandbox: passSandbox{},
-	}), meowire.Config{MaxRounds: 1})
+	b, err := testNew(testOrgans(t, meowire.Organs{
+		ID: "wire-err", Sandbox: passSandbox{},
+	}, plan), meowire.Config{MaxRounds: 1})
 	if err != nil {
 		t.Fatalf("new error case: %v", err)
 	}
@@ -282,25 +281,6 @@ func allKinds() []meowire.EventKind {
 		meowire.EventDone, meowire.EventError, meowire.EventUsage, meowire.EventSandbox,
 		meowire.EventWaitInput, meowire.EventPaused, meowire.EventReplace, meowire.EventConfig,
 	}
-}
-
-// countingThinker spends the interesting decision on the first round and wraps
-// up afterwards, so a resumed run cannot suspend on the same call again.
-func countingThinker(first *meowire.Decision, then string) testutil.Thinker {
-	rounds := 0
-	return testutil.Thinker{Fn: func(_ context.Context, _ *meowire.Prompt) (*meowire.Decision, error) {
-		rounds++
-		if rounds == 1 {
-			return first, nil
-		}
-		return &meowire.Decision{Text: then}, nil
-	}}
-}
-
-func plainThinker(text string) testutil.Thinker {
-	return testutil.Thinker{Fn: func(_ context.Context, _ *meowire.Prompt) (*meowire.Decision, error) {
-		return &meowire.Decision{Text: text}, nil
-	}}
 }
 
 // passSandbox lets every call through: the round-cap case needs the batch to

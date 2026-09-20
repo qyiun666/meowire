@@ -2,6 +2,8 @@
 
 Status: implemented
 
+Superseded by: 2026-09-19-official-brain-internal.md
+
 ## Problem
 
 一个 LLM 客户端要同时回答两件与本仓无关的问题：协议怎么传（SSE 帧、双 wire 差异、重试退避）和文案怎么排（Prompt 各槽位渲染成什么）。这两件事都随外部服务商变化，而内核的承重契约是端口形状与事件语义。把它们放在同一个 module 里，读者无法判断哪些是「接线层的规定」、哪些是「一个可选器官的样例」，`Thinker` 端口也因此在文档里被写成了「有官方实现可用」——端口收敛 pressure 由此产生。

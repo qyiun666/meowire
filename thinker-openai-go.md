@@ -1,9 +1,11 @@
-# 适配文档：把 `Thinker` 接到 `github.com/openai/openai-go/v3`
+# 内置大脑规格：meowire × `github.com/openai/openai-go/v3`
 
-本文只解决一个问题：meowire 的 `Thinker` 端口（`Think(ctx, *Prompt) (*Decision, error)`）
-对着一个真实的 LLM SDK 要怎么写。meowire 不携带任何器官实现（见
-`notes/implemented/architecture/2026-09-17-kernel-ships-no-organs.md`），所以这里写的是
-**宿主侧的代码**，本文所在仓库不会 import 这个 SDK。
+本文只解决一个问题：meowire 的进脑数据包（`Prompt`）对着真实的 openai-go 要怎么落、
+出脑的裁决（`Decision`）要怎么折。**内置大脑（`internal/brain`）已按本文实现**——仓库
+唯一 import 这个 SDK 的包，版本锚 v3.61.0；宿主不再写 Thinker，本文件是它的实现规格
+与协议参考。大脑有两根 wire（chat completions 为默认，Responses API 由 `Mode` 枚举
+选择）；§1–§9 以 chat completions 为基准，§10 是 Responses wire 的差异面，其余
+契约（无状态、重试、Sink、Usage）两根共用。
 
 ## 0. 取证基准
 
@@ -22,10 +24,9 @@
 
 对照自己的版本：`go doc github.com/openai/openai-go/v3.ChatCompletionNewParams`。
 
-本文出现的每段 Go 代码都在**仓库外**的临时模块里编译过：`go build` / `go vet` 对着
-`openai-go/v3@v3.61.0` 与本仓当前 HEAD 通过（离线，proxy 指向本地 module cache）。
-唯一的占位是 §9 引用的 `render(p)`——把 §2 的段落拼成文本是宿主的表达力，不是形状问题。
-本仓自身依然零三方依赖——这些代码属于宿主。
+规格中的坐标（`chatcompletion.go:71` 这类）相对 v3.61.0 的 module 根目录；升版前先按
+§0 复核差异。`internal/brain` 的行为由 `internal/brain/brain_test.go`（离线假端点）钉住：
+落点、配对、流式 Sink、错误形状，全部有断言。
 
 ## 1. 两端形状
 
@@ -408,20 +409,75 @@ func (t *chatThinker) transcript(results []meowire.ToolResult) []openai.ChatComp
 `BeforeStimulate` 可以整体改写 `p.Tools`，缓存到启动期会静默丢掉改写，
 代价只是一次 JSON 反序列化。固定段与动态段分开的收益（前缀缓存）在 §2 末。
 
-## 10. 交付前自检
+## 10. 第二根 wire：Responses API（`Mode` = 2）
+
+`BrainConfig.Mode`（公开名 `meowire.BrainMode`）在 `Think` 入口分路：`BrainModeChat`
+（1，默认；零值同 1）走 §1–§9 的 chat completions，`BrainModeResponses`（2）走本节。
+名表之外的值由 api 层 Validate 拒绝，本包不重复校验。两根 wire 的契约完全同形：
+无状态渲染、单层重试、Sink 先于出口膜、Usage 零值返回 nil、`wrapErr` 带 wire 名
+共用（非 2xx 两根都是 `*openai.Error`，错误文本点名是哪根 wire 拒了请求）。
+
+服务与类型在子包 `github.com/openai/openai-go/v3/responses`（根包
+`openai.Client.Responses` 直达）：
+
+```go
+func (r *ResponseService) New(ctx context.Context, body ResponseNewParams, ...) (res *Response, err error)
+func (r *ResponseService) NewStreaming(ctx context.Context, body ResponseNewParams, ...)
+    (stream *ssestream.Stream[ResponseStreamEventUnion])
+```
+
+`Prompt` → `ResponseNewParams` 落点：
+
+| 进料 | 落点 |
+|---|---|
+| §2 的 system bundle 全部文本段 | `Instructions`——协议原生的顶层系统指令位，不占 input 列表，固定段/动态段排布照旧吃前缀缓存 |
+| `Input` | input 首条 easy input message（role=user、content 内联字符串；该消息上线**不带 type 判别**，role+content 即消息） |
+| `ToolResults` | 每个 result 一对：`function_call{call_id, name, arguments:"{}"}` + `function_call_output{call_id, output: cmp.Or(Err, Result)}`——§3 单批配对的 Responses 版，被膜拒掉的调用天然缺席、无需占位 |
+| `Tools` | `Tools[].OfFunction`（`FunctionToolParam{Name, Description, Parameters}`）；`Output` 仍折进描述，schema 解析与 §5 共用 |
+| 协议恒定项 | **`Store: false`**——内核不发 `previous_response_id`、每轮全量重建，服务端 30 天留存只是没人读的副本；不设 `Conversation`/`Background`/`ToolChoice`/`Strict` |
+
+`*responses.Response` → `Decision` 折回：
+
+- `Status=="failed"` → 错误（带 `Error.Code/Message`，让这轮早死不烧重试预算）；
+  `"incomplete"` 按部分文本放行（对称 chat 侧不拦 length 截断）
+- `Output` 项：`type=="message"` 的 `output_text` 内容段拼成 `Text`；
+  `type=="function_call"` → `ToolCall{ID: call_id, Name, Args: arguments}`（原样透传，
+  校验归 Effector 与 Sandbox）
+- `Usage{InputTokens, OutputTokens, TotalTokens}` → `Usage{Prompt, Completion, Total}`，
+  全零返回 nil
+
+流式：**v3.61.0 没有 Responses 累加器，也不需要**——终态事件
+（`response.completed`/`response.failed`/`response.incomplete`）内嵌整只 `Response`，
+折回只读它；`response.output_text.delta` 只用来推 Sink（出口膜裁决之前，§7 的
+推流+更正契约原样成立）；`error` 事件直接报错；函数调用参数增量不推（Sink 是文本
+通道，调用整只在终态事件里到达）。流式与否仍由调用哪个方法决定，`stream:true` 由
+SDK 注入请求体；消费侧一旦提前返回，`defer stream.Close()` 兜底（SSE 契约：Next
+未返回 false 就停止迭代必须 Close，`closeOnce` 幂等，成功路径的自动关闭是 no-op）。
+
+## 11. 交付前自检
 
 - [ ] `Prompt` 11 个字段各有落点，特别是 `Memories` / `Reflection` / `Bounds`
-- [ ] assistant 里每个 `tool_call_id` 都有一条 `tool` 消息回话，**包括被膜拒掉的**
+- [ ] assistant 只列 `ToolResults` 里的调用，每条都有一条 tool 回话；被膜拒掉的
+      调用天然缺席（拒绝走 Context 轨，无需占位——占位补法是 §3 带状态对照专属）
 - [ ] `Tools` 每轮从 `p.Tools` 现建（没有启动期缓存）
-- [ ] Thinker 的共享缓存有锁，`Reset` 的触发点由宿主定（不是 `BeforeStimulate`）
+- [ ] （仅 §3/§9 带状态对照客户端适用）共享缓存有锁，`Reset` 的触发点由宿主
+      定（不是 `BeforeStimulate`）——内置大脑无状态、无 `Reset`，此项对它不适用
 - [ ] 只有一层重试（`option.WithMaxRetries(0)` + `Config.MaxRetries`，或反之）
 - [ ] `ctx` 一路透传，`Think` 内没有 `WithoutCancel`
 - [ ] `Usage` 为零值时返回 `nil`，不发假 `EventUsage`
 - [ ] 流式推流策略与 `Sandbox.Emit` 的关系被写明（§7 三选一）
 - [ ] 声明了 `Bootable` 的话，该实例只用于一个 agent；组合进 `Fallback*` 时成员自己启动
-- [ ] 本仓库仍然零三方依赖：这些代码在宿主仓，不在 meowire
+- [ ] 本仓库的唯一 SDK import 在 `internal/brain`（版本锚 v3.61.0）；`internal/nerve` 零
+      provider 词汇，`go list -deps ./internal/nerve` 可证
+- [ ] 两根 wire 共用 `toolSchema`/`describeTool`/`wrapErr` 与 Sink 契约；`Mode` 分路只
+      发生在 `Think` 入口，chat 路径零改动
+- [ ] responses 侧 `Store:false` 且不发 `previous_response_id`；`Status=="failed"` 折回
+      为错误（带 Code），`incomplete` 放行部分文本
 
 ---
 
-跨仓提醒：meowagent 通过 `go.mod` require 本仓的**已打 tag 版本**，本文写的适配形状
-在打 tag 之后才对下游生效（`AGENTS.md` 的跨仓边界一节）。
+内置大脑无状态：模型的往轮文本不在 `Prompt` 契约里（内核不回传），assistant/tool 配对
+从 `ToolResults` 单批重建（一条 assistant 携带全部历史调用 + 每个结果一条 tool 回话），
+被膜拒掉的调用天然缺席（拒绝走 Context 轨）。§3 的 turn 状态法是带状态客户端的通用
+做法对照——`internal/brain` 选择了更小的形状，取舍记录在
+`internal/brain/agent.md`。

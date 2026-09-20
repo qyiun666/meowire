@@ -26,10 +26,10 @@ func TestCellReplaceEmitsAuditAtNextStimulate(t *testing.T) {
 			return &nerve.Effect{Result: "ok"}, nil
 		}},
 	)
-	newThink := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-		return &nerve.Decision{Text: "swapped"}, nil
+	newAct := testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+		return &nerve.Effect{Result: "swapped"}, nil
 	}}
-	if _, err := c.Replace("think", newThink); err != nil {
+	if _, err := c.Replace("act", newAct); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 
@@ -42,11 +42,11 @@ func TestCellReplaceEmitsAuditAtNextStimulate(t *testing.T) {
 		t.Fatalf("first event = %+v, want EventReplace; events: %+v", events[0], events)
 	}
 	ra := events[0].Replace
-	if ra.Slot != "think" || ra.CellID != "test-cell" {
-		t.Fatalf("audit = %+v, want slot think / cell test-cell", ra)
+	if ra.Slot != "act" || ra.CellID != "test-cell" {
+		t.Fatalf("audit = %+v, want slot act / cell test-cell", ra)
 	}
-	if ra.NewType != "testutil.Thinker" {
-		t.Fatalf("audit new type = %q, want the swapped-in testutil.Thinker", ra.NewType)
+	if ra.NewType != "testutil.Effector" {
+		t.Fatalf("audit new type = %q, want the swapped-in testutil.Effector", ra.NewType)
 	}
 
 	// Second Stimulate: audits were drained — no more EventReplace.
@@ -68,15 +68,13 @@ func TestCellReplaceAuditOrder(t *testing.T) {
 			return &nerve.Effect{Result: "ok"}, nil
 		}},
 	)
-	if _, err := c.Replace("think", testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
-		return &nerve.Decision{Text: "swapped"}, nil
-	}}); err != nil {
-		t.Fatalf("replace think: %v", err)
-	}
 	if _, err := c.Replace("act", testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
 		return &nerve.Effect{Result: "swapped"}, nil
 	}}); err != nil {
 		t.Fatalf("replace act: %v", err)
+	}
+	if _, err := c.Replace("mem", testutil.Memory{}); err != nil {
+		t.Fatalf("replace mem: %v", err)
 	}
 	// A rejected swap (wrong type) must not produce an audit.
 	if _, err := c.Replace("sandbox", "not a sandbox"); err == nil {
@@ -89,8 +87,8 @@ func TestCellReplaceAuditOrder(t *testing.T) {
 			slots = append(slots, ev.Replace.Slot)
 		}
 	}
-	if len(slots) != 2 || slots[0] != "think" || slots[1] != "act" {
-		t.Fatalf("replace audit slots = %v, want [think act] (failed swap excluded)", slots)
+	if len(slots) != 2 || slots[0] != "act" || slots[1] != "mem" {
+		t.Fatalf("replace audit slots = %v, want [act mem] (failed swap excluded)", slots)
 	}
 }
 

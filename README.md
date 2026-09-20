@@ -1,20 +1,27 @@
 # Meowire
 
-Bionic agent harness base for Go — **pure wiring, zero default implementations.**
+Bionic agent harness base for Go — **a skeleton with its own brain.**
 
 Meowire is a minimal decision-loop kernel for building agent hosts. It wires the orchestration
-(Think → Act → yield events) and leaves everything else to you: the LLM, the tools, the memory,
-the security policy. No framework opinion about your stack — just a clean, dependency-free loop
-you can rely on.
+(Think → Act → yield events), ships the brain (an openai-go client you parameterize, not
+implement), and leaves the rest to you: the tools, the memory, the security policy. No framework
+opinion about your stack — just a clean loop you can rely on.
 
 > Requires Go 1.27+ (uses `iter.Seq`).
 
 ## Why Meowire
 
-- **You own the intelligence.** Meowire provides no LLM adapter, no tool framework, no memory
-  backend — it injects seven host ports and expects you to implement them. The framework never
-  hides what your agent actually does.
-- **Zero dependencies.** Standard library only. No transitive dependency tree to audit.
+- **The brain arrives as parameters.** Pass `Organs.Brain{BaseURL, Key, Model, Stream, Mode}` and the
+  composition root constructs the bundled openai-go brain — you never write a Thinker and never
+  import an SDK. `Mode` picks the wire: chat completions by default (zero value included) or the
+  Responses API (`BrainModeResponses`); both render the same stateless prompt and fold back into the
+  same decision. The kernel (loop, events, ports) stays standard-library only; provider vocabulary
+  stops at one internal package.
+- **You own everything else.** Meowire provides no tool framework, no memory backend — it injects
+  six host ports and expects you to implement them. The framework never hides what your agent
+  actually does.
+- **One dependency, pinned.** `github.com/openai/openai-go/v3` at v3.61.0 (chosen and upgraded
+  deliberately, never ridden along); everything else is the standard library.
 - **Small and readable.** ~4k lines of Go (production code; tests are another ~8.5k). The decision loop reads as one concern
   per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
@@ -35,18 +42,22 @@ you can rely on.
 - **Wiring graph inspection** — `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` treat the
   assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
 - **Dynamic wiring (swap an organ at runtime)** — `Agent.Replace(slot, port)` swaps
-  `Think`/`Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate`,
+  `Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate`,
   an in-flight `Stimulate` keeps the ports it started with; every successful swap is
-  audited as `EventReplace` at the start of the next Stimulate/Resume
+  audited as `EventReplace` at the start of the next Stimulate/Resume. The brain has no slot:
+  a different model is a new assembly with different `Brain` parameters
 - **Runtime config updates** — `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` tune
   `MaxRounds` and the other scalar limits hot, without rebuilding the agent
-- **Seven host-injected ports, all required** (no stubs, no optional organ — the kernel
-  does not know a neighbour exists; anything between instances belongs to the host): `Thinker` (LLM), `Effector` (tools), `Closer` (cleanup), `Hooks`
+- **Bundled brain + six host ports, all required** (no stubs, no optional organ — the kernel
+  does not know a neighbour exists; anything between instances belongs to the host): the brain is
+  `Organs.Brain` (BaseURL/Key/Model/Stream/Mode — any OpenAI-compatible endpoint; Mode selects chat completions by default or the Responses API), then `Effector` (tools), `Closer` (cleanup), `Hooks`
   (interception — all eight callbacks H1–H8 required: explicit no-op, not
   absence), `Sandbox` (permission membrane), `ContextBudget` (token
   regulator over both accumulating tracks — needs Trimmer, TrimResults and MaxTokens),
-  `Memory` (experience port — `Recall` before each Think, `Remember` once per invocation)
-- **Several organs behind one port** — `GuardStack` / `FallbackThinker` / `FallbackEffector` compose
+  `Memory` (experience port — `Recall` before each Think, `Remember` once per invocation).
+  Streaming deltas ride `meowire.WithSink(ctx, sink)` — they reach the host before the output
+  membrane rules; `EventText` (whole, already ruled) replaces what was pushed
+- **Several organs behind one port** — `GuardStack` / `FallbackEffector` compose
   implementations into the one organ the loop sees and return **the port type itself**, so a composed
   organ wires like a plain one and the blueprint gained nothing
 - **Organs can be brought up before they are used** — any port may declare `Bootable`; `New` boots
@@ -65,7 +76,7 @@ you can rely on.
 - **Structured tool feedback** — tool results flow back as `Prompt.ToolResults`
   (`ToolResult{ID, Name, Result, Err}`, single track; `call_xxx` IDs preserved);
   rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the
-  host Thinker's decision — the text track (`Context`) keeps host base + sandbox denials
+  bundled brain's choice — the text track (`Context`) keeps host base + sandbox denials
 - **Per-tool timeout & retry** — `Config.ToolTimeout` bounds each tool execution;
   `ToolMaxRetries` retries effector errors (business errors in `Effect.Err` are never retried)
 - **Parallel tool batches (opt-in)** — `Config.ParallelActs` executes a round's
@@ -86,7 +97,7 @@ you can rely on.
   (one audit chain closes with a terminal resolve record). `Hooks.OnCycleEnd(ctx, output,
   outcome)` classifies how every cycle ended (`CycleOutcome`: Done/Suspended/MaxRounds/
   Error/Aborted); `BeforeStimulate` may write a turn-scoped self-review note onto
-  `Prompt.Reflection`, carried onto every Thinker prompt of the cycle
+  `Prompt.Reflection`, carried onto every brain prompt of the cycle
 - **Host-managed history** (MemHop pattern) — context accumulation and memory injection are yours
 - **Flat multi-agent model** — one `Agent` is one kernel, and a host that wants several
   builds several instances; sub-agents stay host tools (`spawn_agent`), never
@@ -110,7 +121,7 @@ you can rely on.
   complete.
 - **`Sandbox` requires `Bounds() string`** — return the execution boundary
   description; the framework snapshots it once per `Stimulate` and surfaces
-  it read-only to hooks and the Thinker via `Prompt.Bounds`:
+  it read-only to hooks and the brain via `Prompt.Bounds`:
   ```go
   func (s *MySandbox) Bounds() string { return "read-only /workspace" }
   ```
@@ -122,6 +133,7 @@ you can rely on.
 ```
 meowire (module root)
   └── api/            facade + composition root — the sole public surface
+      ├── internal/brain    the bundled openai-go brain (the one provider package)
       ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
       └── internal/nerve    decision loop, ports (incl. memory), hooks, events, guards
 ```
@@ -131,9 +143,10 @@ meowire (module root)
 | `Agent` / `New` / `Stimulate` / `Close` | `api/` | Facade: the entire public surface |
 | `DecisionLoop.Cycle` | `internal/nerve/loop.go` | Pure orchestration: Think → Act → yield |
 | `Cell` | `internal/cell/cell.go` | Minimal kernel: ID + ports + loop |
-| `Thinker` / `Effector` / `Closer` | ports | Host-provided capabilities |
+| `Brain` | `internal/brain` | The bundled organ: openai-go chat completions, constructed from `Organs.Brain` by the composition root |
+| `Effector` / `Closer` | ports | Host-provided capabilities |
 | `Hooks` | ports | BeforeStimulate / AfterStimulate / BeforeThink / AfterThink / BeforeAct / AfterAct / OnError / OnCycleEnd |
-| `Sandbox` | guard | Permission membrane on both sides: `Allow` before each Act, `Emit` before a round's text reaches anyone; `Bounds()` surfaces the execution boundary to the Thinker via `Prompt.Bounds` |
+| `Sandbox` | guard | Permission membrane on both sides: `Allow` before each Act, `Emit` before a round's text reaches anyone; `Bounds()` surfaces the execution boundary to the brain via `Prompt.Bounds` |
 | `ContextBudget` | guard | Trims the text `Context` and the structured `ToolResults` before each Think, same limit |
 | `Memory` | port | Recalls this round's records into `Prompt.Memories`; takes the finished cycle's facts back |
 | `Event` | events | Typed observation mirror of the loop |
@@ -150,8 +163,8 @@ Import the facade package — the sole public surface:
 import meowire "github.com/qyiun666/meowire/api"
 ```
 
-For the full host-side integration contract — the seven ports, field-by-field
-semantics, the event stream, and the pitfalls — see the
+For the full host-side integration contract — the brain parameters, the six
+ports, field-by-field semantics, the event stream, and the pitfalls — see the
 [Host Integration Guide](host-integration.en.md).
 
 ## Quick Start
@@ -162,16 +175,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	meowire "github.com/qyiun666/meowire/api"
 )
-
-// thinker implements meowire.Thinker — the LLM port.
-type thinker struct{}
-
-func (thinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	return &meowire.Decision{Text: "Hello from meowire!"}, nil
-}
 
 // effector implements meowire.Effector — the tool-execution port.
 type effector struct{}
@@ -213,7 +220,7 @@ func main() {
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 			ID:      "agent-001", // required: events and resume handles are attributed to it
-			Think:   thinker{},
+			Brain:   meowire.BrainConfig{Model: "gpt-5.2", Key: os.Getenv("OPENAI_API_KEY")}, // the bundled brain
 			Act:     effector{},
 			Closer:  closer{},
 			Hooks:   meowire.FullHooks(meowire.Hooks{}), // all eight callbacks, explicit no-ops
@@ -349,7 +356,7 @@ GOWORK=off go vet ./...
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
 | Host Integration Guide | [host-integration.en.md](host-integration.en.md) |
-| Thinker Adapter (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) — a real SDK adapter, field by field |
+| Brain spec (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) — the bundled brain's placement table and protocol reference |
 | Reference Host (zh-CN) | [reference-host.md](reference-host.md) — step-by-step runnable AI host |
 | Protocol Mapping Guide | [protocols.md](protocols.md) — MCP / A2A / AGENTS.md / Authority |
 | Email | qyiun666@163.com |

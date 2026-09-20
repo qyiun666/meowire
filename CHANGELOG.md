@@ -5,6 +5,44 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.10] - 2026-09-19
+
+### Added
+
+- **The bundled brain — parameters, not a port** — `Organs.Brain BrainConfig{BaseURL, Key, Model, Stream, Mode}`
+  configures the openai-go-based brain the composition root constructs and injects behind the loop's Think
+  port. A host never implements a Thinker and never imports an SDK: a different model is a new assembly
+  with different parameters. `BaseURL` aims the brain at any OpenAI-compatible endpoint (empty = the
+  official one); `Mode` selects the wire — `BrainModeChat` (1, the default; the zero value lands there
+  too) keeps the chat-completions protocol, `BrainModeResponses` (2) speaks the Responses API with
+  `store: false` (the kernel rebuilds the whole input every round and never reads server-side state
+  back; a value outside the enum fails assembly). Both wires render the same stateless Prompt — one
+  round's whole truth, tool pairing rebuilt from `ToolResults` alone — and fold back into the same
+  Decision; text deltas still ride `meowire.WithSink(ctx, sink)` before the output membrane rules,
+  and `EventText` (whole, already ruled) replaces what was pushed. Retry stays single-layer
+  (`Config.MaxRetries`).
+
+### Changed
+
+- **The root module ships one dependency** — `github.com/openai/openai-go/v3`, pinned at v3.61.0 (the
+  version the adapter spec was verified against; upgrading is an explicit decision, not a ride-along).
+  The kernel itself stays standard-library only — `go list -deps ./internal/nerve` names no openai/tidwall
+  package — and provider vocabulary stops at `internal/brain`, the one package that imports the SDK.
+
+### Removed
+
+- **`Thinker` from the public surface** (**Breaking**) — the type alias, `Organs.Think`,
+  `SlotThink`/`Replace("think", …)`, the blueprint P1 wiring point and `FallbackThinker` are gone; the
+  blueprint's F2 now describes the framework's own brain (always wired, not a host slot, not swappable).
+  Hosts assemble six ports + the brain parameters; the wiring_free field set swaps `Think` for `Brain`
+  (still thirteen fields).
+
+### Internal
+
+- The whole public-surface test suite now drives the real brain against a scripted OpenAI-compatible
+  endpoint (`internal/testutil.FakeBrain`, offline): prompt-shape assertions read the request bodies the
+  brain actually sent, and every two-round scenario scripts its completions instead of stubbing a Thinker.
+
 ## [1.3.9] - 2026-09-18
 
 ### Added

@@ -7,14 +7,18 @@ package meowire
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/qyiun666/meowire/internal/testutil"
 )
 
-// fullOrgans returns an Organs with all six required ports wired and the
-// common hook pairs present, plus a working ContextBudget trimmer.
+// fullOrgans returns an Organs with all six required host ports wired and the
+// common hook pairs present, plus a working ContextBudget trimmer and brain
+// parameters that pass validation. The brain's BaseURL stays empty here: these
+// tests exercise assembly, not thinking — the one that Stimulates points the
+// brain at a scripted endpoint.
 // fullHooks returns a Hooks with all eight required callbacks set (no-ops).
 func fullHooks() *Hooks {
 	return &Hooks{
@@ -32,7 +36,7 @@ func fullHooks() *Hooks {
 func fullOrgans() Organs {
 	return Organs{
 		ID:      "test-agent",
-		Think:   testutil.Thinker{Fn: func(ctx context.Context, p *Prompt) (*Decision, error) { return &Decision{Text: "ok"}, nil }},
+		Brain:   BrainConfig{Model: "fake-model", Key: "test-value-not-a-credential"},
 		Act:     testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
 		Closer:  &testutil.Closer{},
 		Hooks:   fullHooks(),
@@ -50,7 +54,7 @@ func TestWiringDiagramFull(t *testing.T) {
 	for _, s := range slots {
 		byID[s.Wire.ID] = s
 	}
-	for _, id := range []string{"P1", "P2", "P3", "P4", "P5", "P6", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "F1", "G1"} {
+	for _, id := range []string{"P2", "P3", "P4", "P5", "P6", "H1", "H2", "H3", "H4", "H5", "H6", "H7", "H8", "F1", "F2", "G1"} {
 		if !byID[id].Filled {
 			t.Errorf("slot %s should be filled", id)
 		}
@@ -115,7 +119,8 @@ func TestValidateRequiredMissing(t *testing.T) {
 		name string
 		miss func(o *Organs)
 	}{
-		{"Think", func(o *Organs) { o.Think = nil }},
+		{"Brain.Model", func(o *Organs) { o.Brain.Model = "" }},
+		{"Brain.Key", func(o *Organs) { o.Brain.Key = "" }},
 		{"Act", func(o *Organs) { o.Act = nil }},
 		{"Closer", func(o *Organs) { o.Closer = nil }},
 		{"Hooks", func(o *Organs) { o.Hooks = nil }},
@@ -191,6 +196,35 @@ func TestValidateBudgetMissingResultTrimmer(t *testing.T) {
 	}
 }
 
+// TestValidateBrainModeUnknown: a Mode outside the enum is refused at
+// assembly — an unknown wire is never silently reinterpreted as chat. The
+// zero value, BrainModeChat and BrainModeResponses all stay clean.
+func TestValidateBrainModeUnknown(t *testing.T) {
+	o := fullOrgans()
+	o.Brain.Mode = BrainMode(3)
+	found := false
+	for _, is := range Validate(o, Config{}) {
+		if is.Level == LevelError && strings.Contains(is.Msg, "Brain.Mode") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an unknown Brain.Mode must surface an error finding")
+	}
+	if _, err := New(Blueprint{Organs: o, Config: Config{}}); err == nil {
+		t.Fatal("New must reject an unknown Brain.Mode")
+	}
+	for _, mode := range []BrainMode{0, BrainModeChat, BrainModeResponses} {
+		o := fullOrgans()
+		o.Brain.Mode = mode
+		for _, is := range Validate(o, Config{}) {
+			if is.Level == LevelError {
+				t.Errorf("mode %d: unexpected error finding: %s", mode, is.Msg)
+			}
+		}
+	}
+}
+
 // TestValidateInfoDefaults: empty Identity/Tools/Context and default rounds
 // surface info-level findings only (a clean full assembly has no error/warn).
 func TestValidateInfoDefaults(t *testing.T) {
@@ -254,7 +288,7 @@ func TestRenderDiagram(t *testing.T) {
 	if !strings.Contains(out, "nodes:\n") || !strings.Contains(out, "edges:\n") {
 		t.Fatal("graph should have nodes: and edges: sections")
 	}
-	for _, want := range []string{"prompt", "context", "P1", "H3", "F1", "G1"} {
+	for _, want := range []string{"prompt", "context", "P2", "H3", "F1", "F2", "G1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("diagram missing %q", want)
 		}
@@ -362,35 +396,49 @@ func countLevel(issues []Issue, lvl IssueLevel) int {
 	return n
 }
 
-// TestAgentReplace: swapping the Think port via the facade takes effect at
-// the next Stimulate; the previous port is returned; unknown slots error.
+// TestAgentReplace: swapping the Act port via the facade takes effect at the
+// next Stimulate; the previous port is returned; unknown slots error. The
+// brain answers from a scripted endpoint (tool-call round, then text), so the
+// swapped effector is observable.
 func TestAgentReplace(t *testing.T) {
-	bp := Blueprint{Organs: fullOrgans(), Config: Config{}}
-	a, err := New(bp)
+	fb := testutil.NewFakeBrain(t,
+		testutil.FakeCompletion{Text: "working", ToolCalls: []testutil.FakeCall{{ID: "c1", Name: "tool"}}},
+		testutil.FakeCompletion{Text: "ok"},
+		testutil.FakeCompletion{Text: "working", ToolCalls: []testutil.FakeCall{{ID: "c2", Name: "tool"}}},
+		testutil.FakeCompletion{Text: "ok"},
+	)
+	o := fullOrgans()
+	o.Brain = fb.Cfg(false)
+	var first, second []string
+	o.Act = testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) {
+		first = append(first, a.Call.Name)
+		return &Effect{Result: "ok"}, nil
+	}}
+	a, err := New(Blueprint{Organs: o, Config: Config{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer a.Close()
 
-	// Baseline: stubThinker returns "ok".
 	var got []string
 	for ev := range a.Stimulate(context.Background(), "x") {
 		if ev.Kind == EventText {
 			got = append(got, ev.Text)
 		}
 	}
-	if len(got) != 1 || got[0] != "ok" {
-		t.Fatalf("baseline text = %v, want [ok]", got)
+	if !slices.Equal(got, []string{"working", "ok"}) {
+		t.Fatalf("baseline texts = %v, want each round's text", got)
 	}
 
-	old, err := a.Replace(SlotThink, testutil.Thinker{Fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-		return &Decision{Text: "swapped-brain"}, nil
+	old, err := a.Replace(SlotAct, testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) {
+		second = append(second, a.Call.Name)
+		return &Effect{Result: "swapped"}, nil
 	}})
 	if err != nil {
 		t.Fatalf("Replace: %v", err)
 	}
-	if _, ok := old.(testutil.Thinker); !ok {
-		t.Fatalf("old port = %T, want testutil.Thinker", old)
+	if _, ok := old.(testutil.Effector); !ok {
+		t.Fatalf("old port = %T, want testutil.Effector", old)
 	}
 
 	got = nil
@@ -399,8 +447,11 @@ func TestAgentReplace(t *testing.T) {
 			got = append(got, ev.Text)
 		}
 	}
-	if len(got) != 1 || got[0] != "swapped-brain" {
-		t.Fatalf("after replace text = %v, want [swapped-brain]", got)
+	if !slices.Equal(got, []string{"working", "ok"}) {
+		t.Fatalf("after replace texts = %v, want each round's text", got)
+	}
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("effector calls = %d/%d, want the swap to take effect at the next Stimulate", len(first), len(second))
 	}
 
 	if _, err := a.Replace("closer", nil); err == nil {

@@ -16,14 +16,14 @@ import (
 // into one error naming every port (previous behavior returned only the
 // first missing port).
 func TestNewAggregatesMissingPorts(t *testing.T) {
-	o := fullOrgans()
-	o.Think = nil
+	o := fullOrgans(t)
+	o.Brain.Model = ""
 	o.Act = nil
 	_, err := meowire.New(meowire.Blueprint{Organs: o})
 	if err == nil {
-		t.Fatal("New with two missing ports should error")
+		t.Fatal("New with a missing brain parameter and a missing port should error")
 	}
-	for _, name := range []string{"Think", "Act"} {
+	for _, name := range []string{"Brain.Model", "Act"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("error %q should mention %s", err.Error(), name)
 		}
@@ -33,7 +33,7 @@ func TestNewAggregatesMissingPorts(t *testing.T) {
 // TestNewRejectsIncompleteHooks: a missing hook callback aborts New — every
 // wiring point is required (explicit no-op, not absence).
 func TestNewRejectsIncompleteHooks(t *testing.T) {
-	o := testOrgans(meowire.Organs{})
+	o := testOrgans(t, meowire.Organs{})
 	o.Hooks = fullHooks()
 	o.Hooks.BeforeThink = nil
 	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
@@ -44,7 +44,7 @@ func TestNewRejectsIncompleteHooks(t *testing.T) {
 // TestNewRejectsIncompleteBudget: a Budget without a Trimmer or MaxTokens
 // aborts New — a budget that does not trim is not a budget.
 func TestNewRejectsIncompleteBudget(t *testing.T) {
-	o := testOrgans(meowire.Organs{})
+	o := testOrgans(t, meowire.Organs{})
 	o.Budget = &meowire.ContextBudget{} // no trimmer, no MaxTokens
 	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
 		t.Fatal("New with an incomplete ContextBudget should error")
@@ -54,7 +54,7 @@ func TestNewRejectsIncompleteBudget(t *testing.T) {
 // TestValidateSurfacesMissingHook: Validate flags every missing required
 // hook callback as an error.
 func TestValidateSurfacesMissingHook(t *testing.T) {
-	o := testOrgans(meowire.Organs{})
+	o := testOrgans(t, meowire.Organs{})
 	o.Hooks = fullHooks()
 	o.Hooks.AfterThink = nil
 	found := false
@@ -72,10 +72,10 @@ func TestValidateSurfacesMissingHook(t *testing.T) {
 // slots; required ports of a full assembly are all filled.
 func TestWiringDiagramThroughFacade(t *testing.T) {
 	byID := map[string]meowire.Slot{}
-	for _, s := range meowire.WiringDiagram(fullOrgans()) {
+	for _, s := range meowire.WiringDiagram(fullOrgans(t)) {
 		byID[s.Wire.ID] = s
 	}
-	for _, id := range []string{"P1", "P2", "P3", "P4", "P5", "P6", "F1", "G1"} {
+	for _, id := range []string{"P2", "P3", "P4", "P5", "P6", "F1", "F2", "G1"} {
 		if !byID[id].Filled {
 			t.Errorf("slot %s should be filled in a full assembly", id)
 		}
@@ -87,7 +87,7 @@ func TestWiringDiagramThroughFacade(t *testing.T) {
 // own. New aborts rather than handing every instance of a reused Blueprint the
 // same default name.
 func TestNewRejectsAnonymousAgent(t *testing.T) {
-	o := fullOrgans()
+	o := fullOrgans(t)
 	o.ID = ""
 	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
 		t.Fatal("New with no ID should error")
@@ -106,8 +106,8 @@ func TestNewRejectsAnonymousAgent(t *testing.T) {
 // TestRenderDiagramThroughFacade: the ASCII graph renders through the
 // facade with headers, nodes and slot ids.
 func TestRenderDiagramThroughFacade(t *testing.T) {
-	out := meowire.RenderDiagram(fullOrgans())
-	for _, want := range []string{"meowire wiring graph", "nodes:", "edges:", "P1", "H3", "[x]", "-> context"} {
+	out := meowire.RenderDiagram(fullOrgans(t))
+	for _, want := range []string{"meowire wiring graph", "nodes:", "edges:", "P2", "H3", "F2", "[x]", "-> context"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("diagram missing %q", want)
 		}

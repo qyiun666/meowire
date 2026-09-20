@@ -110,41 +110,6 @@ func TestGuardStackBoundsAndEmptiness(t *testing.T) {
 	}
 }
 
-// brain is a thinker whose answer is fixed.
-type brain struct {
-	text string
-	err  error
-}
-
-func (b brain) Think(context.Context, *Prompt) (*Decision, error) {
-	if b.err != nil {
-		return nil, b.err
-	}
-	return &Decision{Text: b.text}, nil
-}
-
-func TestFallbackThinkerUsesFirstHealthyBrain(t *testing.T) {
-	down := errors.New("rate limited")
-	f := FallbackThinker(brain{err: down}, brain{text: "from backup"})
-	d, err := f.Think(context.Background(), &Prompt{})
-	if err != nil || d.Text != "from backup" {
-		t.Fatalf("think = %+v err %v, want the backup's answer", d, err)
-	}
-}
-
-// TestFallbackThinkerReportsEveryFailure: the reason the agent could not think
-// is the set of failures, not just the last one.
-func TestFallbackThinkerReportsEveryFailure(t *testing.T) {
-	first, second := errors.New("primary down"), errors.New("backup down")
-	_, err := FallbackThinker(brain{err: first}, brain{err: second}).Think(context.Background(), &Prompt{})
-	if !errors.Is(err, first) || !errors.Is(err, second) {
-		t.Fatalf("err = %v, want both members' failures reported", err)
-	}
-	if _, err := FallbackThinker().Think(context.Background(), &Prompt{}); err == nil {
-		t.Fatal("an empty fallback stack invented a decision")
-	}
-}
-
 // tool is an effector that either executes or breaks.
 type tool struct {
 	effect *Effect

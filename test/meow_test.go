@@ -6,6 +6,9 @@ package meowire_test
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	meowire "github.com/qyiun666/meowire/api"
@@ -28,14 +31,14 @@ func fullHooks() *meowire.Hooks {
 	}
 }
 
-// fullOrgans returns an Organs with all required ports wired (seven ports +
-// eight hook callbacks + a working ContextBudget trimmer).
-func fullOrgans() meowire.Organs {
+// fullOrgans returns an Organs with all six required host ports wired plus a
+// brain answering script (an empty script answers a plain "ok"; the last
+// entry repeats). The brain is the bundled one — tests script its endpoint,
+// they never implement a Thinker.
+func fullOrgans(t *testing.T, script ...testutil.FakeCompletion) meowire.Organs {
 	return meowire.Organs{
-		ID: "test-agent",
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "ok"}, nil
-		}},
+		ID:    "test-agent",
+		Brain: testutil.NewFakeBrain(t, script...).Cfg(false),
 		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
@@ -48,12 +51,14 @@ func fullOrgans() meowire.Organs {
 }
 
 // testOrgans returns fullOrgans with non-zero overrides applied.
+// Script entries drive what the brain answers; a Brain field in o replaces
+// the whole script (for tests that hold the server handle).
 // Hooks overrides merge into the full set (testOrgans(&Hooks{...}) keeps the
 // other seven callbacks) — a partial override stays a complete assembly.
-func testOrgans(o meowire.Organs) meowire.Organs {
-	base := fullOrgans()
-	if o.Think != nil {
-		base.Think = o.Think
+func testOrgans(t *testing.T, o meowire.Organs, script ...testutil.FakeCompletion) meowire.Organs {
+	base := fullOrgans(t, script...)
+	if o.Brain.Model != "" {
+		base.Brain = o.Brain
 	}
 	if o.Act != nil {
 		base.Act = o.Act
@@ -95,6 +100,9 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 	if o.Budget != nil {
 		base.Budget = o.Budget
 	}
+	if o.Mem != nil {
+		base.Mem = o.Mem
+	}
 	if o.ID != "" {
 		base.ID = o.ID
 	}
@@ -104,6 +112,28 @@ func testOrgans(o meowire.Organs) meowire.Organs {
 	base.Context = o.Context
 	base.Identity = o.Identity
 	return base
+}
+
+// brainRequest decodes the n-th request body the scripted brain received, as
+// far as the assertions in this package read it.
+func brainRequest(t *testing.T, bodies []string, n int) (system string, user string) {
+	t.Helper()
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if n >= len(bodies) {
+		t.Fatalf("brain request %d: only %d arrived", n, len(bodies))
+	}
+	if err := json.Unmarshal([]byte(bodies[n]), &req); err != nil {
+		t.Fatalf("decode brain request %d: %v", n, err)
+	}
+	if len(req.Messages) < 2 || req.Messages[0].Role != "system" || req.Messages[1].Role != "user" {
+		t.Fatalf("brain request %d messages = %+v, want [system, user, ...]", n, req.Messages)
+	}
+	return req.Messages[0].Content, req.Messages[1].Content
 }
 
 // testNew is a thin wrapper around meowire.New with a non-strict blueprint —
@@ -117,11 +147,9 @@ func testNew(o meowire.Organs, cfg meowire.Config) (*meowire.Agent, error) {
 
 // TestNewAndStimulate verifies creating an Agent and consuming events.
 func TestNewAndStimulate(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "meow-answer"}, nil
-		}},
-	}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{},
+		testutil.FakeCompletion{Text: "meow-answer"},
+	), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -149,9 +177,69 @@ func TestNewAndStimulate(t *testing.T) {
 	}
 }
 
+// TestResponsesModeRoundTrip: the public assembly routes the bundled brain
+// onto the responses wire — the mode is a BrainConfig field the composition
+// root passes through, and a two-round Stimulate (tool call, then text) runs
+// the whole loop on it.
+func TestResponsesModeRoundTrip(t *testing.T) {
+	fb := testutil.NewFakeBrain(t,
+		testutil.FakeCompletion{Text: "working", ToolCalls: []testutil.FakeCall{{ID: "c1", Name: "tool"}}},
+		testutil.FakeCompletion{Text: "ok"},
+	)
+	a, err := testNew(testOrgans(t, meowire.Organs{Brain: fb.CfgResponses(false)}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	var texts []string
+	for ev := range a.Stimulate(context.Background(), "work") {
+		if ev.Kind == meowire.EventText {
+			texts = append(texts, ev.Text)
+		}
+	}
+	if !slices.Equal(texts, []string{"working", "ok"}) {
+		t.Fatalf("texts = %v, want each round's text", texts)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if paths := fb.Paths(); len(paths) != 2 || paths[0] != "/responses" || paths[1] != "/responses" {
+		t.Fatalf("paths = %v, want both Thinks on the responses wire", paths)
+	}
+}
+
+// TestSinkThroughStimulate: a Sink mounted on the Stimulate context rides
+// the whole loop to the brain — the channel is public surface, and the event
+// stream still delivers the text whole (stream-and-correct).
+func TestSinkThroughStimulate(t *testing.T) {
+	fb := testutil.NewFakeBrain(t, testutil.FakeCompletion{Text: "stream me"})
+	a, err := testNew(testOrgans(t, meowire.Organs{Brain: fb.Cfg(true)}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	var deltas []string
+	ctx := meowire.WithSink(context.Background(), func(delta string) {
+		deltas = append(deltas, delta)
+	})
+	var texts []string
+	for ev := range a.Stimulate(ctx, "work") {
+		if ev.Kind == meowire.EventText {
+			texts = append(texts, ev.Text)
+		}
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !slices.Equal(texts, []string{"stream me"}) {
+		t.Fatalf("EventText = %v, want the whole ruled segment", texts)
+	}
+	if len(deltas) < 2 || strings.Join(deltas, "") != "stream me" {
+		t.Fatalf("sink deltas = %q, want the text in real increments through the loop", deltas)
+	}
+}
+
 // TestCloseIdempotent verifies Close can be called multiple times without error.
 func TestCloseIdempotent(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -163,21 +251,23 @@ func TestCloseIdempotent(t *testing.T) {
 	}
 }
 
-// TestNewRejectsMissingPorts verifies New fails when any required port is missing.
-func TestNewRejectsMissingPorts(t *testing.T) {
-	ports := []struct {
+// TestNewRejectsMissingParams verifies New fails when any required port or
+// brain parameter is missing.
+func TestNewRejectsMissingParams(t *testing.T) {
+	cases := []struct {
 		name string
 		set  func(o *meowire.Organs)
 	}{
-		{"Think", func(o *meowire.Organs) { o.Think = nil }},
+		{"Brain.Model", func(o *meowire.Organs) { o.Brain.Model = "" }},
+		{"Brain.Key", func(o *meowire.Organs) { o.Brain.Key = "" }},
 		{"Act", func(o *meowire.Organs) { o.Act = nil }},
 		{"Closer", func(o *meowire.Organs) { o.Closer = nil }},
 		{"Hooks", func(o *meowire.Organs) { o.Hooks = nil }},
 		{"Sandbox", func(o *meowire.Organs) { o.Sandbox = nil }},
 		{"Budget", func(o *meowire.Organs) { o.Budget = nil }},
 	}
-	for _, p := range ports {
-		o := fullOrgans()
+	for _, p := range cases {
+		o := fullOrgans(t)
 		p.set(&o)
 		if _, err := testNew(o, meowire.Config{}); err == nil {
 			t.Fatalf("New with missing %s should return error", p.name)
@@ -188,16 +278,16 @@ func TestNewRejectsMissingPorts(t *testing.T) {
 // TestOrgansID verifies the custom ID reaches the Effector via Action.CellID.
 func TestOrgansID(t *testing.T) {
 	var gotCellID string
-	a, err := testNew(testOrgans(meowire.Organs{
+	a, err := testNew(testOrgans(t, meowire.Organs{
 		ID: "wired",
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
-		}},
 		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			gotCellID = a.CellID
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
-	}), meowire.Config{})
+	},
+		testutil.FakeCompletion{Text: "t", ToolCalls: []testutil.FakeCall{{ID: "x", Name: "tool"}}},
+		testutil.FakeCompletion{Text: "ok"},
+	), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -208,35 +298,23 @@ func TestOrgansID(t *testing.T) {
 	}
 }
 
-// TestFullOrgansWiring verifies Sandbox/Budget/Memory/Identity/Methods/Context reach the loop.
+// TestFullOrgansWiring verifies Sandbox/Budget/Memory/Identity/Methods/Context reach the loop,
+// and every prompt field the contract promises reaches the brain's request.
 func TestFullOrgansWiring(t *testing.T) {
 	var (
 		sandboxCalled  bool
 		trimmerCalled  bool
 		recallCalled   bool
 		rememberCalled bool
-		gotMemories    []meowire.Record
 		gotFacts       meowire.CycleFacts
-		gotIdentity    string
-		gotMethods     []meowire.MethodSpec
-		firstCtx       []string
 	)
-	calls := 0
-	a, err := testNew(meowire.Organs{
-		ID: "wired-agent",
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			gotIdentity = p.Identity
-			gotMethods = p.Methods
-			if calls == 0 {
-				firstCtx = p.Context
-				gotMemories = p.Memories
-			}
-			calls++
-			if calls == 1 {
-				return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}}}, nil
-			}
-			return &meowire.Decision{Text: "ok"}, nil
-		}},
+	fb := testutil.NewFakeBrain(t,
+		testutil.FakeCompletion{Text: "t", ToolCalls: []testutil.FakeCall{{ID: "x", Name: "tool"}}},
+		testutil.FakeCompletion{Text: "ok"},
+	)
+	a, err := testNew(testOrgans(t, meowire.Organs{
+		ID:    "wired-agent",
+		Brain: fb.Cfg(false),
 		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
@@ -269,7 +347,7 @@ func TestFullOrgansWiring(t *testing.T) {
 		Tools:    []meowire.ToolSpec{{Name: "t1", Desc: "d"}},
 		Context:  []string{"ctx1"},
 		Identity: "wire",
-	}, meowire.Config{})
+	}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -284,9 +362,6 @@ func TestFullOrgansWiring(t *testing.T) {
 	if !recallCalled {
 		t.Fatal("Memory.Recall should have been called before the first Think")
 	}
-	if len(gotMemories) != 1 || string(gotMemories[0].Content) != "note" {
-		t.Fatalf("first Think Memories = %+v, want one record carrying %q", gotMemories, "note")
-	}
 	if !rememberCalled {
 		t.Fatal("Memory.Remember should have been called once at the terminal")
 	}
@@ -294,13 +369,21 @@ func TestFullOrgansWiring(t *testing.T) {
 		gotFacts.Output != "tok" || gotFacts.Outcome != meowire.OutcomeDone {
 		t.Fatalf("Remember facts = %+v, want {wired-agent work tok Done}", gotFacts)
 	}
-	if gotIdentity != "wire" {
-		t.Fatalf("Identity = %q, want %q", gotIdentity, "wire")
+	system, user := brainRequest(t, fb.Requests(), 0)
+	if !containsAll(system, "## Identity", "wire", "- m1:", "ctx1", "note") {
+		t.Fatalf("first request's system bundle = %q, want Identity/Methods/Context/Memories present", system)
 	}
-	if len(gotMethods) != 1 || gotMethods[0].Name != "m1" {
-		t.Fatalf("Methods = %+v, want [m1]", gotMethods)
+	if user != "work" {
+		t.Fatalf("first request's user message = %q, want the stimulus", user)
 	}
-	if len(firstCtx) != 1 || firstCtx[0] != "ctx1" {
-		t.Fatalf("first Think Context = %v, want [ctx1]", firstCtx)
+}
+
+// containsAll reports whether s contains every want.
+func containsAll(s string, want ...string) bool {
+	for _, w := range want {
+		if !strings.Contains(s, w) {
+			return false
+		}
 	}
+	return true
 }

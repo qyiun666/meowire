@@ -28,7 +28,6 @@ type Agent struct {
 // Swappable port slot names for Replace (dynamic wiring). The blueprint owns
 // these values (nerve.WirePoint.Slot); slots_sync_test.go fails on drift.
 const (
-	SlotThink   = "think"
 	SlotAct     = "act"
 	SlotSandbox = "sandbox"
 	SlotBudget  = "budget"
@@ -39,9 +38,11 @@ const (
 // Replace swaps one runtime port (see the Slot* constants above; the blueprint
 // owns the set). It takes effect at the next Stimulate — each Stimulate builds
 // a fresh LoopContext, so an in-flight Stimulate keeps the ports it started
-// with. It is how a host changes its agent's mind or its policy between
-// stimuli — another LLM, a stricter permission membrane — without rebuilding
-// the agent. Closer is never swappable (it is the resource binding). Safe for
+// with. It is how a host changes its agent's policy between stimuli — a
+// stricter permission membrane, another tool port — without rebuilding the
+// agent. The brain has no slot: it is the bundled organ, and a different
+// model is a new assembly (New with different Brain parameters), not a swap.
+// Closer is never swappable (it is the resource binding). Safe for
 // concurrent use; after Close it refuses the swap and leaves the incoming port
 // untouched. Returns the previous port value (nil if none was
 // set); wrong slot or port type returns an error. An incoming organ that

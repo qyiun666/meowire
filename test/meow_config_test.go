@@ -14,16 +14,10 @@ import (
 
 // TestConfigApplied verifies MaxRounds etc. flow through to LoopContext.
 func TestConfigApplied(t *testing.T) {
-	thinkCalls := 0
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			thinkCalls++
-			return &meowire.Decision{
-				Text:      "t",
-				ToolCalls: []meowire.ToolCall{{ID: "x", Name: "tool"}},
-			}, nil
-		}},
-	}), meowire.Config{MaxRounds: 2})
+	fb := testutil.NewFakeBrain(t,
+		testutil.FakeCompletion{Text: "t", ToolCalls: []testutil.FakeCall{{ID: "x", Name: "tool"}}},
+	)
+	a, err := testNew(testOrgans(t, meowire.Organs{Brain: fb.Cfg(false)}), meowire.Config{MaxRounds: 2})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -46,11 +40,7 @@ func TestConfigApplied(t *testing.T) {
 
 // TestConfigMaxToolOutput verifies MaxToolOutput truncation.
 func TestConfigMaxToolOutput(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "done"}, nil
-		}},
-	}), meowire.Config{MaxToolOutput: 10})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{MaxToolOutput: 10})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -71,11 +61,7 @@ func TestConfigMaxToolOutput(t *testing.T) {
 // swap takes effect) with Old/New correct — the config-update counterpart of
 // EventReplace.
 func TestConfigAuditEmitted(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "done"}, nil
-		}},
-	}), meowire.Config{MaxRounds: 5})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{MaxRounds: 5})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -119,11 +105,7 @@ func TestConfigAuditEmitted(t *testing.T) {
 // TestConfigAuditZeroValue verifies a zero-value UpdateConfig is also
 // recorded (every "unique update" is traceable).
 func TestConfigAuditZeroValue(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "done"}, nil
-		}},
-	}), meowire.Config{MaxRounds: 2})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{MaxRounds: 2})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -150,11 +132,7 @@ func TestConfigAuditZeroValue(t *testing.T) {
 // TestAuditOrderReplaceBeforeConfig verifies the audit ordering at the start
 // of the next Stimulate: EventReplace first, then EventConfig (换线 → 换配置).
 func TestAuditOrderReplaceBeforeConfig(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "done"}, nil
-		}},
-	}), meowire.Config{MaxRounds: 2})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{MaxRounds: 2})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -162,8 +140,8 @@ func TestAuditOrderReplaceBeforeConfig(t *testing.T) {
 
 	for range a.Stimulate(context.Background(), "work") {
 	}
-	if _, err := a.Replace(meowire.SlotThink, testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-		return &meowire.Decision{Text: "done"}, nil
+	if _, err := a.Replace(meowire.SlotAct, testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		return &meowire.Effect{Result: "done"}, nil
 	}}); err != nil {
 		t.Fatalf("replace: %v", err)
 	}

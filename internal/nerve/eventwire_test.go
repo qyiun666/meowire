@@ -35,7 +35,7 @@ func wireEvents() []Event {
 		{Kind: EventSandbox, CellID: "c1", Verdict: &SandboxVerdict{CellID: "c1", Call: *call, Ruling: VerdictAsk, Reason: "r", Question: "sure?"}},
 		{Kind: EventWaitInput, CellID: "c1", Wait: &WaitInput{CellID: "c1", Call: *call, Question: "?", Session: sess}},
 		{Kind: EventPaused, CellID: "c1", Wait: &WaitInput{CellID: "c1", Session: sess}},
-		{Kind: EventReplace, CellID: "c1", Replace: &ReplaceAudit{CellID: "c1", Slot: "think", OldType: "nerve.a", NewType: "nerve.b"}},
+		{Kind: EventReplace, CellID: "c1", Replace: &ReplaceAudit{CellID: "c1", Slot: "act", OldType: "nerve.a", NewType: "nerve.b"}},
 		{Kind: EventConfig, CellID: "c1", Config: &ConfigAudit{CellID: "c1", Old: LoopConfig{MaxRounds: 2}, New: LoopConfig{MaxRounds: 9, ParallelActs: true, MaxParallelActs: 3}}},
 		// A restored event carries its own loss report onward.
 		{Kind: EventText, CellID: "c1", Text: "restored", Dropped: []string{"err.identity"}},

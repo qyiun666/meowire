@@ -18,19 +18,14 @@ import (
 // facade: Stimulate suspends with EventWaitInput, Resume continues with the
 // response as tool feedback, and the loop completes normally.
 func TestAgentResumeFlow(t *testing.T) {
-	thinks := 0
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			thinks++
-			if thinks == 1 {
-				return &meowire.Decision{Text: "ask", ToolCalls: []meowire.ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
-			}
-			return &meowire.Decision{Text: "done"}, nil
-		}},
+	a, err := testNew(testOrgans(t, meowire.Organs{
 		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{WaitInput: "may I?"}, nil
 		}},
-	}), meowire.Config{})
+	},
+		testutil.FakeCompletion{Text: "ask", ToolCalls: []testutil.FakeCall{{ID: "t1", Name: "ask_user"}}},
+		testutil.FakeCompletion{Text: "done"},
+	), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -72,11 +67,7 @@ func TestAgentResumeFlow(t *testing.T) {
 // so errors.Is against the re-exported value is the only way a host can name
 // this condition.
 func TestAgentResumeAfterClose(t *testing.T) {
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "ok"}, nil
-		}},
-	}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -107,13 +98,8 @@ func TestAgentResumeAfterClose(t *testing.T) {
 // Stimulate while the in-flight loop keeps its snapshot, and GetConfig
 // supports read-modify-write.
 func TestAgentUpdateConfig(t *testing.T) {
-	calls := 0
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			calls++
-			return &meowire.Decision{Text: "ok"}, nil
-		}},
-	}), meowire.Config{MaxRounds: 1})
+	fb := testutil.NewFakeBrain(t)
+	a, err := testNew(testOrgans(t, meowire.Organs{Brain: fb.Cfg(false)}), meowire.Config{MaxRounds: 1})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -122,8 +108,8 @@ func TestAgentUpdateConfig(t *testing.T) {
 	// Baseline: MaxRounds=1, one Think, done.
 	for range a.Stimulate(context.Background(), "work") {
 	}
-	if calls != 1 {
-		t.Fatalf("think calls = %d, want 1", calls)
+	if fb.Hits() != 1 {
+		t.Fatalf("brain requests = %d, want 1", fb.Hits())
 	}
 
 	// Read-modify-write via GetConfig/UpdateConfig.
@@ -144,17 +130,10 @@ func TestAgentUpdateConfig(t *testing.T) {
 // TestAgentUpdateConfigTakesEffect verifies the updated MaxRounds bounds the
 // next Stimulate (the effective value is snapshotted per Stimulate).
 func TestAgentUpdateConfigTakesEffect(t *testing.T) {
-	calls := 0
-	a, err := testNew(testOrgans(meowire.Organs{
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			calls++
-			// Always request a tool so the loop only ends by exhausting rounds.
-			return &meowire.Decision{Text: "t", ToolCalls: []meowire.ToolCall{{ID: "t", Name: "tool"}}}, nil
-		}},
-		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
-			return &meowire.Effect{Result: "ok"}, nil
-		}},
-	}), meowire.Config{MaxRounds: 2})
+	fb := testutil.NewFakeBrain(t, // every round asks for a tool, so only the round cap ends it
+		testutil.FakeCompletion{Text: "t", ToolCalls: []testutil.FakeCall{{ID: "t", Name: "tool"}}},
+	)
+	a, err := testNew(testOrgans(t, meowire.Organs{Brain: fb.Cfg(false)}), meowire.Config{MaxRounds: 2})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -170,8 +149,8 @@ func TestAgentUpdateConfigTakesEffect(t *testing.T) {
 	if !gotMaxRounds {
 		t.Fatal("want ErrMaxRounds with MaxRounds=2")
 	}
-	if calls != 2 {
-		t.Fatalf("think calls = %d, want 2", calls)
+	if fb.Hits() != 2 {
+		t.Fatalf("brain requests = %d, want 2", fb.Hits())
 	}
 
 	// Hot update to MaxRounds=4 → next Stimulate runs 4 rounds.
@@ -183,27 +162,23 @@ func TestAgentUpdateConfigTakesEffect(t *testing.T) {
 			gotMaxRounds = true
 		}
 	}
-	if calls != 2+4 {
-		t.Fatalf("think calls = %d, want %d (updated MaxRounds=4)", calls, 2+4)
+	if fb.Hits() != 2+4 {
+		t.Fatalf("brain requests = %d, want %d (updated MaxRounds=4)", fb.Hits(), 2+4)
 	}
 }
 
 // TestAgentReplaceAuditEvent verifies Replace yields EventReplace at the
 // start of the next Stimulate with slot/old/new carried.
 func TestAgentReplaceAuditEvent(t *testing.T) {
-	oldThink := testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-		return &meowire.Decision{Text: "old"}, nil
-	}}
-	newThink := testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-		return &meowire.Decision{Text: "new"}, nil
-	}}
-	a, err := testNew(testOrgans(meowire.Organs{Think: oldThink}), meowire.Config{})
+	a, err := testNew(testOrgans(t, meowire.Organs{}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
 	defer a.Close()
 
-	if _, err := a.Replace(meowire.SlotThink, newThink); err != nil {
+	if _, err := a.Replace(meowire.SlotAct, testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
+		return &meowire.Effect{Result: "new"}, nil
+	}}); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 
@@ -217,11 +192,11 @@ func TestAgentReplaceAuditEvent(t *testing.T) {
 	if got == nil {
 		t.Fatal("want EventReplace at the start of the next Stimulate")
 	}
-	if got.Slot != "think" {
-		t.Fatalf("audit = %+v, want slot think", got)
+	if got.Slot != "act" {
+		t.Fatalf("audit = %+v, want slot act", got)
 	}
-	if got.NewType != "testutil.Thinker" {
-		t.Fatalf("audit new type = %q, want the swapped-in Thinker", got.NewType)
+	if got.NewType != "testutil.Effector" {
+		t.Fatalf("audit new type = %q, want the swapped-in Effector", got.NewType)
 	}
 }
 
@@ -231,21 +206,20 @@ func TestAgentReplaceAuditEvent(t *testing.T) {
 // has to be reachable from the importable package, not only from `nerve`.
 func TestForeignSessionIsMatchableAtTheFacade(t *testing.T) {
 	ctx := context.Background()
-	suspender, err := testNew(testOrgans(meowire.Organs{
+	suspender, err := testNew(testOrgans(t, meowire.Organs{
 		ID: "suspender",
-		Think: testutil.Thinker{Fn: func(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-			return &meowire.Decision{Text: "ask", ToolCalls: []meowire.ToolCall{{ID: "t1", Name: "ask_user"}}}, nil
-		}},
 		Act: testutil.Effector{Fn: func(ctx context.Context, a meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{WaitInput: "may I?"}, nil
 		}},
-	}), meowire.Config{})
+	},
+		testutil.FakeCompletion{Text: "ask", ToolCalls: []testutil.FakeCall{{ID: "t1", Name: "ask_user"}}},
+	), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new suspender: %v", err)
 	}
 	defer suspender.Close()
 
-	other, err := testNew(testOrgans(meowire.Organs{ID: "other"}), meowire.Config{})
+	other, err := testNew(testOrgans(t, meowire.Organs{ID: "other"}), meowire.Config{})
 	if err != nil {
 		t.Fatalf("new other: %v", err)
 	}

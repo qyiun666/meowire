@@ -6,26 +6,26 @@
 > Module path: `github.com/qyiun666/meowire`. Public package:
 > `github.com/qyiun666/meowire/api` (aliased `meowire`).
 
-## 0. The One-Line Model
+## 0. One-line model
 
-meowire is a **pure orchestration kernel**: the host implements seven ports
-(LLM, tools, cleanup, hooks, permission gate, context trimming, experience memory), and the
-framework runs the Think → Act → yield event loop. **The framework does not
-manage history, does not manage multi-agent, and provides no default
-implementations** — all seven ports are required; a missing one is an error.
-
-The host touches exactly three methods: `New` (assembly), `Stimulate` (run one
-step), `Close` (shutdown).
+meowire is an **orchestration kernel with its own brain**: the brain is bundled (openai-go —
+the host passes five parameters via `Organs.Brain`: BaseURL/Key/Model/Stream/Mode, aimed at any
+OpenAI-compatible endpoint; `Mode` selects the wire — `BrainModeChat` (default, zero value
+included) speaks chat completions, `BrainModeResponses` speaks the Responses API, and both wires
+render the same stateless Prompt and fold back into the same Decision), the host implements six ports (tools, cleanup, hooks, the
+permission gate, context trimming, experience memory), and the framework runs the Think →
+Act → yield event loop. **The framework manages no history and no multi-agent** — the six
+ports plus the brain parameters are all required; a missing one is an error.
 
 ## 1. Integration Flow Overview (6 Steps)
 
 ```
-Implement seven ports → Assemble Organs → Set Config → Assemble Blueprint → New() → Stimulate() consume event stream → Close()
+Fill Brain parameters → Implement six ports → Assemble Organs → Set Config → Assemble Blueprint → New() → Stimulate() consume event stream → Close()
 ```
 
 | Step | What | Key point |
 |------|------|-----------|
-| 1 | Implement Thinker/Effector/Closer/Hooks/Sandbox/ContextBudget/Memory | All seven ports required |
+| 1 | Fill `Brain` parameters; implement Effector/Closer/Hooks/Sandbox/ContextBudget/Memory | The brain arrives by parameters; all six ports required |
 | 2 | Assemble the `Organs` struct | Inject ports + fixed context |
 | 3 | Set `Config` | Zero values are defaults; nothing must be set explicitly |
 | 4 | Assemble `Blueprint{Organs, Config}` and `New(bp)` | Missing port/callback returns an error; incomplete Budget too |
@@ -34,17 +34,30 @@ Implement seven ports → Assemble Organs → Set Config → Assemble Blueprint 
 
 ---
 
-## 2. Step 1: Implement the Seven Ports (Host Capabilities)
+## 2. Step 1: Fill the Brain parameters, implement the Six Ports (Host Capabilities)
 
-### 2.1 Thinker — the LLM wrapper (the brain)
+### 2.1 Brain — the bundled organ (parameters, not a port)
+
+The brain is the one organ the framework ships: the host fills four parameters in
+`Organs.Brain`, the composition root constructs it and injects it, and the loop calls it as
+its Thinker. The host never implements a Thinker and never imports an SDK.
 
 ```go
-type Thinker interface {
-    Think(ctx context.Context, p *Prompt) (*Decision, error)
+type BrainConfig struct {
+    BaseURL string // OpenAI-compatible endpoint ("" = the official one)
+    Key     string // credential (required)
+    Model   string // model id (required)
+    Stream  bool   // true = SSE transport
 }
 ```
 
-**Input `Prompt` (assembled by the framework; the Thinker only reads) fields:**
+Streaming deltas ride `meowire.WithSink(ctx, sink)`: mount the Sink on the context handed to
+`Stimulate`, and the brain's text deltas arrive **before** the output membrane rules
+(stream-and-correct — `EventText`, whole and already ruled, replaces what was pushed); the
+event stream only carries whole-segment Text. Retry stays single-layer: transport retries are
+off, the whole budget belongs to `Config.MaxRetries`.
+
+**The `Prompt` entering the brain (assembled by the framework; `BeforeStimulate`/`BeforeThink` hooks may rewrite it) fields:**
 
 | Field | Content | Injected by |
 |-------|---------|-------------|
@@ -53,14 +66,14 @@ type Thinker interface {
 | `Methods` | Built-in capability description (gene projection, describes only; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
 | `Tools` | Available tool list (function schemas) | Host, fixed at construction |
 | `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results never enter the text track | Host base + framework appends |
-| `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the host Thinker's decision | Framework, appended within the cycle |
+| `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the bundled brain's | Framework, appended within the cycle |
 | `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
 | `Reflection` | Self-review note from the previous round (Reflexion slot, passed through verbatim) | Host (write-back in `BeforeStimulate`) |
 | `Memories` | This round's recalled experience records (`Memory.Recall` output; replaced wholesale per round, never accumulated, never enters a Session snapshot) | Framework, before each Think |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
 | `Plan` | Task plan/progress text | Host, via `Hooks.BeforeThink` (`p.Plan` is pointer-writable, effective next round); pairs with a host `update_plan` tool for a closed loop (§7.3 ③) |
 
-**Return `Decision` fields:**
+**The `Decision` leaving the brain (observable via the `AfterThink` hook) fields:**
 
 | Field | Content | Constraint |
 |-------|---------|------------|
@@ -68,15 +81,10 @@ type Thinker interface {
 | `ToolCalls` | Tool calls this round `{ID, Name, Args}` | `Args` is a JSON string; **empty = end of cycle** |
 | `Usage` | Token usage `{Prompt, Completion, Total}` | **nil = skip the EventUsage accounting event** |
 
-**Host responsibilities:**
-- Render the Prompt into messages, call the LLM API, parse tool calls
-- Consume streaming output inside the Thinker (e.g. push to a WebSocket channel);
-  the event stream only carries whole-segment Text
-- **Must respect `ctx.Done`** (long requests may be cancelled by the framework)
-- Must be concurrency-safe if the same Agent is stimulated concurrently
-- Field-by-field landing (assistant/tool pairing, which of the two retry layers to keep,
-  streaming versus the output membrane) is written up against a real SDK in
-  [thinker-openai-go.md](thinker-openai-go.md) (zh-CN)
+The field-by-field account of that rendering and transport (assistant/tool pairing, the retry
+trade-off, streaming versus the output membrane) is
+[thinker-openai-go.md](thinker-openai-go.md) — the bundled brain's implementation spec and
+protocol reference.
 
 ### 2.2 Effector — the tool executor (the hands)
 
@@ -268,9 +276,11 @@ choice:
 
 ```go
 o.Sandbox = meowire.GuardStack(workspacePolicy, networkPolicy) // one membrane, two layers
-o.Think   = meowire.FallbackThinker(primary, backup)          // one brain, two candidates
 o.Act     = meowire.FallbackEffector(localTools, remoteTools)  // one pair of hands
 ```
+
+The brain has no combinator: it is the bundled organ, and there is nothing behind it to fall
+back to — a different model is a new `New` with different `Brain` parameters.
 
 - Every combinator **returns the port type itself**, so a composed organ is wired exactly like a
   plain one: no slot, no event, no config field was added, and `Replace` accepts a stack the same
@@ -279,7 +289,7 @@ o.Act     = meowire.FallbackEffector(localTools, remoteTools)  // one pair of ha
   permissive layer gets no vote), the first Ask wins over Allow, and a layer that errors is the
   fail-closed Deny the port contract already defines. `Bounds()` reports the first non-empty
   boundary. An empty stack denies — a membrane with no layers guards nothing
-- `FallbackThinker` / `FallbackEffector` return the first member's answer that carries **no
+- `FallbackEffector` returns the first member's answer that carries **no
   execution error**; when every member fails, the joined errors surface (the last failure is no
   more the reason than the first). A tool that ran and said no (`Effect.Err`) is a result, not a
   broken organ, so the stack never moves on for it
@@ -299,7 +309,11 @@ o.Act     = meowire.FallbackEffector(localTools, remoteTools)  // one pair of ha
 ```go
 o := meowire.Organs{
     ID:      "agent-001",                       // required, unique per live agent (no default)
-    Think:   myThinker,                         // required
+    Brain:   meowire.BrainConfig{               // required (parameters): the bundled brain
+        BaseURL: "https://api.deepseek.com/v1", // "" = the official OpenAI endpoint
+        Key:     os.Getenv("LLM_KEY"),
+        Model:   "deepseek-chat",
+    },
     Act:     myEffector,                        // required
     Closer:  myCloser,                          // required
     Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: ...}), // required: all eight callbacks (helper fills missing ones)
@@ -320,7 +334,7 @@ o := meowire.Organs{
 | Field | Type | Content | Required |
 |-------|------|---------|----------|
 | `ID` | string | Unique agent ID, **required with no default** — name each instance when one `Blueprint` is `New`ed many times; the framework authors events by it (`Event.CellID`) and checks suspension handles against it, and the host uses it to tell its own instances apart | **yes** |
-| `Think` | Thinker | LLM wrapper | **yes** |
+| `Brain` | BrainConfig | Bundled-brain parameters (BaseURL "" = official endpoint; Key/Model required; `Mode` selects the wire — `BrainModeChat` (default, zero value included) = chat completions, `BrainModeResponses` = the Responses API; a value outside the enum fails assembly) | **required (parameters)** |
 | `Act` | Effector | Tool execution | **yes** |
 | `Closer` | Closer | Resource cleanup | **yes** |
 | `Hooks` | *Hooks | Interception callbacks (all eight callbacks required) | **yes** |
@@ -330,7 +344,7 @@ o := meowire.Organs{
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
 | `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
-| `Tools` | []ToolSpec | Tool list; feeds Prompt.Tools; `ToolSpec{Name, Desc, Input, Output}`, `Input` is a JSON Schema (the Thinker generates ToolCall.Args from it) | no |
+| `Tools` | []ToolSpec | Tool list; feeds Prompt.Tools; `ToolSpec{Name, Desc, Input, Output}`, `Input` is a JSON Schema (the brain builds tool definitions from it) | no |
 | `Context` | []string | Resident context base (history/memory injected here, MemHop); initial Prompt.Context | no |
 
 **Note: `New` validates per callback — any nil field in `Hooks` (H1–H8) fails assembly (explicit no-op, not absence). Hosts can use `meowire.FullHooks(...)` to fill missing callbacks with declared no-ops.**
@@ -379,7 +393,7 @@ agent.UpdateConfig(cfg)   // wholesale swap: takes effect at the next Stimulate/
 
 ```go
 type Blueprint struct {
-    Organs Organs   // seven ports + fixed context (all required)
+    Organs Organs   // brain parameters + six ports + fixed context (all required)
     Config Config   // zero values are defaults
 }
 
@@ -399,18 +413,19 @@ agent, err := meowire.New(bp)
   is reached, and the failed attempt is released through the host `Closer`
 - After assembly the host calls `Stimulate` / `Resume` / `Pause` / `Unpause` / `Close`, and may
   swap ports at runtime via `Replace` (below)
-- All seven ports and eight hook callbacks must be implemented by the host — **no stubs, no defaults, no "minimal runnable" path**; use `meowire.FullHooks(...)` to declare unneeded hooks as explicit no-ops
+- The brain parameters, six ports and eight hook callbacks must all be present — **no stubs, no optional port, no "minimal runnable" path**; the brain is the one organ the framework provides (every other organ has no default implementation), and `meowire.FullHooks(...)` declares unneeded hooks as explicit no-ops
 
 ### 5.1 Dynamic wiring: `Replace` (runtime organ swap)
 
 ```go
-oldThink, err := agent.Replace(meowire.SlotThink, myOtherLLM) // takes effect at the next Stimulate
+oldPort, err := agent.Replace(meowire.SlotSandbox, stricterMembrane) // takes effect at the next Stimulate
 ```
 
-- Swappable slots: `SlotThink` / `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks` (the
+- Swappable slots: `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks` (the
   blueprint's `WirePoint.Slot` field is the single source; `Connectome()` / `SwappableSlots()`
   enumerate it and a guard test pins the constants to it);
-  `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable
+  `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable — and
+  **the brain has no slot**: a different model is a new `New` with different `Brain` parameters
 - Semantics: each `Stimulate` snapshots ports into a fresh LoopContext — an **in-flight
   Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
   port is returned (host decides whether to shut the old implementation down — the framework never
@@ -713,7 +728,7 @@ overrides them per instance (see [reference-host.md](reference-host.md) Step 8).
 > The framework event stream is "visible only to its consumer": the main loop
 > never sees sub-agent events (flat model). Unified main/sub-agent state
 > visibility is implemented by the host-side trio — **zero framework changes**:
-> StreamHub (shared state container) + Thinker wrapper (streaming, optional) +
+> StreamHub (shared state container) + `WithSink` streaming injection (optional) +
 > Hooks/tools (state & plan, required).
 
 **StreamHub — shared state container (keyed by `Organs.ID`)**
@@ -741,41 +756,31 @@ type taskView struct {
 The host creates **one instance** and injects the same hub into every agent
 (main and sub); the UI reads the hub for a real-time view of all agents.
 
-**① Streaming (optional) — forwarded inside the Thinker wrapper**
+**① Streaming (optional) — via `WithSink`**
 
-`EventText` is always whole-segment (per-round `Decision.Text`); **token-level
-streaming can only be produced by the host's Thinker implementation**. The host
-wraps the Thinker and pushes every token from the LLM streaming API into
-`hub.streams[id]`:
+The framework's `EventText` is always the whole segment (each round's `Decision.Text`);
+token-level deltas ride the bundled brain's Sink channel — mounted on the context handed to
+`Stimulate`, they arrive before the output membrane rules, and the host pushes each delta
+into `hub.streams[id]`:
 
 ```go
-type streamingThinker struct {
-	inner llm.Client // host's streaming LLM client
-	id    string     // = Organs.ID
-	hub   *StreamHub
-}
-
-func (t *streamingThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	ch := t.hub.channel(t.id) // no channel registered → nil → silent
-	stream := t.inner.Stream(p)
-	var sb strings.Builder
-	for tok := range stream {
-		sb.WriteString(tok)
-		if ch != nil {
-			select {
-			case ch <- meowire.Event{Kind: meowire.EventText, Text: tok}:
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
+func streamingCtx(ctx context.Context, id string, hub *StreamHub) context.Context {
+	ch := hub.channel(id) // no channel injected → nil → silent
+	if ch == nil {
+		return ctx
 	}
-	return &meowire.Decision{Text: sb.String()}, nil // full text back to the framework
+	return meowire.WithSink(ctx, func(delta string) {
+		select {
+		case ch <- meowire.Event{Kind: meowire.EventText, Text: delta}:
+		case <-ctx.Done():
+		}
+	})
 }
 ```
 
-Silent execution (sub-agent running in the background, no push): do not register
-a channel when creating that agent; `channel(id)` returns nil and naturally
-pushes nothing.
+Silent execution (a sub-agent running in the background, no streaming): simply do not wrap
+`WithSink` — the deltas have nowhere to go and are never pushed. When `EventText` arrives,
+replace what was pushed (stream-and-correct).
 
 **② State sync (required) — written by Hooks callbacks**
 
@@ -845,8 +850,8 @@ case "spawn_agent":
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 			ID:      args.ID,
-			Think:   &streamingThinker{inner: t.inner, id: args.ID, hub: hub}, // same hub
-			Act:     sameEffector,
+			Brain:  baseBrain, // same parameters (or a different Model per sub-task)
+			Act:    sameEffector,
 			Hooks:   hooksFor(args.ID), // closures over the same hub
 			Closer:  closerStub,
 			Sandbox: sandboxStub,
@@ -869,25 +874,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	meowire "github.com/qyiun666/meowire/api"
 )
 
-// ① Thinker: wraps the LLM
-type llmThinker struct{ /* LLM client */ }
-
-func (t *llmThinker) Think(ctx context.Context, p *meowire.Prompt) (*meowire.Decision, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	msgs := buildMessages(p) // every Prompt field needs a landing point; see thinker-openai-go.md §2
-	resp := t.client.Chat(ctx, msgs, toolSchemas(p.Tools))
-	return &meowire.Decision{
-		Text:      resp.Text,
-		ToolCalls: resp.Tools,
-		Usage:     resp.Usage,
-	}, nil
-}
+// ① Brain: parameters, not a port (BaseURL/Key/Model/Stream/Mode — Mode selects the wire, chat by default)
 
 // ② Effector: tool dispatch
 type effector struct{ registry map[string]func(ctx context.Context, args string) (*meowire.Effect, error) }
@@ -905,13 +897,13 @@ func main() {
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 			ID:      "agent-001",
-			Think:   &llmThinker{},
+			Brain:   meowire.BrainConfig{Model: "gpt-5.2", Key: os.Getenv("OPENAI_API_KEY")},
 			Act:     &effector{registry: toolRegistry},
 			Closer:  &closer{},
 			Hooks:   meowire.FullHooks(meowire.Hooks{BeforeThink: injectMemory, OnCycleEnd: persistOutput}),
 			Sandbox: &sandbox{},
 			Budget:  &meowire.ContextBudget{MaxTokens: 4000, Trimmer: trim, TrimResults: trimResults},
-			Mem:     &memory{}, // seventh required port: Recall + Remember
+			Mem:     &memory{}, // required port: Recall + Remember
 			System:  "You are a meow agent, answer in English",
 			Tools: []meowire.ToolSpec{
 				{Name: "calc", Desc: "calculator", Input: `{"type":"object","properties":{"expr":{"type":"string"}}}`, Output: "number"},
@@ -985,7 +977,7 @@ func main() {
 | README (zh-CN) | [README.zh-CN.md](README.zh-CN.md) | Chinese quick start + concept overview |
 | Host Integration Guide (zh-CN) | [host-integration.md](host-integration.md) | Chinese integration contract |
 | Reference Host (zh-CN) | [reference-host.md](reference-host.md) | Step-by-step runnable AI host (LLM, tools, permissions, memory, multi-agent, persistence) |
-| Thinker Adapter (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) (zh-CN) | Field-by-field `Thinker` adaptation to a real LLM SDK (`openai-go/v3`) |
+| Brain spec (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) | The bundled brain's placement table and protocol reference (`openai-go/v3`) |
 | Protocol Mapping Guide | [protocols.md](protocols.md) (zh-CN) | Host-side mapping to MCP / A2A / AGENTS.md / Authority |
 | api module context | [api/agent.md](api/agent.md) | Long-term api package context, key decisions, pitfalls |
 | Decision loop source | [internal/nerve/loop.go](internal/nerve/loop.go) | Loop orchestration (Think→Act→yield) |

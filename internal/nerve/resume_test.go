@@ -572,23 +572,23 @@ func TestDecisionLoopPendingReplaceEvents(t *testing.T) {
 			return &Effect{Result: "ok"}, nil
 		}},
 	}
-	oldThink := lc.Think
-	newThink := mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-		return &Decision{Text: "new"}, nil
+	oldAct := lc.Act
+	newAct := mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
+		return &Effect{Result: "new"}, nil
 	}}
 	lc.PendingReplace = []ReplaceAudit{
-		{CellID: "c1", Slot: "think", OldType: typeName(oldThink), NewType: typeName(newThink)},
+		{CellID: "c1", Slot: "act", OldType: typeName(oldAct), NewType: typeName(newAct)},
 		{CellID: "c1", Slot: "budget", OldType: typeName(lc.Budget), NewType: typeName(lc.Budget)},
 	}
 	events := collectEvents(context.Background(), lc)
 	if len(events) < 2 || events[0].Kind != EventReplace || events[1].Kind != EventReplace {
 		t.Fatalf("first events = %v, want two EventReplace before anything else", kindsOf(events))
 	}
-	if events[0].Replace.Slot != "think" || events[1].Replace.Slot != "budget" {
-		t.Fatalf("replace slots = %q/%q, want think/budget (in order)", events[0].Replace.Slot, events[1].Replace.Slot)
+	if events[0].Replace.Slot != "act" || events[1].Replace.Slot != "budget" {
+		t.Fatalf("replace slots = %q/%q, want act/budget (in order)", events[0].Replace.Slot, events[1].Replace.Slot)
 	}
-	if events[0].Replace.OldType != typeName(oldThink) || events[0].Replace.NewType != typeName(newThink) {
-		t.Fatalf("think audit = %+v, want both port names", events[0].Replace)
+	if events[0].Replace.OldType != typeName(oldAct) || events[0].Replace.NewType != typeName(newAct) {
+		t.Fatalf("act audit = %+v, want both port names", events[0].Replace)
 	}
 }
 

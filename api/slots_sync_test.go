@@ -43,7 +43,7 @@ func TestRequiredPortsHaveOrganFields(t *testing.T) {
 // a constant that drifts from it would accept a swap the assembly review never
 // advertised.
 func TestReplaceSlotConstantsMatchBlueprint(t *testing.T) {
-	got := []string{SlotThink, SlotAct, SlotSandbox, SlotBudget, SlotMem, SlotHooks}
+	got := []string{SlotAct, SlotSandbox, SlotBudget, SlotMem, SlotHooks}
 	slices.Sort(got)
 
 	want := nerve.SwappableSlots()

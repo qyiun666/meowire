@@ -9,13 +9,15 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/qyiun666/meowire/internal/brain"
 	"github.com/qyiun666/meowire/internal/cell"
 	"github.com/qyiun666/meowire/internal/nerve"
 )
 
-// Organs holds all host-provided ports (all required — no defaults, no stubs).
-// Unlike internal packages, which tolerate nil ports defensively, the api
-// layer rejects a missing port at assembly time.
+// Organs holds the host-provided ports (all required — no stubs) plus the
+// parameters of the bundled brain. Unlike internal packages, which tolerate
+// nil ports defensively, the api layer rejects a missing port at assembly
+// time.
 // The wiring is carried by Blueprint and written once; the agent's name is not
 // — every instance the host creates declares its own ID, which is what the
 // events it emits and the suspension handles it produces are attributed to.
@@ -25,8 +27,12 @@ type Organs struct {
 	// unnamed agent — a default shared by every instance would attribute one
 	// agent's events and handles to another) and unique among the agents a host
 	// runs at once. This is the one Organs field to vary per New.
-	ID      string
-	Think   Thinker        // Required
+	ID string
+	// Brain parameterizes the bundled brain — the one organ the framework
+	// ships. A host passes model, key and transport switches here and never
+	// implements a Thinker; BaseURL aims it at any OpenAI-compatible endpoint.
+	// Required: Validate rejects an empty Model or Key.
+	Brain   BrainConfig
 	Act     Effector       // Required
 	Closer  Closer         // Required
 	Hooks   *Hooks         // Required
@@ -117,13 +123,14 @@ func New(b Blueprint) (*Agent, error) {
 	}
 
 	o, cfg := b.Organs, b.Config
+	thinker := brain.New(o.Brain)
 	if err := bootOrgans(o); err != nil {
 		return nil, err
 	}
 	c := &cell.Cell{
 		ID:       o.ID,
 		Identity: o.Identity,
-		Think:    o.Think,
+		Think:    thinker,
 		Act:      o.Act,
 		Hooks:    o.Hooks,
 		Sandbox:  o.Sandbox,
@@ -148,13 +155,14 @@ type organRef struct {
 	organ any
 }
 
-// hostOrgans lists every required port in boot order. The order is the
+// hostOrgans lists every required host port in boot order. The order is the
 // blueprint's (nerve.PortOrder) and a test pins the two against each other, so
 // a port added to the blueprint has to be added here as well — otherwise its
-// Boot would be skipped without a word.
+// Boot would be skipped without a word. The brain is absent on purpose: the
+// composition root constructs it from Organs.Brain and it declares no Boot
+// (the SDK client does no network handshake).
 func hostOrgans(o Organs) []organRef {
 	return []organRef{
-		{"Think", o.Think},
 		{"Act", o.Act},
 		{"Closer", o.Closer},
 		{"Hooks", o.Hooks},

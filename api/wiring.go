@@ -96,12 +96,12 @@ func SlotsByTarget(o Organs, targetID string) []Slot {
 
 // organFilled answers "is this blueprint slot wired?" per slot id. Ports read
 // their own Organs field, hooks read the container plus the specific callback,
-// and the framework built-in / api-injected slots are always active; the
-// optional boot slot follows whether the host's Closer can boot. An unknown id
-// is reported unfilled: a slot the api does not know about cannot be assumed
-// present.
+// and the framework built-in / api-injected slots are always active (F2 is the
+// bundled brain — parameterized rather than injected, its parameters are
+// checked by name in Validate); the optional boot slot follows whether the
+// host's Closer can boot. An unknown id is reported unfilled: a slot the api
+// does not know about cannot be assumed present.
 var organFilled = map[string]func(Organs) bool{
-	"P1":  func(o Organs) bool { return o.Think != nil },
 	"P2":  func(o Organs) bool { return o.Act != nil },
 	"P3":  func(o Organs) bool { return o.Closer != nil },
 	"P3b": func(o Organs) bool { _, bootable := o.Closer.(Bootable); return bootable },
@@ -122,6 +122,7 @@ var organFilled = map[string]func(Organs) bool{
 	"H7":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnError != nil },
 	"H8":  func(o Organs) bool { return o.Hooks != nil && o.Hooks.OnCycleEnd != nil },
 	"F1":  func(Organs) bool { return true },
+	"F2":  func(Organs) bool { return true },
 	"G1":  func(Organs) bool { return true },
 }
 
@@ -171,6 +172,9 @@ func Validate(o Organs, cfg Config) []Issue {
 		}
 	}
 
+	// error: the bundled brain's parameters.
+	issues = append(issues, brainParams(o)...)
+
 	// error: Budget present but incomplete — a trimmer per growing track is the
 	// organ's function and MaxTokens its limit; either missing means the budget
 	// cannot regulate what reaches the brain.
@@ -198,12 +202,46 @@ func Validate(o Organs, cfg Config) []Issue {
 	return append(issues, defaultNotes(o, cfg)...)
 }
 
+// brainParams reports the error findings for the bundled brain's parameters:
+// Model and Key are the two the transport cannot default (BaseURL empty means
+// the official endpoint), and a Mode outside the enum is refused rather than
+// reinterpreted — a brain without them, or aimed at a wire it does not speak,
+// is not a brain the round can think with.
+func brainParams(o Organs) []Issue {
+	var issues []Issue
+	if o.Brain.Model == "" {
+		issues = append(issues, Issue{
+			ID:    "assembly",
+			Level: LevelError,
+			Wire:  "F2",
+			Msg:   "Brain.Model is empty (the bundled brain has no model to call)",
+		})
+	}
+	if o.Brain.Key == "" {
+		issues = append(issues, Issue{
+			ID:    "assembly",
+			Level: LevelError,
+			Wire:  "F2",
+			Msg:   "Brain.Key is empty (the bundled brain has no credential)",
+		})
+	}
+	if m := o.Brain.Mode; m != 0 && m != BrainModeChat && m != BrainModeResponses {
+		issues = append(issues, Issue{
+			ID:    "assembly",
+			Level: LevelError,
+			Wire:  "F2",
+			Msg:   fmt.Sprintf("Brain.Mode = %d is not a wire the brain speaks (1 = chat, 2 = responses)", m),
+		})
+	}
+	return issues
+}
+
 // defaultNotes reports the assembly choices that are legal but worth hearing
 // about: an organ left empty or a limit left at its documented default.
 func defaultNotes(o Organs, cfg Config) []Issue {
 	var notes []Issue
 	if o.Identity == "" {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P1", Msg: "Identity empty (agent has no persona)"})
+		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "F2", Msg: "Identity empty (agent has no persona)"})
 	}
 	if len(o.Tools) == 0 {
 		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "Tools empty (no tools declared)"})

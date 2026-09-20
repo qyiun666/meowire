@@ -7,8 +7,10 @@
 // call reached an organ that could carry it out.
 //
 // Every combinator returns an existing port type, so a composed organ is
-// interchangeable with a plain one — `Replace("think", FallbackThinker(a, b))`
-// works because the slot table never knew the difference.
+// interchangeable with a plain one — `Replace("act", FallbackEffector(a, b))`
+// works because the slot table never knew the difference. The brain has no
+// combinator: it is the one organ the framework itself ships, and there is
+// nothing behind it to fall back to.
 package nerve
 
 import (
@@ -76,30 +78,6 @@ func (g guardStack) Bounds() string {
 		}
 	}
 	return ""
-}
-
-// FallbackThinker tries each brain in order until one answers without an
-// execution error; the first success is returned as it came. When every member
-// fails, the joined errors surface — the last one is no more the reason than
-// the first. An empty stack reports the mistake rather than inventing a
-// decision.
-func FallbackThinker(ports ...Thinker) Thinker { return fallbackThinker(ports) }
-
-type fallbackThinker []Thinker
-
-func (f fallbackThinker) Think(ctx context.Context, p *Prompt) (*Decision, error) {
-	if len(f) == 0 {
-		return nil, errors.New("nerve: fallback thinker has no member wired")
-	}
-	var errs []error
-	for i, port := range f {
-		decision, err := port.Think(ctx, p)
-		if err == nil {
-			return decision, nil
-		}
-		errs = append(errs, fmt.Errorf("member %d: %w", i, err))
-	}
-	return nil, errors.Join(errs...)
 }
 
 // FallbackEffector tries each tool port in order until one executes without an

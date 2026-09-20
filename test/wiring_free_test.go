@@ -39,11 +39,12 @@ func TestHostSurfaceIsWiringFree(t *testing.T) {
 }
 
 // organsFields are every slot a host may declare on the assembly. The list is
-// the kernel's whole optional-and-required surface: seven ports plus the fixed
-// parts, and no delivery organ between agents — an agent that wants another's
-// work is created by the host, not addressed by the kernel.
+// the kernel's whole optional-and-required surface: six host ports, the brain
+// parameters, and the fixed parts — and no delivery organ between agents: an
+// agent that wants another's work is created by the host, not addressed by the
+// kernel.
 var organsFields = []string{
-	"ID", "Think", "Act", "Closer", "Hooks", "Sandbox", "Budget", "Mem",
+	"ID", "Brain", "Act", "Closer", "Hooks", "Sandbox", "Budget", "Mem",
 	"System", "Methods", "Tools", "Context", "Identity",
 }
 
