@@ -28,9 +28,7 @@ func TestPromptReflectionSlot(t *testing.T) {
 			}
 			return &Decision{Text: "done"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				p.Reflection = "previous attempt failed: narrow the goal"

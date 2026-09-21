@@ -81,7 +81,7 @@ func (DecisionLoop) Resume(ctx context.Context, lc *LoopContext, sess Session, r
 		lc.clearPauseRequest()
 	}
 	// A tool wait consumes the answer as the pending tool's structured result
-	// (rendering is the host's call). The call ID is not a precondition: it is
+	// (rendering is the bundled brain's call). The call ID is not a precondition: it is
 	// whatever the model emitted, and a provider that omits it must not cost the
 	// host its answer — the executed path records ToolResult.ID the same way
 	// (see feedback). A refusal is that call failing rather than answering, so it

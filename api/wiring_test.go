@@ -19,27 +19,13 @@ import (
 // parameters that pass validation. The brain's BaseURL stays empty here: these
 // tests exercise assembly, not thinking — the one that Stimulates points the
 // brain at a scripted endpoint.
-// fullHooks returns a Hooks with all eight required callbacks set (no-ops).
-func fullHooks() *Hooks {
-	return &Hooks{
-		BeforeStimulate: func(ctx context.Context, p *Prompt) error { return nil },
-		AfterStimulate:  func(ctx context.Context, output string) {},
-		BeforeThink:     func(ctx context.Context, p *Prompt) error { return nil },
-		AfterThink:      func(ctx context.Context, d *Decision) error { return nil },
-		BeforeAct:       func(ctx context.Context, a *Action) error { return nil },
-		AfterAct:        func(ctx context.Context, a *Action, e *Effect, err error) {},
-		OnError:         func(ctx context.Context, err error) {},
-		OnCycleEnd:      func(ctx context.Context, output string, _ CycleOutcome) {},
-	}
-}
-
 func fullOrgans() Organs {
 	return Organs{
 		ID:      "test-agent",
 		Brain:   BrainConfig{Model: "fake-model", Key: "test-value-not-a-credential"},
 		Act:     testutil.Effector{Fn: func(ctx context.Context, a Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
 		Closer:  &testutil.Closer{},
-		Hooks:   fullHooks(),
+		Hooks:   FullHooks(Hooks{}),
 		Sandbox: testutil.Sandbox{},
 		Budget:  &ContextBudget{MaxTokens: 100, Trimmer: func(c []string, _ int) []string { return c }, TrimResults: func(rs []ToolResult, _ int) []ToolResult { return rs }},
 		Mem:     testutil.Memory{},
@@ -66,7 +52,7 @@ func TestWiringDiagramFull(t *testing.T) {
 // (which Validate reports as an error — no optional hooks).
 func TestWiringDiagramHookLevel(t *testing.T) {
 	o := fullOrgans()
-	o.Hooks = fullHooks()
+	o.Hooks = FullHooks(Hooks{})
 	o.Hooks.BeforeThink = nil
 	byID := map[string]Slot{}
 	for _, s := range WiringDiagram(o) {
@@ -311,7 +297,10 @@ func TestRenderJSON(t *testing.T) {
 	if !json.Valid(doc) {
 		t.Fatal("RenderJSON output is not valid JSON")
 	}
-	var g WiringGraph
+	var g struct {
+		Nodes []WireNode
+		Slots []Slot
+	}
 	if err := json.Unmarshal(doc, &g); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -329,59 +318,6 @@ func TestRenderJSON(t *testing.T) {
 	}
 	if filled == 0 {
 		t.Error("json graph should mark filled slots")
-	}
-}
-
-// TestBuildGraph: the assembled graph carries the canonical nodes and one
-// slot edge per blueprint entry.
-func TestBuildGraph(t *testing.T) {
-	g := BuildGraph(fullOrgans())
-	if len(g.Nodes) == 0 {
-		t.Fatal("graph has no nodes")
-	}
-	if len(g.Slots) != len(Connectome()) {
-		t.Fatalf("graph slots = %d, want %d", len(g.Slots), len(Connectome()))
-	}
-	ids := map[string]bool{}
-	for _, n := range g.Nodes {
-		ids[n.ID] = true
-	}
-	for _, s := range g.Slots {
-		if !ids[s.Wire.TargetID] {
-			t.Errorf("slot %s targets unknown node %q", s.Wire.ID, s.Wire.TargetID)
-		}
-	}
-}
-
-// TestSlotsByTarget: the find-by-function query returns every slot touching
-// a data object, and only those.
-func TestSlotsByTarget(t *testing.T) {
-	// Context: P6 (trim), H3 (replace) — the text track only.
-	slots := SlotsByTarget(fullOrgans(), "context")
-	got := map[string]bool{}
-	for _, s := range slots {
-		got[s.Wire.ID] = true
-	}
-	for _, id := range []string{"P6", "H3"} {
-		if !got[id] {
-			t.Errorf("Context slots missing %s", id)
-		}
-	}
-	if len(slots) != 2 {
-		t.Errorf("Context slots = %d, want 2", len(slots))
-	}
-	// ToolResults: F1 (append) writes it, P6b (trim) shrinks it — the single
-	// structured feedback track has exactly those two regulators.
-	trSlots := SlotsByTarget(fullOrgans(), "toolresults")
-	trGot := map[string]bool{}
-	for _, s := range trSlots {
-		trGot[s.Wire.ID] = true
-	}
-	if !trGot["F1"] || !trGot["P6b"] || len(trSlots) != 2 {
-		t.Errorf("ToolResults slots = %v, want exactly F1 and P6b", trSlots)
-	}
-	if len(SlotsByTarget(fullOrgans(), "plan")) != 0 {
-		t.Error("plan node has no direct slots (host-side object)")
 	}
 }
 

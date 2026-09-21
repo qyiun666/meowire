@@ -1,7 +1,7 @@
 // Copyright (c) 2026 qyiun666
 // SPDX-License-Identifier: MIT
 
-// memory.go — the seventh port: experience in and out of the cycle.
+// memory.go — blueprint port P7: experience in and out of the cycle.
 package nerve
 
 import (

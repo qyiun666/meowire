@@ -5,8 +5,9 @@
 //
 // The blueprint is a graph: ConnectomeNodes (nerve) are the data-object
 // nodes, Connectome (nerve) is the edge list (slots). This file extracts the
-// host's actual assembly (WiringDiagram / BuildGraph), compares it against
-// the blueprint (Validate) and renders the graph as ASCII (RenderDiagram).
+// host's actual assembly (WiringDiagram), compares it against the blueprint
+// (Validate) and renders the graph as ASCII (RenderDiagram) or JSON
+// (RenderJSON).
 // New rejects error-level findings (missing/incomplete required ports);
 // info findings are surfaced here for hosts that want to inspect defaults.
 package meowire
@@ -41,13 +42,6 @@ type Issue struct {
 	Msg   string
 }
 
-// WiringGraph is the assembled wiring graph: data-object nodes plus the
-// slots (edges) with their actual filled state. Built by BuildGraph.
-type WiringGraph struct {
-	Nodes []WireNode
-	Slots []Slot
-}
-
 // Connectome returns the static wiring blueprint: every slot edge the
 // framework exposes (fresh slice per call).
 func Connectome() []WirePoint {
@@ -69,29 +63,6 @@ func WiringDiagram(o Organs) []Slot {
 		slots = append(slots, Slot{Wire: wp, Filled: slotFilled(o, wp.ID)})
 	}
 	return slots
-}
-
-// BuildGraph assembles the wiring graph for a host assembly: nodes are the
-// canonical data objects, slots are the edges (with filled state).
-func BuildGraph(o Organs) WiringGraph {
-	return WiringGraph{
-		Nodes: nerve.ConnectomeNodes(),
-		Slots: WiringDiagram(o),
-	}
-}
-
-// SlotsByTarget returns every slot that reads or mutates the given graph
-// node (TargetID), with filled state. This is the "find by function" query:
-// e.g. who touches Context → P6 (trim) and H3 (replace); the structured
-// tool-result track is its own node (P6b, F1).
-func SlotsByTarget(o Organs, targetID string) []Slot {
-	var out []Slot
-	for _, s := range WiringDiagram(o) {
-		if s.Wire.TargetID == targetID {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // organFilled answers "is this blueprint slot wired?" per slot id. Ports read
@@ -142,8 +113,8 @@ func slotFilled(o Organs, id string) bool {
 // all findings:
 //
 //   - error: a required slot is not wired, a wired port is incomplete
-//     (ContextBudget without a Trimmer / MaxTokens — a budget that does not
-//     trim is not a budget), or the agent is unnamed (Organs.ID is what events
+//     (ContextBudget without a Trimmer, TrimResults or a positive MaxTokens —
+//     a budget that does not trim is not a budget), or the agent is unnamed (Organs.ID is what events
 //     are attributed to and what a suspension handle is checked against). New
 //     rejects these.
 //   - info: notable defaults (empty Identity/Tools/Context, default rounds).
@@ -290,5 +261,9 @@ func RenderDiagram(o Organs) string {
 // readable counterpart of RenderDiagram — hosts persist it for observability
 // dashboards, diff-based assembly review, or wiring documentation.
 func RenderJSON(o Organs) ([]byte, error) {
-	return json.MarshalIndent(BuildGraph(o), "", "  ")
+	doc := struct {
+		Nodes []WireNode
+		Slots []Slot
+	}{Nodes: nerve.ConnectomeNodes(), Slots: WiringDiagram(o)}
+	return json.MarshalIndent(doc, "", "  ")
 }

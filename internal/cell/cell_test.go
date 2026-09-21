@@ -43,6 +43,49 @@ func newTestCell(t *testing.T, think nerve.Thinker, act nerve.Effector) *Cell {
 	}
 }
 
+// TestCellReplaceAuditSurvivesFailedPrelude: a run that dies before its
+// prelude can emit the drained audits must not lose them — the next run
+// delivers them first (event.go's exactly-once audit promise).
+func TestCellReplaceAuditSurvivesFailedPrelude(t *testing.T) {
+	think := testutil.Thinker{Fn: func(ctx context.Context, p *nerve.Prompt) (*nerve.Decision, error) {
+		return &nerve.Decision{Text: "ok"}, nil
+	}}
+	act := testutil.Effector{Fn: func(ctx context.Context, a nerve.Action) (*nerve.Effect, error) {
+		return &nerve.Effect{Result: "ok"}, nil
+	}}
+	c := newTestCell(t, think, act)
+	c.Hooks.BeforeStimulate = func(ctx context.Context, p *nerve.Prompt) error {
+		return errors.New("refused")
+	}
+	if _, err := c.Replace("act", act); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	var first []nerve.Event
+	for ev := range c.Stimulate(context.Background(), "x") {
+		first = append(first, ev)
+	}
+	if len(first) != 2 || first[0].Kind != nerve.EventState || first[0].State != nerve.StateError ||
+		first[1].Kind != nerve.EventError {
+		t.Fatalf("first run events = %+v, want state(error) then the prelude error", first)
+	}
+	c.Hooks.BeforeStimulate = func(ctx context.Context, p *nerve.Prompt) error { return nil }
+	var second []nerve.Event
+	for ev := range c.Stimulate(context.Background(), "x") {
+		second = append(second, ev)
+	}
+	var audits int
+	for _, ev := range second {
+		if ev.Kind == nerve.EventReplace {
+			audits++
+		}
+	}
+	if audits != 1 || len(second) == 0 || second[0].Kind != nerve.EventReplace ||
+		second[0].Replace == nil || second[0].Replace.Slot != "act" {
+		t.Fatalf("second run = %d events, EventReplace count %d, first = %+v; want the requeued audit leading the stream",
+			len(second), audits, second)
+	}
+}
+
 // TestCellStimulate verifies basic event flow: State→Sandbox→Text→Done.
 func TestCellStimulate(t *testing.T) {
 	c := newTestCell(t,

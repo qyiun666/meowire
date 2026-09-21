@@ -23,8 +23,10 @@ var (
 
 // Bootable is the optional lifecycle capability: New calls Boot on each organ
 // that implements it, in PortOrder, before the agent exists; Replace calls it
-// before a swap commits. Cleanup stays the Closer port's alone — see the
-// internal contract for why Boot is not Close's counterpart.
+// before a swap commits. Cleanup stays the Closer port's alone: Boot prepares an
+// organ for use and may fail assembly, while Close is the one channel that
+// releases whatever the attempt opened — see the Bootable contract in
+// internal/nerve/lifecycle.go.
 type Bootable = nerve.Bootable
 
 // PortOrder reports the sequence the framework brings the required host ports

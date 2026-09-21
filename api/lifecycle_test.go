@@ -85,7 +85,7 @@ func bootableOrgans() (Organs, *lifecycleLog) {
 }
 
 // TestBootOrderMatchesBlueprint: hostOrgans and the blueprint are two lists of
-// the same seven ports; this is the guard that makes them one fact. Without it
+// the same six host ports; this is the guard that makes them one fact. Without it
 // a port added to the blueprint would simply never be booted, silently.
 func TestBootOrderMatchesBlueprint(t *testing.T) {
 	var got []string

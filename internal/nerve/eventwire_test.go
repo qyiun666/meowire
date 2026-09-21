@@ -224,7 +224,9 @@ func TestEventWireCoversEveryEventField(t *testing.T) {
 
 // TestEnumNamesCoverEveryValue: every encoded enum travels by a table name, so a
 // value added without a name would be refused at write time. This catches it at
-// build time instead.
+// build time instead. The tables are pinned by their literal contents, not just
+// their length: a renamed or reordered name keeps every value addressable and
+// still breaks a journal written by the build that named it the other way.
 func TestEnumNamesCoverEveryValue(t *testing.T) {
 	look := map[string]func(string) bool{
 		"loop state": func(n string) bool { _, ok := loopStateOf(n); return ok },
@@ -234,14 +236,15 @@ func TestEnumNamesCoverEveryValue(t *testing.T) {
 	for _, tb := range []struct {
 		what  string
 		names []string
-		n     int
+		want  []string
 	}{
-		{"loop state", loopStateNames, int(StateError) + 1},
-		{"ruling", verdictNames, int(VerdictAsk) + 1},
-		{"wait kind", waitKindNames, int(WaitUtterance) + 1},
+		{"loop state", loopStateNames, []string{"idle", "thinking", "acting", "paused", "waiting", "done", "error"}},
+		{"ruling", verdictNames, []string{"deny", "allow", "ask"}},
+		{"wait kind", waitKindNames, []string{"pause", "tool", "call-ask", "utterance-ask"}},
 	} {
-		if len(tb.names) != tb.n {
-			t.Errorf("%d %s names for %d values", len(tb.names), tb.what, tb.n)
+		if !slices.Equal(tb.names, tb.want) {
+			t.Fatalf("%s wire names = %v, want %v (a journal written against the old table cannot be read back)",
+				tb.what, tb.names, tb.want)
 		}
 		for i, name := range tb.names {
 			if name == "" || name == "unknown" {
@@ -354,10 +357,16 @@ func TestUnnamedRulingRefusedAtEncode(t *testing.T) {
 
 // TestEventKindNamesCoverEveryKind: the name table is indexed by kind value, so
 // a kind added to the iota without a name would decode as "unknown" and be
-// rejected — this catches it at build time instead.
+// rejected — this catches it at build time instead. The table's contents are
+// pinned, not just its length: renaming a kind is a wire-format decision, and a
+// journal written before it must not be read as this build's vocabulary.
 func TestEventKindNamesCoverEveryKind(t *testing.T) {
-	if len(eventKindNames) != int(EventConfig)+1 {
-		t.Fatalf("%d kind names for %d kinds", len(eventKindNames), int(EventConfig)+1)
+	want := []string{
+		"text", "tool-call", "tool-result", "state", "done", "error",
+		"usage", "sandbox", "wait-input", "paused", "replace", "config",
+	}
+	if !slices.Equal(eventKindNames, want) {
+		t.Fatalf("kind wire names = %v, want %v", eventKindNames, want)
 	}
 	for k := EventText; k <= EventConfig; k++ {
 		if k.String() == "unknown" {

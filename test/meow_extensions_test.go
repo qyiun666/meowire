@@ -72,13 +72,7 @@ func TestAgentPauseResumeMidLoop(t *testing.T) {
 	if got := sess.Kind(); got != meowire.WaitPause {
 		t.Fatalf("Session.Kind() = %d, want meowire.WaitPause", got)
 	}
-	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, meowire.Response{}) {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Resume(context.Background(), sess, meowire.Response{})), meowire.EventDone) {
 		t.Fatal("expected EventDone after Resume from pause")
 	}
 }
@@ -108,13 +102,7 @@ func TestAgentPauseSuspendsNewStimulate(t *testing.T) {
 	}
 
 	// Resume continues the suspended run (Resume clears the pause request).
-	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, meowire.Response{}) {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Resume(context.Background(), sess, meowire.Response{})), meowire.EventDone) {
 		t.Fatal("expected EventDone after Resume from entry pause")
 	}
 }
@@ -186,13 +174,7 @@ func TestAgentPauseResumeIdempotent(t *testing.T) {
 	// After the storm the agent must still be usable: clear the request then
 	// run (a leftover request would suspend the run at its first gap point).
 	a.Unpause()
-	var gotDone bool
-	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Stimulate(context.Background(), "work")), meowire.EventDone) {
 		t.Fatal("expected EventDone after concurrent Pause/Resume storm")
 	}
 }
@@ -301,13 +283,7 @@ func TestToolResultsReachBrain(t *testing.T) {
 	}
 	defer a.Close()
 
-	var gotDone bool
-	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Stimulate(context.Background(), "work")), meowire.EventDone) {
 		t.Fatal("expected EventDone")
 	}
 	replies := toolReplies(t, fb.Requests(), 1)
@@ -344,13 +320,7 @@ func TestConfigToolTimeout(t *testing.T) {
 	}
 	defer a.Close()
 
-	var gotDone bool
-	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Stimulate(context.Background(), "work")), meowire.EventDone) {
 		t.Fatal("expected EventDone (timeout is feedback, not failure)")
 	}
 	if actCalls != 1 {

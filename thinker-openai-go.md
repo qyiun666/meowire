@@ -30,8 +30,16 @@
 
 ## 1. 两端形状
 
+内置大脑的文件分工（六枚生产文件，读实现时按这张表找）：`brain.go`（`Config`/`Mode`/
+`Think` 分路 / `wrapErr` / `Sink`+`WithSink`）、`render.go`（`Prompt` → messages，固定段与
+动态段分块）、`tools.go`（`toolParams`/`toolSchema`/`describeTool`，后两枚两根 wire 共用）、
+`decision.go`（`decisionOf`）、`stream.go`（`streamCompletion`）、`responses.go`（Responses wire 的
+`thinkResponses`/`responseInput`/`responseToolParams`/`streamResponse`/`responseDecisionOf`）。
+
+
 ```go
-// meowire
+// 内核端口 internal/nerve/port.go:344 —— 不在公开面：宿主不实现 Thinker，
+// 它由 api 的组合根用 Organs.Brain 参数构造（内置大脑是唯一实现）。
 type Thinker interface {
     Think(ctx context.Context, p *Prompt) (*Decision, error)
 }
@@ -55,7 +63,7 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 
 ## 2. `Prompt` 全字段 → 请求的落点
 
-`Prompt` 是进脑的唯一数据包（`internal/nerve/port.go:24-50`）。11 个字段都有落点，
+`Prompt` 是进脑的唯一数据包（`internal/nerve/port.go:26-53`）。11 个字段都有落点，
 **漏一个字段就是一个器官静默失能**——下表是完整清单。
 
 | `Prompt` 字段 | 类型 | chat 请求落点 |
@@ -65,11 +73,11 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 | `Methods` | `[]MethodSpec{Name, Desc, Input, Output}` | 同一消息里的能力清单文本（描述性，**不是**可调用工具，别塞进 `Tools`） |
 | `Bounds` | `string` | 同一消息里的执行边界段（`Sandbox.Bounds()` 快照） |
 | `Plan` | `string` | 同一消息里的计划段，或 assistant 预填充 |
-| `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:44`）。**被膜拒掉的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
+| `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:52` 的 `deniedText`）。**被膜拒掉的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
 | `Reflection` | `string` | 同一消息里的自查段（宿主在 `BeforeStimulate` 写、跨轮同值，框架从不写；空 = 无） |
 | `Memories` | `[]Record{Key, CellID, Kind, Content []byte, Created}` | 检索段文本；`Content` 是 `[]byte`，转字符串前自己决定解码。每轮整体替换、不进 `Session` 快照 |
 | `Input` | `string` | `openai.UserMessage(p.Input)` |
-| `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，见 §5。**这是每轮现读的数据**：`BeforeStimulate` 可以整体改写它（`internal/nerve/hooks.go:66`），缓存到启动期会静默丢掉改写 |
+| `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，`Output` 折进 description（chat 协议无输出 schema 位），见 §5。**这是每轮现读的数据**：`BeforeStimulate` 可以整体改写它（`internal/nerve/hooks.go:66`），缓存到启动期会静默丢掉改写 |
 | `ToolResults` | `[]ToolResult{ID, Name, Result, Err}` | `assistant(tool_calls)` + `tool` 成对消息，见 §3 |
 
 固定段与动态段分开拼，是这份表最重要的用法：内核每轮只换动态段，
@@ -96,12 +104,12 @@ type chatThinker struct {
 
 `Think` 返回 `Decision` 时把这一轮记进 `turns`，下一次 `Think` 用它重建
 `assistant`/`tool` 段（§9 的 `transcript`）。这不是"接线缺口"，是器官的内部状态：
-内核给的是**语义**（哪个调用 resulted in 什么），角色编排是宿主的责任
-（`ToolResult` 的文档注释就写着"渲染归宿主 Thinker 决定"）。
+内核给的是**语义**（哪个调用 resulted in 什么），角色编排是器官的责任——内置大脑
+选了无状态重建（`ToolResult` 的文档注释写着"渲染归大脑、不归内核"）。
 
 三件事由适配器自己负责，内核不代管：
 
-- **并发**：cell 没有运行锁（`internal/cell/cell.go:96-111` 只在 `wireMu` 下快照端口），
+- **并发**：cell 没有运行锁（`internal/cell/cell.go:169-217` 只在 `wireMu` 下快照端口），
   同一 Agent 上并发跑两次 `Stimulate`/`Resume` 就会并发调用同一个 Thinker 实例，
   一个 Thinker 服务多个 Agent 时同理。所以缓存必须加锁——并发写 `map`/`slice` 是直接
   fatal，不是慢一点。（`Act` 只有在框架开了 `ParallelActs` 时才要求并发安全；
@@ -165,25 +173,23 @@ func (t *chatThinker) decisionOf(c *openai.ChatCompletion) *meowire.Decision {
 
 ```go
 // toolParams 每轮现读 p.Tools（§2 的改写警告）：本轮哪些工具可读由 p.Tools 本身表达。
-// ToolSpec.Input 是 JSON Schema 文本，SDK 要的是 map。
-func toolParams(p *meowire.Prompt) ([]openai.ChatCompletionToolUnionParam, error) {
+// 无工具的轮返回 nil——wire 因此省略整个 tools 字段；空数组会被部分 OpenAI 兼容端点
+// 直接拒绝。ToolSpec.Input 是 JSON Schema 文本，SDK 要的是 map（toolSchema 解析）。
+func toolParams(p *nerve.Prompt) ([]openai.ChatCompletionToolUnionParam, error) {
+    if len(p.Tools) == 0 {
+        return nil, nil
+    }
     tools := make([]openai.ChatCompletionToolUnionParam, 0, len(p.Tools))
     for _, spec := range p.Tools {
-        schema := openai.FunctionParameters{}                 // = shared.FunctionParameters（aliases.go:492）
-        if spec.Input != "" {
-            if err := json.Unmarshal([]byte(spec.Input), &schema); err != nil {
-                return nil, fmt.Errorf("openai thinker: tool %s schema: %w", spec.Name, err)
-            }
+        schema, err := toolSchema(spec)                      // = shared.FunctionParameters（aliases.go:492）
+        if err != nil {
+            return nil, err
         }
-        tools = append(tools, openai.ChatCompletionToolUnionParam{
-            OfFunction: &openai.ChatCompletionFunctionToolParam{
-                Function: openai.FunctionDefinitionParam{     // shared/shared.go:877
-                    Name:        spec.Name,
-                    Description: openai.String(spec.Desc),
-                    Parameters:  schema,
-                },
-            },
-        })
+        tools = append(tools, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{ // shared/shared.go:877
+            Name:        spec.Name,
+            Description: openai.String(describeTool(spec)), // Output 无座位，折进描述
+            Parameters:  schema,
+        }))
     }
     return tools, nil
 }
@@ -195,8 +201,8 @@ func toolParams(p *meowire.Prompt) ([]openai.ChatCompletionToolUnionParam, error
   只在注释里，**客户端不校验**，服务端拒。`ToolSpec.Name` 若来自不可信来源，宿主自己过滤。
 - `Strict` 存在（`shared.go:886`，`param.Opt[bool]`），但 `ToolSpec` 没有对应字段：
   要严格模式就在宿主侧按工具名维护一张表，别去改内核的 `ToolSpec`。
-- `ToolSpec.Output` 无处可放——chat completions 不接受输出 schema。渲染进描述文本或不发，
-  由宿主定；它仍是给模型看的一段说明。
+- `ToolSpec.Output` 无处可放——chat completions 不接受输出 schema；内置大脑把它折进描述文本
+  （`describeTool`，responses 侧同一折法），它仍是给模型看的一段说明。
 
 ## 6. 错误、取消与重试：两层不要相乘
 
@@ -214,8 +220,10 @@ func toolParams(p *meowire.Prompt) ([]openai.ChatCompletionToolUnionParam, error
 ```go
 client := openai.NewClient(option.WithMaxRetries(0))   // 传输重试只留一层
 ```
-并把 `Config.MaxRetries` 当作**唯一**的重试预算。两层相乘会把一次故障变成
-`MaxRetries × SDK 重试` 次请求。
+内置大脑正是这么做的：`internal/brain/brain.go` 建 client 时传 `option.WithMaxRetries(0)`，
+  唯一预算由 `nerve` 侧的 `thinkWithRetry`（`internal/nerve/retry.go`）花掉——大脑自己不重试；
+  两层相乘会把一次故障变成 `MaxRetries × SDK 重试` 次请求。
+  非 2xx 的状态码被拼进错误文本（`wrapErr`），为的是让永久失败早死而不是烧预算。
 
 错误形状只有一个：非 2xx 是 `*openai.Error`（= `apierror.Error` 别名，`aliases.go:17`），
 字段 `StatusCode/Code/Message/Type`，方法是指针接收者，所以
@@ -298,11 +306,15 @@ func (t *chatThinker) Boot(ctx context.Context) error {
 （`api/assemble.go`），`Replace` 换入时同样先启动再提交。**一次装配只启动一次**，
 所以这个 Thinker 实例属于一个 agent，不跨 `New` 复用（`internal/nerve/lifecycle.go`）。
 
-用 `nerve.FallbackThinker` 包多个脑时要记住：组合器**不转发 Boot**（框架对交进来的端口值
-做能力断言，`internal/nerve/compose.go:29`）。成员各自需要启动就在组合前自己启动，
-或者只把 `Boot` 声明在最外层实际使用的那个实例上。
+组合器（`GuardStack` / `FallbackEffector`）**不转发 Boot**（框架对交进来的端口值
+做能力断言，`internal/nerve/compose.go:31`）。成员各自需要启动就在组合前自己启动，
+或者只把 `Boot` 声明在最外层实际使用的那个实例上。内置大脑没有组合器——换模型是
+重新 `New`，不是运行期换件。
 
-## 9. 参考实现（非流式，可直接改）
+## 9. 参考实现（带状态的对照客户端，非内置大脑；非流式，可直接改）
+
+以下是**带状态**的对照客户端（它自己攒 `turns` 缓存），所以错误前缀自取（`openai thinker:`）；
+内置大脑无状态、不缓存轮次，错误一律 `brain:`（`internal/brain/*.go`）。
 
 ```go
 type turn struct {
@@ -327,7 +339,7 @@ func newChatThinker(model openai.ChatModel) *chatThinker {
 
 // Reset 开一次新对话，由宿主在自己的调用侧触发——只有它知道哪一次是新的。
 // 别拿 BeforeStimulate 当这个信号：它是 Cycle 与 Resume 共享的序言
-// （internal/nerve/loop.go:142-151），挂起-恢复也会走它，一 Reset 就把
+// （internal/nerve/loop.go:159-187），挂起-恢复也会走它，一 Reset 就把
 // 正在恢复的那份对话抹掉了。Resume 不调 Reset，turns 原样留着，
 // 这正是恢复后还要能重建 assistant/tool 配对的原因。
 func (t *chatThinker) Reset() {
@@ -413,7 +425,8 @@ func (t *chatThinker) transcript(results []meowire.ToolResult) []openai.ChatComp
 
 `BrainConfig.Mode`（公开名 `meowire.BrainMode`）在 `Think` 入口分路：`BrainModeChat`
 （1，默认；零值同 1）走 §1–§9 的 chat completions，`BrainModeResponses`（2）走本节。
-名表之外的值由 api 层 Validate 拒绝，本包不重复校验。两根 wire 的契约完全同形：
+`Mode` 之外的值由 api 层 Validate 拒绝（它是裸枚举校验，没有事件枚举那样的名字表——`Mode` 不上线、
+不进事件流，本包也不重复校验）。两根 wire 的契约完全同形：
 无状态渲染、单层重试、Sink 先于出口膜、Usage 零值返回 nil、`wrapErr` 带 wire 名
 共用（非 2xx 两根都是 `*openai.Error`，错误文本点名是哪根 wire 拒了请求）。
 
@@ -459,7 +472,8 @@ SDK 注入请求体；消费侧一旦提前返回，`defer stream.Close()` 兜�
 - [ ] `Prompt` 11 个字段各有落点，特别是 `Memories` / `Reflection` / `Bounds`
 - [ ] assistant 只列 `ToolResults` 里的调用，每条都有一条 tool 回话；被膜拒掉的
       调用天然缺席（拒绝走 Context 轨，无需占位——占位补法是 §3 带状态对照专属）
-- [ ] `Tools` 每轮从 `p.Tools` 现建（没有启动期缓存）
+- [ ] `Tools` 每轮从 `p.Tools` 现建（没有启动期缓存）；`p.Tools` 为空时返回 `nil`
+      ——两根 wire 都不发 `tools` 字段（空数组会被部分 OpenAI 兼容端点拒绝）
 - [ ] （仅 §3/§9 带状态对照客户端适用）共享缓存有锁，`Reset` 的触发点由宿主
       定（不是 `BeforeStimulate`）——内置大脑无状态、无 `Reset`，此项对它不适用
 - [ ] 只有一层重试（`option.WithMaxRetries(0)` + `Config.MaxRetries`，或反之）

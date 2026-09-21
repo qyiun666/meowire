@@ -50,13 +50,7 @@ func TestAgentResumeFlow(t *testing.T) {
 
 	// Resume with the external response; the stream is isomorphic and the
 	// loop completes normally.
-	var gotDone bool
-	for ev := range a.Resume(context.Background(), sess, meowire.Response{Answer: "yes"}) {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Resume(context.Background(), sess, meowire.Response{Answer: "yes"})), meowire.EventDone) {
 		t.Fatal("Resume stream: want EventDone")
 	}
 }

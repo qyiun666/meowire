@@ -33,6 +33,21 @@ func (m mockEffector) Act(ctx context.Context, a Action) (*Effect, error) {
 	return m.fn(ctx, a)
 }
 
+// textThink answers every Think with one text-only decision: the round the loop
+// ends on. okEffector executes every call successfully with "ok". Both exist so
+// a test that does not care what a port returns says so in one line.
+func textThink(text string) mockThinker {
+	return mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
+		return &Decision{Text: text}, nil
+	}}
+}
+
+func okEffector() mockEffector {
+	return mockEffector{fn: func(context.Context, Action) (*Effect, error) {
+		return &Effect{Result: "ok"}, nil
+	}}
+}
+
 // testHooks returns no-op hooks with all eight required callbacks set.
 func testHooks() *Hooks {
 	return &Hooks{
@@ -153,12 +168,8 @@ func TestDecisionLoopBasicFlow(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "hello",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "response"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("response"),
+		Act:    okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 
@@ -239,9 +250,7 @@ func TestDecisionLoopMaxRounds(t *testing.T) {
 				ToolCalls: []ToolCall{{ID: "x", Name: "tool"}},
 			}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 
@@ -287,9 +296,7 @@ func TestDecisionLoopHooks(t *testing.T) {
 			}
 			return &Decision{Text: "end"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeThink: func(ctx context.Context, p *Prompt) error {
 				hookCalls = append(hookCalls, "BeforeThink")
@@ -519,9 +526,7 @@ func TestDecisionLoopYieldFalseStops(t *testing.T) {
 			thinkCalls++
 			return &Decision{Text: "text"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	var events []Event
 	fillRequired(lc)
@@ -542,12 +547,8 @@ func TestDecisionLoopOnCycleEndOnAbort(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "abort",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "final answer"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("final answer"),
+		Act:    okEffector(),
 		Hooks: &Hooks{
 			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				cycleEndCalls++
@@ -612,9 +613,7 @@ func TestDecisionLoopThinkRetry(t *testing.T) {
 			}
 			return &Decision{Text: "recovered"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 
@@ -662,9 +661,7 @@ func TestDecisionLoopOnCycleEndOnError(t *testing.T) {
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			return nil, errors.New("thinker failed")
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) {
 				cycleEndCalled = true
@@ -728,9 +725,7 @@ func TestDecisionLoopContextBudget(t *testing.T) {
 			}
 			return &Decision{Text: "done"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	collectEvents(context.Background(), lc)
 
@@ -838,9 +833,7 @@ func TestErrorPathYieldsStateError(t *testing.T) {
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			return nil, errors.New("thinker failed")
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 
@@ -867,9 +860,7 @@ func TestEventUsage(t *testing.T) {
 				Usage: &Usage{Prompt: 10, Completion: 5, Total: 15},
 			}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 
@@ -897,12 +888,8 @@ func TestDecisionLoopStimulateHooks(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "hello",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "response"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("response"),
+		Act:    okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				hookCalls = append(hookCalls, "BeforeStimulate")
@@ -951,9 +938,7 @@ func TestDecisionLoopStimulateHooksOnError(t *testing.T) {
 		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
 			return nil, errors.New("thinker failed")
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				beforeCalls++
@@ -987,9 +972,7 @@ func TestDecisionLoopStimulateHooksOnCanceledCtx(t *testing.T) {
 			thinkCalls++
 			return &Decision{Text: "text"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				beforeCalls++
@@ -1025,12 +1008,8 @@ func TestDecisionLoopStimulateHooksOnAbort(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "abort",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "text"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("text"),
+		Act:    okEffector(),
 		Hooks: &Hooks{
 			AfterStimulate: func(ctx context.Context, output string) {
 				afterCalls++
@@ -1057,9 +1036,7 @@ func TestDecisionLoopBeforeStimulateError(t *testing.T) {
 			thinkCalls++
 			return &Decision{Text: "unreachable"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				return errors.New("stimulate blocked")
@@ -1114,9 +1091,7 @@ func TestDecisionLoopBeforeStimulateMutatesPrompt(t *testing.T) {
 			secondCtx = append([]string{}, p.Context...)
 			return &Decision{Text: "done"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {
 				p.System = "injected-system"
@@ -1339,12 +1314,8 @@ func TestDecisionLoopPauseConsumerAbort(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "pause-abort",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "unreachable"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("unreachable"),
+		Act:    okEffector(),
 		Pause: &PauseGate{
 			IsPaused: func() bool { return paused.Load() },
 		},
@@ -1541,9 +1512,7 @@ func TestSandboxBoundsReachesPrompt(t *testing.T) {
 			gotBounds = p.Bounds
 			return &Decision{Text: "ok"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act:     okEffector(),
 		Sandbox: &boundsSandbox{},
 	}
 	collectEvents(context.Background(), lc)
@@ -1565,9 +1534,7 @@ func TestDecisionLoopBeforeStimulateSeesBounds(t *testing.T) {
 			thinkBounds = p.Bounds
 			return &Decision{Text: "ok"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act:     okEffector(),
 		Sandbox: &boundsSandbox{},
 		Hooks: &Hooks{
 			BeforeStimulate: func(ctx context.Context, p *Prompt) error {

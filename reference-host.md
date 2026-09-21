@@ -10,8 +10,8 @@
 - **一个 `Agent` = 一个 agent 内核**。`New(bp)` 一次 = 一个 agent；**多 agent = 同一个 `Blueprint` 多次 `New`** + 宿主自己负责 agent 间的一切通信（channel/HTTP/Redis 任选，框架不持有路由表）。
 - 框架给循环（Think → Act → yield 事件流）和**内置大脑**（`Organs.Brain` 传参即得）；工具、权限、记忆是宿主实现——六端口 + Brain 参数全部必填，其余器官没有默认实现。
 - 宿主只需要掌握三个方法：`New`（装配）、`Stimulate`（跑一轮）、`Close`（关闭）。
-- **框架侧没有任何需要宿主持久化的自主变化值**：需要落盘的全是宿主自己的东西——历史/计划（`Organs.Context`）、记忆端口后面的库、以及 §8.3 的事件 WAL。
-- 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§9）。
+- **框架侧没有任何需要宿主持久化的自主变化值**：需要落盘的全是宿主自己的东西——历史/计划（`Organs.Context`）、记忆端口后面的库、以及 §7.3 的事件 WAL。
+- 每次 `Stimulate` 是无状态 step：循环内状态不跨调用保留，历史/计划/进度由宿主外化存储（§8）。
 
 ## 1. 步骤总览（7 步）
 
@@ -50,7 +50,7 @@ myhost/
 ## Step 2：填 Brain 参数（内置大脑）
 
 LLM 对接已由框架内置：`internal/brain` 是全仓唯一 import openai-go 的包，宿主经
-`Organs.Brain` 传四个参数，组合根构造注入——不写 Thinker、不写 LLM 客户端、不 import
+`Organs.Brain` 传五个参数，组合根构造注入——不写 Thinker、不写 LLM 客户端、不 import
 任何 SDK。
 
 ```go
@@ -58,6 +58,7 @@ brain := meowire.BrainConfig{
     BaseURL: os.Getenv("LLM_BASE_URL"), // 空 = 官方 OpenAI 端点；DeepSeek/Ollama/Qwen 换这里
     Key:     os.Getenv("LLM_API_KEY"),
     Model:   os.Getenv("LLM_MODEL"),
+    Mode:    meowire.BrainModeChat, // 线协议（可选；零值即 chat，Responses API 换 BrainModeResponses）
     Stream:  true, // SSE 传输（可选）
 }
 ```
@@ -80,7 +81,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 
 	meowire "github.com/qyiun666/meowire/api"
 )
@@ -105,7 +105,7 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 
 | 返回 | 框架行为 |
 |---|---|
-| `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归宿主 |
+| `Effect{Err: "..."}` | 业务错误 → 写入 `ToolResults.Err`（结构化轨），**不重试**（防重复副作用）；渲染归内置大脑 |
 | `return nil, err` | 执行层错误 → 按 `Config.ToolMaxRetries` 重试，超时错误不重试；最终错误同样写入 `ToolResults.Err` |
 
 `spawn_agent` 这类工具在这里实现：工具自己 `New` 一个 `Agent`、消费它的 `Stimulate`、把最终输出作为普通 `Effect.Result` 交回主循环，见 Step 7。
@@ -147,7 +147,7 @@ func (s *sandbox) Allow(ctx context.Context, a meowire.Action) (meowire.Verdict,
 		// 挂起征询：reason 即问题文本，宿主经 Resume(sess, Response{Answer/Deny}) 批准或拒绝
 		return meowire.VerdictAsk, "允许执行 " + a.Call.Name + " 吗？", nil
 	}
-	return meowire.VerdictDeny, "tool not in whitelist: "+a.Call.Name, nil
+	return meowire.VerdictDeny, "tool not in whitelist: " + a.Call.Name, nil
 }
 
 // Emit 在该轮文本被任何人听到之前过审：拒绝即取代草稿，不终止循环。
@@ -186,7 +186,7 @@ func trimResults(rs []meowire.ToolResult, max int) []meowire.ToolResult {
 - `Allow` 返回 error → 按 Deny 处理（fail-closed），反馈落库为 `[sandbox-denied: sandbox error: ...]`
 - `Emit` 每轮 Think 出文本后、该文本进入事件流与累积输出之前调用：`Allow` 原样说出，`Deny` 以 `[sandbox-denied: reason]` 取代该轮文本（并进 Context，下一轮读得到），`Ask` 扣住草稿挂起，批复后按原稿说出、不重跑该轮 Think
 - `Emit` 返回 error 同样按 Deny 处理（fail-closed），审计记录 `Call` 为零值即文本侧裁决
-- `Bounds()` 每次 `Stimulate` 开始时快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
+- `Bounds()` 每次 `Stimulate`/`Resume` 的序言里快照一次进 `Prompt.Bounds`——**边界既是拦截也是提示**
 - 裁剪器不想裁时返回入参原切片即可；但两条轨都必须给：`Trimmer`、`TrimResults` 任一为 nil 或 `MaxTokens <= 0` 装配失败
 
 ---
@@ -251,7 +251,7 @@ func buildHooks() *meowire.Hooks {
 			p.Context = append(p.Context, "[提示] 回答保持简洁")
 			return nil
 		},
-		// 回合结束：结算落点（三路径都恰好一次）
+		// 回合结束：结算落点（正常/错误/挂起/消费者 break 四臂都恰好一次）
 		AfterStimulate: func(ctx context.Context, output string) {},
 	})
 }
@@ -259,7 +259,7 @@ func buildHooks() *meowire.Hooks {
 
 **⚠️ 两个关键陷阱：**
 1. **`BeforeThink`（不是 `BeforeStimulate`）里必须整体替换 `p.Context`**（`p.Context = append(p.Context[:0], newCtx...)` 或赋新切片）——它和循环内上下文共享 底层数组，直接 append 会污染循环上下文；`p.ToolResults` 同理（与循环结构化轨共享底层数组），整体替换、禁止原地 append。回合级注入放 `BeforeStimulate`（原型浅拷贝，安全），轮内动态注入才放 `BeforeThink`
-2. `AfterStimulate` 的 `output` 参数是整轮累计输出——三路径（正常/错误/消费者 break）都恰好执行一次，是结算和持久化的正确落点
+2. `AfterStimulate` 的 `output` 参数是整轮累计输出——四臂（正常/错误/挂起/消费者 break）都恰好执行一次，是结算和持久化的正确落点
 
 ---
 
@@ -271,6 +271,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -320,12 +321,20 @@ func main() {
 			Context: []string{"[用户] 喜欢简洁回答"},
 		},
 		Config: meowire.Config{
-			MaxRounds:      8,            // 硬上限，防死循环
-			MaxToolOutput:  2000,         // 工具反馈截断
-			MaxRetries:     2,            // Think 重试
-			ToolTimeout:    30 * time.Second, // 单工具 30s 超时
-			ToolMaxRetries: 1,            // 工具执行层错误重试 1 次
+			MaxRounds:       8,                // 硬上限，防死循环
+			MaxToolOutput:   2000,             // 工具反馈截断
+			MaxRetries:      2,                // Think 重试
+			ToolTimeout:     30 * time.Second, // 单工具 30s 超时
+			ToolMaxRetries:  1,                // 工具执行层错误重试 1 次
+			ParallelActs:    false,            // 一轮多调用时整批并行——开了 Effector 必须并发安全
+			MaxParallelActs: 0,                // 只在 ParallelActs 为 true 时收窄并发批；关着设它绑不到任何东西
 		},
+	}
+
+	// 装配自检：error 级 New 也会拒，info 级只有这里看得见（空 Identity/Tools/Context、
+	// 默认轮数、ParallelActs 的并发提醒、设了上限却没开并行）
+	for _, is := range meowire.Validate(bp.Organs, bp.Config) {
+		log.Printf("[%s] %s %s", is.Level, is.Wire, is.Msg)
 	}
 
 	agent, err := meowire.New(bp)
@@ -335,6 +344,7 @@ func main() {
 	defer agent.Close()
 
 	var pendingSession meowire.Session // 挂起会话句柄（EventWaitInput 带出，Resume 传回）
+	var suspended bool                 // 零值 Session 不是句柄，靠它区分「没挂起」
 
 	// ② 消费事件流（Step-Resume：break 即放弃本轮，可稍后再 Stimulate）
 	for ev := range agent.Stimulate(context.Background(), "帮我算 (23+45)*2") {
@@ -344,14 +354,19 @@ func main() {
 		case meowire.EventToolCall:
 			fmt.Println("🔧", ev.ToolCall.Name, ev.ToolCall.Args)
 		case meowire.EventToolResult:
-			fmt.Println("📦", ev.Effect.Result, ev.Effect.Err)
+			if ev.Effect != nil { // Effector 返回 (nil, err) 时这里就是 nil
+				fmt.Println("📦", ev.Effect.Result, ev.Effect.Err)
+			}
 		case meowire.EventSandbox:
 			fmt.Printf("🛡 %s %s ruling=%v reason=%q ask=%q\n", ev.Verdict.CellID, ev.Verdict.Call.Name, ev.Verdict.Ruling, ev.Verdict.Reason, ev.Verdict.Question)
+		case meowire.EventPaused: // 暂停生效：也带一条 Session 句柄，不接住就永久丢失（pause 没有问题文本）
+			fmt.Println("⏸ paused, resume with Response{}")
+			pendingSession, suspended = ev.Wait.Session, true
 		case meowire.EventWaitInput: // 挂起：保存 Session，向用户展示问题；答复到达后 Resume(ctx, sess, resp) 续跑
 			fmt.Println("❓", ev.Wait.Call.Name, ev.Wait.Question)
-			pendingSession = ev.Wait.Session
-		case meowire.EventReplace: // 端口替换审计：模型切换闭环从这里取，不再手工维护状态机
-			fmt.Printf("🔁 slot=%s old=%T new=%T\n", ev.Replace.Slot, ev.Replace.OldType, ev.Replace.NewType)
+			pendingSession, suspended = ev.Wait.Session, true
+		case meowire.EventReplace: // 端口替换审计：器官（act/sandbox/budget/mem/hooks）切换闭环从这里取
+			fmt.Printf("🔁 slot=%s old=%s new=%s\n", ev.Replace.Slot, ev.Replace.OldType, ev.Replace.NewType)
 		case meowire.EventUsage:
 			fmt.Println("💰", ev.Usage.Total, "tokens")
 		case meowire.EventDone:
@@ -361,8 +376,31 @@ func main() {
 			return
 		}
 	}
+
+	// ③ 挂起过就续跑：Session.Kind() 点名这条句柄在等什么，Response 就填对应字段
+	if suspended {
+		resp := meowire.Response{Answer: "34.5"} // WaitTool：答案即挂起工具的结构化结果
+		if k := pendingSession.Kind(); k == meowire.WaitCallAsk || k == meowire.WaitUtterance {
+			resp = meowire.Response{Deny: "timeout"} // 两处膜征询：Deny 非空即拒，空 Deny + 非空 Answer 即批准
+		}
+		for ev := range agent.Resume(context.Background(), pendingSession, resp) {
+			fmt.Printf("↩︎ %s\n", ev.Kind) // 同一套事件：真实项目里把 ② 的 switch 抽成函数复用
+		}
+	}
 }
 ```
+
+**挂起成因 → 应答字段（`Session.Kind()` 是唯一权威，别从 `Wait.Call` 反推）：**
+
+| `Session.Kind()` | 这一条在等什么 | `Response` 填哪个 | 事件来源 |
+|---|---|---|---|
+| `WaitTool` | 工具向外界要一个结果 | `Answer` 成为该调用的结构化结果；填 `Deny` 则把该调用记为失败 | `EventWaitInput` |
+| `WaitCallAsk` | 执行前的膜征询（批准/拒绝这个调用） | 空 `Deny` + 非空 `Answer` = 批准（`Answer` 留作审计 reason）；`Deny` 非空 = 拒绝 | `EventWaitInput` |
+| `WaitUtterance` | 发言前的膜征询（草稿被扣在句柄里） | 同上：批准即原稿说出，拒绝即以 `[sandbox-denied: 原因]` 取代 | `EventWaitInput` |
+| `WaitPause` | 什么都没等，只是暂停在此点生效 | 两个字段都不被读取，`Response{}` 即可 | `EventPaused` |
+
+零值 `Response` 在两种征询上都是**拒绝**（fail closed），别拿它当"默认放行"。`Session` 单次消费：
+重复 `Resume` 会把剩余工具调用再跑一遍，副作用翻倍——是否重放由宿主负责。
 
 配套小件：
 
@@ -374,7 +412,9 @@ func (c *noopCloser) Close() error { return nil }
 func toolRegistry() map[string]toolFn {
 	return map[string]toolFn{
 		"calc": func(ctx context.Context, args string) (*meowire.Effect, error) {
-			var p struct{ Expr string `json:"expr"` }
+			var p struct {
+				Expr string `json:"expr"`
+			}
 			if err := json.Unmarshal([]byte(args), &p); err != nil {
 				return &meowire.Effect{Err: "bad args: " + err.Error()}, nil
 			}
@@ -390,7 +430,7 @@ func toolRegistry() map[string]toolFn {
 
 ## Step 7：多 agent（宿主组合多实例）+ 事件日志
 
-### 8.1 多 agent = 多次 New（复用同一 Blueprint）
+### 7.1 多 agent = 多次 New（复用同一 Blueprint）
 
 一个 `Agent` 是一个内核；多 agent 就是多个 `Agent` 实例。Blueprint 一次定义，多处 `New`——注意 **`Organs.ID` 是实例身份（必填、各实例不得重名）**，且 `Organs.Context` 是切片、`Hooks` 闭包捕获，同一 bp 的实例共享它们，所以多实例要各自覆写：
 
@@ -409,7 +449,7 @@ func spawn(bp meowire.Blueprint, id string, mem *hostMemory) *meowire.Agent {
 
 子 agent 的创建位置：**宿主 Effector 工具内**（`spawn_agent`），对主循环完全透明（扁平模型，无框架级嵌套）。
 
-### 8.2 agent 间协作：宿主自己接，两种形状
+### 7.2 agent 间协作：宿主自己接，两种形状
 
 内核不知道有第二个实例，所以「A 问 B」就是宿主写的一段普通代码。两种形状够用：
 
@@ -446,8 +486,9 @@ agent 决定何时继续——这条判断从头到尾都是宿主的。
 
 **② 把 A 的输出喂进 B 的 `Stimulate`**（流水线，A 不等 B）：A 的 `EventDone` 落进宿主
 队列，宿主用队列内容起 B。跨进程就把 `EncodeEvent` 的 JSON 行当传输单元（每条自带
-`CellID` 与版本闸门）。
-### 8.3 事件日志（状态外化：WAL）
+`CellID`、`Seq`、`TS` 与版本闸门——v2 起才有序号与时刻，缺了它们就分不出「这个 agent 没话说」和「这条记录丢了」）。
+
+### 7.3 事件日志（状态外化：WAL）
 
 `Stimulate` 的事件流就是执行轨迹。宿主把它 append-only 落盘，即得 WAL——崩溃后重放日志 → 重建上下文 → 重新 `Stimulate` 续跑：
 
@@ -463,11 +504,11 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 }
 ```
 
-配合 `OnCycleEnd` 把每轮输出/计划落盘 checkpoint，宿主即可实现崩溃恢复与审计（详见 [protocols.md §5](protocols.md)）。
+配合 `OnCycleEnd` 把每次 Cycle 的输出/计划落盘 checkpoint，宿主即可实现崩溃恢复与审计（详见 [protocols.md §5](protocols.md)）。
 
 ---
 
-## 9. 集成注意事项（细节与坑）
+## 8. 集成注意事项（细节与坑）
 
 ### LLM 对接（内置大脑）
 
@@ -500,7 +541,7 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
 ### 持久化（状态外化）
 
 17. **框架不持有任何需要持久化的状态**：`Agent` 的一次运行要么跑完要么挂在 `Session` 里，后者本来就该由宿主保存；要落盘的是宿主自己的历史、记忆库和事件 WAL
-18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的进度；重负载场景用每轮 `OnCycleEnd` 快照 + WAL（§8.3）
+18. **保存时机决定丢失窗口**：只在 `Close` 保存会丢异常退出前的进度；重负载场景用每个 Cycle 结束的 `OnCycleEnd` 快照 + WAL（§7.3 事件日志与 §8 持久化小节）
 19. **事件日志用 `meowire.EncodeEvent` 按 JSON 行 append** 即可作 WAL（别直接 `json.Marshal(ev)`：`Err` 字段会被写成 `{}`，枚举也变成数字）；恢复流程 = 逐行 `DecodeEvent` → 重放日志 → 重建 `Organs.Context` → 重新 `Stimulate`，还原不完整的事件其 `Dropped` 字段会点名
 
 ### 多 agent（宿主组合）
@@ -511,11 +552,11 @@ func consumeAndLog(agent *meowire.Agent, logf func(meowire.Event) error) {
     `Resume`）；子 agent 的终态也不由框架映射成任务状态——`OnCycleEnd` 的 `CycleOutcome` 是
     唯一判词，怎么翻成宿主任务表里的状态归宿主
 
-## 10. 相关文档
+## 9. 相关文档
 
 | 文档 | 位置 | 内容 |
 |------|------|------|
 | 契约权威 | [host-integration.md](host-integration.md) | 所有接口签名、字段语义、事件序列、陷阱清单 |
 | 大脑规格 | [thinker-openai-go.md](thinker-openai-go.md) | 内置大脑的逐字段落点表与协议参考 |
 | 协议映射 | [protocols.md](protocols.md) | MCP / A2A / AGENTS.md / Authority / 长时任务状态外化 |
-| 动态接线 | [wiring.md](host-integration.md#51-动态接线-replace运行时换器官) | `Replace` 运行时换端口 |
+| 动态接线 | [host-integration.md §5.1](host-integration.md#51-动态接线replace运行时换器官) | `Replace` 运行时换端口 |

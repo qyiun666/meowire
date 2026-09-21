@@ -29,6 +29,7 @@ const (
 // excluded by name in goFiles.
 var repoDirs = []string{
 	".",
+	"../brain",
 	"../cell",
 	"../testutil",
 	"../../api",

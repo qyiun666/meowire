@@ -41,10 +41,7 @@ func TestStimulateEventSequence(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	var events []meowire.Event
-	for ev := range a.Stimulate(context.Background(), "input") {
-		events = append(events, ev)
-	}
+	events := collect(a.Stimulate(context.Background(), "input"))
 
 	want := []struct {
 		kind meowire.EventKind

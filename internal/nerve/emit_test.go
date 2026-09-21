@@ -35,11 +35,9 @@ func (s emitSandbox) Emit(_ context.Context, u Utterance) (Verdict, string, erro
 func TestEmitDenyReplacesTheDraft(t *testing.T) {
 	var seen []Utterance
 	lc := &LoopContext{
-		CellID: "c1",
-		Input:  "in",
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "secret draft"}, nil
-		}},
+		CellID:  "c1",
+		Input:   "in",
+		Think:   textThink("secret draft"),
 		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 		Sandbox: emitSandbox{ruling: VerdictDeny, reason: "carries a key", seen: &seen},
 	}
@@ -79,7 +77,7 @@ func TestEmitDenyJoinsContextTrack(t *testing.T) {
 			nextCtx = append([]string(nil), p.Context...)
 			return &Decision{Text: "done"}, nil
 		}},
-		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
+		Act:     okEffector(),
 		Sandbox: emitSandbox{ruling: VerdictDeny, reason: "policy", seen: &seen},
 	}
 	collectEvents(context.Background(), lc)
@@ -91,11 +89,9 @@ func TestEmitDenyJoinsContextTrack(t *testing.T) {
 func TestEmitErrorFailsClosed(t *testing.T) {
 	var seen []Utterance
 	lc := &LoopContext{
-		CellID: "c1",
-		Input:  "in",
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "draft"}, nil
-		}},
+		CellID:  "c1",
+		Input:   "in",
+		Think:   textThink("draft"),
 		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 		Sandbox: emitSandbox{err: errors.New("filter down"), seen: &seen},
 	}
@@ -167,11 +163,9 @@ func TestEmitAskResumeArms(t *testing.T) {
 	for _, c := range cases {
 		var seen []Utterance
 		lc := &LoopContext{
-			CellID: "c1",
-			Input:  "in",
-			Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-				return &Decision{Text: "pending draft"}, nil
-			}},
+			CellID:  "c1",
+			Input:   "in",
+			Think:   textThink("pending draft"),
 			Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 			Sandbox: emitSandbox{ruling: VerdictAsk, reason: "confirm?", seen: &seen},
 		}
@@ -215,7 +209,7 @@ func TestEmitAskResumeRunsRoundCalls(t *testing.T) {
 		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
 			return &Decision{Text: "pending draft", ToolCalls: []ToolCall{{ID: "t1", Name: "work"}}}, nil
 		}},
-		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{Result: "ok"}, nil }},
+		Act:     okEffector(),
 		Sandbox: emitSandbox{ruling: VerdictAsk, reason: "confirm?", seen: &seen},
 	}
 	_, wait := runSuspendingCycle(t, lc)
@@ -245,11 +239,9 @@ func TestEmitAskResumeRunsRoundCalls(t *testing.T) {
 func TestEmitAskMarshalRoundTrip(t *testing.T) {
 	var seen []Utterance
 	lc := &LoopContext{
-		CellID: "c1",
-		Input:  "in",
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "draft across the wire"}, nil
-		}},
+		CellID:  "c1",
+		Input:   "in",
+		Think:   textThink("draft across the wire"),
 		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 		Sandbox: emitSandbox{ruling: VerdictAsk, reason: "confirm?", seen: &seen},
 	}
@@ -265,10 +257,8 @@ func TestEmitAskMarshalRoundTrip(t *testing.T) {
 	lc2 := &LoopContext{
 		CellID:  "c1",
 		Sandbox: testSandbox{},
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "should not run"}, nil
-		}},
-		Act: mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
+		Think:   textThink("should not run"),
+		Act:     mockEffector{fn: func(context.Context, Action) (*Effect, error) { return &Effect{}, nil }},
 	}
 	events := collectResume(context.Background(), lc2, got, "approved")
 	if last := events[len(events)-1]; last.Kind != EventDone || last.Output != "draft across the wire" {

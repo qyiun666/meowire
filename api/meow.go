@@ -71,15 +71,10 @@ func (a *Agent) Replace(slot string, port any) (any, error) {
 
 // Stimulate runs the DecisionLoop and returns an event iterator.
 // Stopping consumption of the iterator abandons the round; tools at or after
-// the stop point do not execute (see doc.go: event stream & resume model).
+// the stop point do not execute, and the audits the abandoned run had not
+// delivered lead the next one (see TestAbandonedStreamRequeuesItsAudits).
 func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
-	return func(yield func(Event) bool) {
-		for ev := range a.cell.Stimulate(ctx, text) {
-			if !yield(ev) {
-				return
-			}
-		}
-	}
+	return a.cell.Stimulate(ctx, text)
 }
 
 // Resume continues a suspended loop from the Session captured in an
@@ -100,13 +95,7 @@ func (a *Agent) Stimulate(ctx context.Context, text string) iter.Seq[Event] {
 // single-use: resuming it twice re-executes the remaining tool calls (host
 // responsibility). Yields ErrCellClosed after Close.
 func (a *Agent) Resume(ctx context.Context, sess Session, resp Response) iter.Seq[Event] {
-	return func(yield func(Event) bool) {
-		for ev := range a.cell.Resume(ctx, sess, resp) {
-			if !yield(ev) {
-				return
-			}
-		}
-	}
+	return a.cell.Resume(ctx, sess, resp)
 }
 
 // ID returns the agent's cell identity, fixed at assembly as Organs.ID (which

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 // Package meowire is the public facade of the meowire harness: a decision-loop
-// kernel (Think → Act event stream) plus the seven-port assembly surface. The
-// framework owns the loop, the events and the wiring contract; the host owns
+// kernel (Think → Act event stream) plus the six host ports and the bundled
+// brain's parameters. The framework owns the loop, the events and the wiring contract; the host owns
 // every organ implementation and, when it wants more than one agent, the extra
 // instances themselves.
 //

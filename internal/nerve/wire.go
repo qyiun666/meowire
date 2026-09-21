@@ -191,7 +191,7 @@ func Connectome() []WirePoint {
 		{ID: "F2", Name: "Brain", Phase: 1, Category: CategoryDecide,
 			TargetID: "prompt", Target: "Prompt (all fields) → Decision", Semantics: SemRead,
 			Required: true,
-			Desc:     "framework built-in: the bundled openai brain, parameterized by Organs.Brain; no host slot, not swappable — a different model is a new assembly"},
+			Desc:     "framework built-in: the bundled brain, parameterized by Organs.Brain; no host slot, not swappable — a different model is a new assembly"},
 		{ID: "G1", Name: "PauseGate", Phase: 1, Category: CategoryDecide,
 			TargetID: "timing", Target: "loop timing", Semantics: SemGate,
 			Required: false,

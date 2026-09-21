@@ -53,7 +53,7 @@ func (g guardStack) rule(ask func(Sandbox) (Verdict, string, error)) (Verdict, s
 	for _, layer := range g {
 		verdict, reason, err := ask(layer)
 		if err != nil {
-			return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), nil
+			return VerdictDeny, sandboxErrText(err), nil
 		}
 		verdict, reason = knownRuling(verdict, reason)
 		switch verdict {

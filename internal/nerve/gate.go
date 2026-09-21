@@ -5,7 +5,6 @@
 package nerve
 
 import (
-	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -29,7 +28,7 @@ type gateResult struct {
 func (b *actBatch) gate(tc ToolCall) gateResult {
 	lc := b.lc
 	g := gateResult{act: Action{CellID: lc.CellID, Call: tc}, ok: true}
-	ruling, reason, question, sbErr := consultSandbox(b.ctx, lc, tc)
+	ruling, reason, question, sbErr := normalizeRuling(lc.Sandbox.Allow(b.ctx, g.act))
 	v := &SandboxVerdict{CellID: lc.CellID, Call: tc, Ruling: ruling, Reason: reason, Question: question, Err: sbErr}
 	if !b.yield(Event{Kind: EventSandbox, Verdict: v}) {
 		g.ok = false
@@ -61,7 +60,7 @@ func deniedText(reason string) string { return "[sandbox-denied: " + reason + "]
 // what the membrane exists to stop.
 func (b *actBatch) emitGate(text string) (ruling Verdict, say string, ok bool) {
 	lc := b.lc
-	ruling, reason, question, sbErr := consultEmit(b.ctx, lc, Utterance{CellID: lc.CellID, Round: b.round, Text: text})
+	ruling, reason, question, sbErr := normalizeRuling(lc.Sandbox.Emit(b.ctx, Utterance{CellID: lc.CellID, Round: b.round, Text: text}))
 	v := &SandboxVerdict{CellID: lc.CellID, Ruling: ruling, Reason: reason, Question: question, Err: sbErr}
 	if !b.yield(Event{Kind: EventSandbox, Verdict: v}) {
 		return ruling, "", false
@@ -96,22 +95,25 @@ func (b *actBatch) utter(dec *Decision) bool {
 	return b.yield(Event{Kind: EventText, Text: say})
 }
 
-// consultSandbox evaluates the membrane policy for one call and maps it onto
-// the tri-state ruling: a sandbox evaluation error coerces to a fail-closed
-// Deny (reason carries the error text, sbErr preserves the raw failure for
-// the audit record). The question is non-empty only for an Ask ruling — the
-// host's reason doubles as the confirmation prompt then.
-func consultSandbox(ctx context.Context, lc *LoopContext, tc ToolCall) (ruling Verdict, reason string, question string, sbErr error) {
-	act := Action{CellID: lc.CellID, Call: tc}
-	ruling, reason, err := lc.Sandbox.Allow(ctx, act)
+// normalizeRuling maps one membrane answer onto the tri-state ruling both sides
+// of the loop report: an evaluation error coerces to a fail-closed Deny (reason
+// carries the error text, the raw failure is preserved for the audit record),
+// and an Ask carries its reason as the question — the host's reason doubles as
+// the confirmation prompt then. Each side still consults its own port method
+// (Allow an Action, Emit an Utterance); this is the rule they share.
+func normalizeRuling(ruling Verdict, reason string, err error) (Verdict, string, string, error) {
 	if err != nil {
-		return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), "", err
+		return VerdictDeny, sandboxErrText(err), "", err
 	}
 	if ruling, reason = knownRuling(ruling, reason); ruling == VerdictAsk {
 		return VerdictAsk, "", reason, nil
 	}
 	return ruling, reason, "", nil
 }
+
+// sandboxErrText is the reason a membrane evaluation leaves behind when it
+// failed rather than ruled.
+func sandboxErrText(err error) string { return fmt.Sprintf("sandbox error: %v", err) }
 
 // knownRuling keeps the port contract's promise in one place: a membrane answer
 // this build has no name for has not permitted anything, so it rules as Deny
@@ -121,19 +123,6 @@ func knownRuling(ruling Verdict, reason string) (Verdict, string) {
 		return VerdictDeny, fmt.Sprintf("sandbox returned an unknown ruling %d", int(ruling))
 	}
 	return ruling, reason
-}
-
-// consultEmit is consultSandbox on the output side: an Emit error coerces to a
-// fail-closed Deny, and an Ask ruling carries its reason as the question text.
-func consultEmit(ctx context.Context, lc *LoopContext, u Utterance) (ruling Verdict, reason string, question string, sbErr error) {
-	ruling, reason, err := lc.Sandbox.Emit(ctx, u)
-	if err != nil {
-		return VerdictDeny, fmt.Sprintf("sandbox error: %v", err), "", err
-	}
-	if ruling, reason = knownRuling(ruling, reason); ruling == VerdictAsk {
-		return VerdictAsk, "", reason, nil
-	}
-	return ruling, reason, "", nil
 }
 
 // statedDenial reads the response as a refusal: a whitespace-only reason is not

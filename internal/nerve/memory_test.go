@@ -36,12 +36,6 @@ func (m *recMemory) Remember(ctx context.Context, f CycleFacts) error {
 	return m.rememberFn(ctx, f)
 }
 
-func doneThinker() mockThinker {
-	return mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-		return &Decision{Text: "ok"}, nil
-	}}
-}
-
 // TestRecallFillsPromptBeforeBeforeThink pins the recall checkpoint: the hook
 // that owns the text track sees (and may overwrite) what the organ returned.
 func TestRecallFillsPromptBeforeBeforeThink(t *testing.T) {
@@ -55,7 +49,7 @@ func TestRecallFillsPromptBeforeBeforeThink(t *testing.T) {
 	mem := &recMemory{recallFn: func(context.Context, MemoryQuery) ([]Record, error) {
 		return []Record{{Key: "k1", Content: []byte("note")}}, nil
 	}}
-	lc := &LoopContext{CellID: "c1", Input: "hello", Hooks: hooks, Think: doneThinker(), Mem: mem}
+	lc := &LoopContext{CellID: "c1", Input: "hello", Hooks: hooks, Think: textThink("ok"), Mem: mem}
 
 	events := collectEvents(ctx, lc)
 	if mem.queries[0].CellID != "c1" || mem.queries[0].Cue != "hello" {
@@ -123,7 +117,7 @@ func TestRememberRunsOnEveryTerminal(t *testing.T) {
 		{
 			name: "done",
 			lc: func(m *recMemory) *LoopContext {
-				return &LoopContext{CellID: "c1", Input: "hi", Think: doneThinker(), Mem: m}
+				return &LoopContext{CellID: "c1", Input: "hi", Think: textThink("ok"), Mem: m}
 			},
 			want: OutcomeDone,
 		},
@@ -152,7 +146,7 @@ func TestRememberRunsOnEveryTerminal(t *testing.T) {
 		{
 			name: "aborted",
 			lc: func(m *recMemory) *LoopContext {
-				return &LoopContext{CellID: "c1", Input: "hi", Think: doneThinker(), Mem: m}
+				return &LoopContext{CellID: "c1", Input: "hi", Think: textThink("ok"), Mem: m}
 			},
 			stopEarly: true,
 			want:      OutcomeAborted,
@@ -188,7 +182,7 @@ func TestRememberErrorNeverRewritesCycle(t *testing.T) {
 	var hookErr error
 	hooks := testHooks()
 	hooks.OnError = func(_ context.Context, err error) { hookErr = err }
-	lc := &LoopContext{CellID: "c1", Input: "hi", Hooks: hooks, Think: doneThinker(),
+	lc := &LoopContext{CellID: "c1", Input: "hi", Hooks: hooks, Think: textThink("ok"),
 		Mem: &recMemory{rememberFn: func(context.Context, CycleFacts) error { return writeErr }}}
 
 	events := collectEvents(ctx, lc)
@@ -213,7 +207,7 @@ func TestRememberErrorNeverRewritesCycle(t *testing.T) {
 func TestRecallFailureEndsTheCycle(t *testing.T) {
 	ctx := context.Background()
 	recallErr := errors.New("index missing")
-	lc := &LoopContext{CellID: "c1", Input: "hi", Think: doneThinker(),
+	lc := &LoopContext{CellID: "c1", Input: "hi", Think: textThink("ok"),
 		Mem: &recMemory{recallFn: func(context.Context, MemoryQuery) ([]Record, error) {
 			return nil, recallErr
 		}}}

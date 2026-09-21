@@ -5,7 +5,6 @@
 package nerve
 
 import (
-	"context"
 	"strings"
 	"testing"
 )
@@ -16,11 +15,9 @@ import (
 // the brain, not only the text Context.
 func TestBudgetTrimsBothTracks(t *testing.T) {
 	lc := &LoopContext{
-		CellID: "c1",
-		Input:  "hello",
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "ok"}, nil
-		}},
+		CellID:      "c1",
+		Input:       "hello",
+		Think:       textThink("ok"),
 		Context:     []string{"a", "b", "c"},
 		ToolResults: []ToolResult{{ID: "1", Name: "t", Result: "r"}, {ID: "2", Name: "t", Result: "r"}},
 	}

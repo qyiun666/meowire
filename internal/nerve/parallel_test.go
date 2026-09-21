@@ -580,9 +580,7 @@ func TestParallelActsSingleCallKeepsSerialPath(t *testing.T) {
 			}
 			return &Decision{Text: "done"}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 

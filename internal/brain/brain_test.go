@@ -241,6 +241,29 @@ func TestUsageZeroOmitted(t *testing.T) {
 	}
 }
 
+// TestNoToolsOmitsField: a round without tools sends no tools field on either
+// wire — nil, which the wire omits, not an empty array, which some
+// OpenAI-compatible endpoints reject. Pinned on the raw request bodies.
+func TestNoToolsOmitsField(t *testing.T) {
+	p := &nerve.Prompt{Input: "x"}
+	fb := testutil.NewFakeBrain(t, testutil.FakeCompletion{Text: "t"})
+	if _, err := brain.New(fb.Cfg(false)).Think(context.Background(), p); err != nil {
+		t.Fatalf("chat Think: %v", err)
+	}
+	if _, err := brain.New(fb.CfgResponses(false)).Think(context.Background(), p); err != nil {
+		t.Fatalf("responses Think: %v", err)
+	}
+	bodies := fb.Requests()
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2 (one per wire)", len(bodies))
+	}
+	for i, body := range bodies {
+		if strings.Contains(body, `"tools"`) {
+			t.Fatalf("request %d carries a tools field: %s", i, body)
+		}
+	}
+}
+
 // TestBadToolSchemaFailsLoudly: a malformed input schema is a wiring mistake;
 // it errors before any request leaves.
 func TestBadToolSchemaFailsLoudly(t *testing.T) {

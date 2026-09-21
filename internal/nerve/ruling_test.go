@@ -62,9 +62,7 @@ func TestUnknownRulingRefusesTheCall(t *testing.T) {
 func TestUnknownRulingWithholdsTheUtterance(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1", Input: "go", Sandbox: weirdSandbox{Verdict(42)}, MaxRounds: 1,
-		Think: mockThinker{fn: func(context.Context, *Prompt) (*Decision, error) {
-			return &Decision{Text: "a draft"}, nil
-		}},
+		Think: textThink("a draft"),
 	}
 	fillRequired(lc)
 	var said []string

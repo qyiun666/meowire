@@ -18,7 +18,9 @@ import (
 
 // Ports — host-provided capabilities (all required, no stubs). The brain is
 // not among them: it is the one organ the framework ships, parameterized by
-// Organs.Brain instead of implemented by the host.
+// Organs.Brain instead of implemented by the host. The pause gate is not here
+// either: it is framework wiring behind Agent.Pause, not something a host
+// supplies.
 type (
 	Effector      = nerve.Effector
 	Closer        = nerve.Closer
@@ -26,7 +28,6 @@ type (
 	Sandbox       = nerve.Sandbox
 	ContextBudget = nerve.ContextBudget
 	Memory        = nerve.Memory
-	PauseGate     = nerve.PauseGate
 )
 
 // The bundled brain's assembly parameters and streaming channel.

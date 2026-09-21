@@ -55,12 +55,8 @@ func TestSessionMarshalRoundTrip(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "in",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "final"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("final"),
+		Act:    okEffector(),
 	}
 	events := collectResume(context.Background(), lc, got, "yes")
 	if events[len(events)-1].Kind != EventDone {
@@ -416,13 +412,9 @@ func TestDecisionLoopResumeInvalidSession(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "work",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "ok"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
-		Hooks: &Hooks{OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) { cycleEnd++ }},
+		Think:  textThink("ok"),
+		Act:    okEffector(),
+		Hooks:  &Hooks{OnCycleEnd: func(ctx context.Context, output string, _ CycleOutcome) { cycleEnd++ }},
 	}
 	events := collectResume(context.Background(), lc, Session{}, "x")
 	if events[len(events)-1].Kind != EventError {
@@ -485,12 +477,8 @@ func TestDecisionLoopResumeCtxCancel(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "work",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "ok"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("ok"),
+		Act:    okEffector(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -565,12 +553,8 @@ func TestDecisionLoopPendingReplaceEvents(t *testing.T) {
 	lc := &LoopContext{
 		CellID: "c1",
 		Input:  "work",
-		Think: mockThinker{fn: func(ctx context.Context, p *Prompt) (*Decision, error) {
-			return &Decision{Text: "ok"}, nil
-		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Think:  textThink("ok"),
+		Act:    okEffector(),
 	}
 	oldAct := lc.Act
 	newAct := mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {

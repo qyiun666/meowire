@@ -24,13 +24,7 @@ func TestCloseBehavior(t *testing.T) {
 	}
 
 	// Stimulate should work before close
-	var gotDone bool
-	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Stimulate(context.Background(), "work")), meowire.EventDone) {
 		t.Fatal("expected EventDone before close")
 	}
 
@@ -43,10 +37,7 @@ func TestCloseBehavior(t *testing.T) {
 	}
 
 	// Stimulate after close should yield ErrCellClosed
-	var events []meowire.Event
-	for ev := range a.Stimulate(context.Background(), "work") {
-		events = append(events, ev)
-	}
+	events := collect(a.Stimulate(context.Background(), "work"))
 	if len(events) != 1 {
 		t.Fatalf("post-close events = %d, want 1", len(events))
 	}
@@ -68,10 +59,7 @@ func TestStimulateAfterClose(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	var events []meowire.Event
-	for ev := range a.Stimulate(context.Background(), "work") {
-		events = append(events, ev)
-	}
+	events := collect(a.Stimulate(context.Background(), "work"))
 
 	if len(events) != 1 {
 		t.Fatalf("events count = %d, want 1", len(events))
@@ -183,11 +171,9 @@ func (j *journal) watch(seq iter.Seq[meowire.Event]) []meowire.Event {
 	return out
 }
 
-// wireSandbox denies one tool and asks on another — the two rulings a
+// wireRule denies one tool and asks on another — the two rulings a
 // pass-through membrane never produces.
-type wireSandbox struct{}
-
-func (wireSandbox) Allow(_ context.Context, a meowire.Action) (meowire.Verdict, string, error) {
+func wireRule(_ context.Context, a meowire.Action) (meowire.Verdict, string, error) {
 	switch a.Call.Name {
 	case "danger":
 		return meowire.VerdictDeny, "not on this box", nil
@@ -196,12 +182,6 @@ func (wireSandbox) Allow(_ context.Context, a meowire.Action) (meowire.Verdict, 
 	}
 	return meowire.VerdictAllow, "", nil
 }
-
-func (wireSandbox) Emit(context.Context, meowire.Utterance) (meowire.Verdict, string, error) {
-	return meowire.VerdictAllow, "", nil
-}
-
-func (wireSandbox) Bounds() string { return "wire test bounds" }
 
 // TestEveryProducedKindIsJournalable drives one agent through every suspension
 // the facade owns and asserts the ledger afterwards: the event wire is only real
@@ -221,7 +201,7 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 
 	a, err := testNew(testOrgans(t, meowire.Organs{
 		ID:      "wire-all",
-		Sandbox: wireSandbox{},
+		Sandbox: testutil.Sandbox{Fn: wireRule, Bound: "wire test bounds"},
 		Act: testutil.Effector{Fn: func(_ context.Context, act meowire.Action) (*meowire.Effect, error) {
 			return &meowire.Effect{Result: "asked-" + act.Call.Name}, nil
 		}},
@@ -253,7 +233,7 @@ func TestEveryProducedKindIsJournalable(t *testing.T) {
 
 	// The error arm: a loop that outlives its rounds while tools are pending.
 	b, err := testNew(testOrgans(t, meowire.Organs{
-		ID: "wire-err", Sandbox: passSandbox{},
+		ID: "wire-err", Sandbox: testutil.Sandbox{},
 	}, plan), meowire.Config{MaxRounds: 1})
 	if err != nil {
 		t.Fatalf("new error case: %v", err)
@@ -283,20 +263,6 @@ func allKinds() []meowire.EventKind {
 	}
 }
 
-// passSandbox lets every call through: the round-cap case needs the batch to
-// execute, not to be ruled on.
-type passSandbox struct{}
-
-func (passSandbox) Allow(context.Context, meowire.Action) (meowire.Verdict, string, error) {
-	return meowire.VerdictAllow, "", nil
-}
-
-func (passSandbox) Emit(context.Context, meowire.Utterance) (meowire.Verdict, string, error) {
-	return meowire.VerdictAllow, "", nil
-}
-
-func (passSandbox) Bounds() string { return "" }
-
 // waitedSession picks out the suspension handle in a collected stream.
 func waitedSession(events []meowire.Event) (meowire.Session, bool) {
 	for _, ev := range events {
@@ -305,4 +271,46 @@ func waitedSession(events []meowire.Event) (meowire.Session, bool) {
 		}
 	}
 	return meowire.Session{}, false
+}
+
+// TestAbandonedStreamRequeuesItsAudits: a consumer that stops mid-list abandons
+// the round, but the audits the prelude never delivered belong to the next run —
+// exactly-once is a promise about the stream, not about a run that finished. The
+// facade is what stands between a host's early stop and the cell that requeues,
+// so this is the level that has to prove it.
+func TestAbandonedStreamRequeuesItsAudits(t *testing.T) {
+	ctx := context.Background()
+	a, err := testNew(testOrgans(t, meowire.Organs{ID: "abandon"}), meowire.Config{})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer a.Close()
+
+	// Three audits, all taking effect on the next run: two swaps, then a config.
+	if _, err := a.Replace(meowire.SlotMem, testutil.Memory{}); err != nil {
+		t.Fatalf("replace mem: %v", err)
+	}
+	if _, err := a.Replace(meowire.SlotSandbox, testutil.Sandbox{}); err != nil {
+		t.Fatalf("replace sandbox: %v", err)
+	}
+	a.UpdateConfig(meowire.Config{MaxRounds: 4})
+
+	// Consume the first audit and stop there — the cooperative path, where the
+	// consumer's yield returns false.
+	var got []meowire.EventKind
+	a.Stimulate(ctx, "work")(func(ev meowire.Event) bool {
+		got = append(got, ev.Kind)
+		return false
+	})
+	if len(got) != 1 || got[0] != meowire.EventReplace {
+		t.Fatalf("abandoned stream delivered %v, want just the first EventReplace", got)
+	}
+
+	var rest []meowire.EventKind
+	for ev := range a.Stimulate(ctx, "again") {
+		rest = append(rest, ev.Kind)
+	}
+	if len(rest) < 2 || rest[0] != meowire.EventReplace || rest[1] != meowire.EventConfig {
+		t.Fatalf("next run leads with %v, want the undelivered Replace then Config audit", rest)
+	}
 }

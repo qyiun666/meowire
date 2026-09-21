@@ -59,7 +59,10 @@ type Cell struct {
 // The port references used by this Stimulate are snapshotted under the wire
 // lock: a concurrent Replace takes effect at the next Stimulate, never
 // mid-flight. Pending Replace audits are drained into this Stimulate's
-// LoopContext and emitted as EventReplace before any other event.
+// LoopContext and emitted as EventReplace before any other event; a run that
+// dies before delivering them (a refused BeforeStimulate, a cancelled context,
+// a consumer that stops mid-list) requeues the undelivered tail for the next
+// run — the exactly-once audit promise survives a failed prelude.
 func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
 		yield = c.authored(yield)
@@ -72,7 +75,9 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: nil Think or Act port")})
 			return
 		}
-		nerve.DecisionLoop{}.Cycle(ctx, lc, yield)
+		var audits auditTally
+		nerve.DecisionLoop{}.Cycle(ctx, lc, audits.wrap(yield))
+		c.requeueUndelivered(lc, audits)
 	}
 }
 
@@ -80,7 +85,8 @@ func (c *Cell) Stimulate(ctx context.Context, text string) iter.Seq[nerve.Event]
 // EventWaitInput; the event stream is isomorphic with Stimulate. The port
 // snapshot, pending Replace audits, and config are taken exactly like
 // Stimulate — a concurrent Replace/UpdateConfig takes effect here, never
-// mid-flight.
+// mid-flight — and a run refused before its prelude (an invalid or foreign
+// Session) requeues the drained audits exactly like a failed Stimulate.
 func (c *Cell) Resume(ctx context.Context, sess nerve.Session, resp nerve.Response) iter.Seq[nerve.Event] {
 	return func(yield func(nerve.Event) bool) {
 		yield = c.authored(yield)
@@ -93,7 +99,9 @@ func (c *Cell) Resume(ctx context.Context, sess nerve.Session, resp nerve.Respon
 			yield(nerve.Event{Kind: nerve.EventError, Err: fmt.Errorf("cell: nil Think or Act port")})
 			return
 		}
-		nerve.DecisionLoop{}.Resume(ctx, lc, sess, resp, yield)
+		var audits auditTally
+		nerve.DecisionLoop{}.Resume(ctx, lc, sess, resp, audits.wrap(yield))
+		c.requeueUndelivered(lc, audits)
 	}
 }
 
@@ -111,10 +119,53 @@ func (c *Cell) authored(yield func(nerve.Event) bool) func(nerve.Event) bool {
 	}
 }
 
+// auditTally counts the audit events one run delivers, so requeueUndelivered
+// can hand back exactly the tail that never reached the consumer.
+type auditTally struct {
+	replaceDelivered int
+	configDelivered  int
+}
+
+// wrap counts the two audit kinds on their way to the consumer. The prelude
+// is their only producer, so the count is the delivery count.
+func (n *auditTally) wrap(yield func(nerve.Event) bool) func(nerve.Event) bool {
+	return func(e nerve.Event) bool {
+		switch e.Kind {
+		case nerve.EventReplace:
+			n.replaceDelivered++
+		case nerve.EventConfig:
+			n.configDelivered++
+		}
+		return yield(e)
+	}
+}
+
+// requeueUndelivered hands back the audits the run never delivered — a
+// prelude that dies before them (a refused BeforeStimulate, a cancelled
+// context, a session this cell refuses) or a consumer that stops mid-list —
+// so the next Stimulate/Resume emits them ahead of its own events, in swap
+// order. Without this, the drained records would vanish while the swaps they
+// describe have already taken effect.
+func (c *Cell) requeueUndelivered(lc *nerve.LoopContext, n auditTally) {
+	if n.replaceDelivered >= len(lc.PendingReplace) && n.configDelivered >= len(lc.PendingConfig) {
+		return
+	}
+	c.wireMu.Lock()
+	defer c.wireMu.Unlock()
+	if n.replaceDelivered < len(lc.PendingReplace) {
+		c.pendingReplace = slices.Concat(lc.PendingReplace[n.replaceDelivered:], c.pendingReplace)
+	}
+	if n.configDelivered < len(lc.PendingConfig) {
+		c.pendingConfig = slices.Concat(lc.PendingConfig[n.configDelivered:], c.pendingConfig)
+	}
+}
+
 // snapshot snapshots the current ports, config, and pending Replace audits
 // under the wire lock and builds a fresh LoopContext; the audits are drained
-// so they are emitted at the start of this Stimulate/Resume (the moment the
-// swaps take effect). Returns nil when a required port is missing.
+// only when the context will actually run (a missing required port leaves
+// them queued), so they are emitted at the start of this Stimulate/Resume
+// (the moment the swaps take effect). Returns nil when a required port is
+// missing.
 func (c *Cell) snapshot(text string) *nerve.LoopContext {
 	c.wireMu.Lock()
 	think, act := c.Think, c.Act
@@ -122,10 +173,14 @@ func (c *Cell) snapshot(text string) *nerve.LoopContext {
 	mem := c.Mem
 	pauseGate := c.PauseGate
 	cfg := c.Config
-	pendingReplace := c.pendingReplace
-	c.pendingReplace = nil
-	pendingConfig := c.pendingConfig
-	c.pendingConfig = nil
+	var pendingReplace []nerve.ReplaceAudit
+	var pendingConfig []nerve.ConfigAudit
+	if think != nil && act != nil {
+		pendingReplace = c.pendingReplace
+		c.pendingReplace = nil
+		pendingConfig = c.pendingConfig
+		c.pendingConfig = nil
+	}
 	c.wireMu.Unlock()
 	if think == nil || act == nil {
 		return nil

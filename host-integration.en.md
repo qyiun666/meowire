@@ -30,7 +30,7 @@ Fill Brain parameters → Implement six ports → Assemble Organs → Set Config
 | 3 | Set `Config` | Zero values are defaults; nothing must be set explicitly |
 | 4 | Assemble `Blueprint{Organs, Config}` and `New(bp)` | Missing port/callback returns an error; incomplete Budget too |
 | 5 | `for ev := range agent.Stimulate(ctx, text)` | Consume the event stream |
-| 6 | `agent.Close()` | Idempotent; Stimulate after Close returns `ErrCellClosed` |
+| 6 | `agent.Close()` | Idempotent; Stimulate/Resume after Close yield `EventError` (`ErrCellClosed`) |
 
 ---
 
@@ -38,24 +38,27 @@ Fill Brain parameters → Implement six ports → Assemble Organs → Set Config
 
 ### 2.1 Brain — the bundled organ (parameters, not a port)
 
-The brain is the one organ the framework ships: the host fills four parameters in
+The brain is the one organ the framework ships: the host fills five parameters in
 `Organs.Brain`, the composition root constructs it and injects it, and the loop calls it as
 its Thinker. The host never implements a Thinker and never imports an SDK.
 
 ```go
 type BrainConfig struct {
-    BaseURL string // OpenAI-compatible endpoint ("" = the official one)
-    Key     string // credential (required)
-    Model   string // model id (required)
-    Stream  bool   // true = SSE transport
+    BaseURL string    // OpenAI-compatible endpoint ("" = the official one)
+    Key     string    // credential (required)
+    Model   string    // model id (required)
+    Mode    BrainMode // wire selector: BrainModeChat (default, zero value included) or BrainModeResponses
+    Stream  bool      // true = SSE transport
 }
 ```
 
 Streaming deltas ride `meowire.WithSink(ctx, sink)`: mount the Sink on the context handed to
-`Stimulate`, and the brain's text deltas arrive **before** the output membrane rules
+`Stimulate`/`Resume`, and the brain's text deltas arrive **before** the output membrane rules
 (stream-and-correct — `EventText`, whole and already ruled, replaces what was pushed); the
 event stream only carries whole-segment Text. Retry stays single-layer: transport retries are
-off, the whole budget belongs to `Config.MaxRetries`.
+off, the whole budget belongs to `Config.MaxRetries`. A round with no tools (`Prompt.Tools`
+empty) sends no `tools` field at all — both wires omit the field rather than send an empty
+array, which some OpenAI-compatible endpoints reject outright.
 
 **The `Prompt` entering the brain (assembled by the framework; `BeforeStimulate`/`BeforeThink` hooks may rewrite it) fields:**
 
@@ -63,15 +66,15 @@ off, the whole budget belongs to `Config.MaxRetries`.
 |-------|---------|-------------|
 | `System` | System instructions ("You are a support agent…") | Host, fixed at construction |
 | `Identity` | Identity description text (host composed, e.g. "You are meow, role assistant, warm tone") | Host, fixed at construction |
-| `Methods` | Built-in capability description (gene projection, describes only; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
+| `Methods` | Built-in capability description (describes only, never consumed by the framework; `MethodSpec{Name, Desc, Input, Output}`) | Host, fixed at construction |
 | `Tools` | Available tool list (function schemas) | Host, fixed at construction |
 | `Context` | Context slice: host base + framework-appended sandbox denials (`[sandbox-denied: ...]`, emitted in final form); tool results never enter the text track | Host base + framework appends |
 | `ToolResults` | Structured tool results (`ToolResult{ID, Name, Result, Err}`): accumulated within the cycle, `ID` is the LLM-provided call id (`call_xxx`), `Result`/`Err` carry the truncated raw output; rendering (tool-role messages, `[tool_call_id=xxx]` markers, plain text) is the bundled brain's | Framework, appended within the cycle |
-| `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate |
+| `Bounds` | Execution boundary description (`Sandbox.Bounds()` snapshot, e.g. "only /workspace") | Framework, once per Stimulate/Resume |
 | `Reflection` | Self-review note from the previous round (Reflexion slot, passed through verbatim) | Host (write-back in `BeforeStimulate`) |
 | `Memories` | This round's recalled experience records (`Memory.Recall` output; replaced wholesale per round, never accumulated, never enters a Session snapshot) | Framework, before each Think |
 | `Input` | Current stimulus text (the Stimulate argument) | Framework, per round |
-| `Plan` | Task plan/progress text | Host, via `Hooks.BeforeThink` (`p.Plan` is pointer-writable, effective next round); pairs with a host `update_plan` tool for a closed loop (§7.3 ③) |
+| `Plan` | Task plan/progress text | Host, via `Hooks.BeforeThink` (`p.Plan` is pointer-writable; the same round's Think reads it); pairs with a host `update_plan` tool for a closed loop (§7.3 ③ — a tool's write into the host hub is read back by the hook next round) |
 
 **The `Decision` leaving the brain (observable via the `AfterThink` hook) fields:**
 
@@ -100,7 +103,7 @@ type Effector interface {
 |-------|---------|
 | `Action.CellID` | Agent ID that triggered the tool (= Organs.ID) |
 | `Action.Call` | Tool call `{ID, Name, Args}`, `Args` is a JSON string |
-| `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the host's call) |
+| `Effect.Result` | Success result text (truncated by the framework into `ToolResults.Result`; rendering is the bundled brain's) |
 | `Effect.Err` | Tool-side error text (truncated into `ToolResults.Err`; non-empty `Err` = the call failed) |
 | `Effect.WaitInput` | Non-empty = request external input (the field carries the question text); the framework yields `EventWaitInput` (carrying a Session) and **ends the iterator normally**; the host collects the answer and calls `agent.Resume(sess, meowire.Response{Answer: text})` (see §6.4) |
 | return error | Execution-layer error (also written to `ToolResults.Err`; the loop continues) |
@@ -136,7 +139,7 @@ agent.Unpause()   // clear a pause request that has not taken effect yet (back o
 ```
 
 - **Gap-effective**: a pause request never interrupts an in-flight Think/Act;
-  the loop checks it at two gap points (before each Think, before each tool execution)
+  the loop checks it at two gap points (before each Think, before each tool execution; a `ParallelActs` batch leaves one gap point before the whole batch, and its snapshot carries the unexecuted batch)
 - **Snapshot suspension (non-blocking)**: an honored pause yields
   `EventState(StatePaused)` → `EventPaused` (carrying a Session snapshot) and **ends
   the iterator normally**; the host resumes via `agent.Resume(sess, meowire.Response{})`
@@ -162,8 +165,8 @@ agent.Unpause()   // clear a pause request that has not taken effect yet (back o
 
 ```go
 type Hooks struct {
-    BeforeStimulate func(ctx context.Context, p *Prompt) error // start of a Stimulate; may edit all prototype content fields, written back for every round; error aborts the whole Stimulate
-    AfterStimulate  func(ctx context.Context, output string)     // end of a Stimulate (exactly once on all paths)
+    BeforeStimulate func(ctx context.Context, p *Prompt) error // start of a Stimulate/Resume; may edit all prototype content fields (Bounds is read-only — a framework snapshot, never written back), written back for every round; error aborts the whole run
+    AfterStimulate  func(ctx context.Context, output string)     // end of a Stimulate/Resume (exactly once on all paths)
     BeforeThink     func(ctx context.Context, p *Prompt) error
     AfterThink      func(ctx context.Context, d *Decision) error
     BeforeAct       func(ctx context.Context, a *Action) error
@@ -175,14 +178,14 @@ type Hooks struct {
 
 | Field | Fires | Typical host use |
 |-------|-------|------------------|
-| `BeforeStimulate` | Start of each Stimulate, before any event | Turn-level memory Recall (one-shot injection: prototype content edits are written back to the loop for all rounds) |
-| `AfterStimulate` | End of each Stimulate (exactly once on all paths) | Turn-level memory Save, session settlement |
+| `BeforeStimulate` | Start of each Stimulate/Resume, before any event | Whole-run static injection (persona, retrieval prefix — one prototype edit applies to every round). Recall now lives on `Memory.Recall` (§2.8); don't read memory twice |
+| `AfterStimulate` | End of each Stimulate/Resume (exactly once on all paths) | Session settlement. Persisting the round now lives on `Memory.Remember` (§2.8, ahead of `OnCycleEnd`) |
 | `BeforeThink` | Before each Think | Inject retrieved memory, update Plan |
 | `AfterThink` | After a successful Think | Serialize the Decision back into Plan/memory |
 | `BeforeAct` | Before each tool execution | Approval, rewrite tool arguments |
 | `AfterAct` | After tool execution | Tool logging, failure degradation (`err` non-nil = effector failure) |
 | `OnError` | On unrecoverable error | Alerting |
-| `OnCycleEnd` | **Exactly once per cycle** (normal, error, and early-consumer-stop paths) | Settlement, persist final output; `outcome` classifies how the cycle ended (Done/Suspended/MaxRounds/Error/Aborted; zero reserved = iterator abandoned early → Aborted) |
+| `OnCycleEnd` | **Exactly once per cycle** (normal, error, suspension and early-consumer-stop arms) | Settlement, persist final output; `outcome` classifies how the cycle ended (Done/Suspended/MaxRounds/Error/Aborted; zero reserved = iterator abandoned early → Aborted) |
 
 **⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context. The same applies to `p.ToolResults` (shared with the loop's structured track): replace wholesale, never append in place.**
 
@@ -192,7 +195,7 @@ type Hooks struct {
 type Sandbox interface {
     Allow(ctx context.Context, a Action) (verdict Verdict, reason string, err error)
     Emit(ctx context.Context, u Utterance) (verdict Verdict, reason string, err error)
-    Bounds() string // execution boundary description (host defined), snapshotted once per Stimulate
+    Bounds() string // execution boundary description (host defined), snapshotted once per Stimulate/Resume
 }
 ```
 
@@ -220,7 +223,7 @@ tri-state grammar and one audit channel (`EventSandbox`).
   utterance-side ruling carries a zero `Call`. Every ruling yields exactly one record, and an ask
   chain closes with its terminal record
 - `Bounds()` returns the execution boundary description; the framework
-  snapshots it once per Stimulate and surfaces it to the LLM via `Prompt.Bounds`
+  snapshots it once per Stimulate/Resume and surfaces it to the LLM via `Prompt.Bounds`
   (so the brain perceives its limits, e.g. "only files under /workspace")
 - The host implements security policy: tool allowlist/denylist, human confirmation
   (returning `VerdictAsk` is all it takes — suspension and resume are the framework's job),
@@ -343,7 +346,7 @@ o := meowire.Organs{
 | `Mem` | Memory | Experience port (`Recall` before each Think, `Remember` at the invocation terminal) | **yes** |
 | `System` | string | System instructions; feeds Prompt.System | no |
 | `Identity` | string | Identity description text (host composed); feeds Prompt.Identity | no |
-| `Methods` | []MethodSpec | Built-in capability description (gene projection, describes only); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
+| `Methods` | []MethodSpec | Built-in capability description (describes only, never consumed by the framework); `MethodSpec{Name, Desc, Input, Output}`; feeds Prompt.Methods | no |
 | `Tools` | []ToolSpec | Tool list; feeds Prompt.Tools; `ToolSpec{Name, Desc, Input, Output}`, `Input` is a JSON Schema (the brain builds tool definitions from it) | no |
 | `Context` | []string | Resident context base (history/memory injected here, MemHop); initial Prompt.Context | no |
 
@@ -404,10 +407,13 @@ agent, err := meowire.New(bp)
 - **Blueprint is define-once, assemble-many**: the same `bp` can `New` multiple independent Agent instances (flat-model multi-agent), but `Organs.ID` names one instance — every `New` must give it a different one
 - `New` validates against the **assembly graph** (blueprint = data-object nodes + slot edges), two levels only:
   - `error` (missing required port / missing hook callback / incomplete Budget / empty `Organs.ID`): **always blocks**, returns `meow: required port X not injected`
-    (X ∈ Think/Act/Closer/Hooks/Sandbox/Budget/H1–H8), multiple findings joined
-  - `info` (empty Identity/Tools/Context, default rounds, ParallelActs without a concurrency-safe
-    Effector): **never blocks** — inspect via `meowire.Validate(organs, cfg)`
-  - No `warn` level: every wiring point is required — a missing point is a missing organ, there is no "half-wired pass"
+    (X ∈ Act/Closer/Hooks/Sandbox/Budget/Mem plus the missing callback's own name — `BeforeStimulate`…`OnCycleEnd`, i.e. the `Name` of H1–H8; `Issue.Wire` is what carries a blueprint id like P4/H4), multiple findings joined; the brain's parameters (Model/Key/Mode) and an empty `Organs.ID` have their own findings
+  - `info` — six findings in total (empty Identity, empty Tools, empty Context, `MaxRounds<=0` taking
+    DefaultMaxRounds(8), `ParallelActs` on as a reminder that the Effector **must** be concurrency-safe,
+    and `MaxParallelActs` set while `ParallelActs` is off so the ceiling binds nothing): **never blocks** —
+    inspect via `meowire.Validate(organs, cfg)`. The framework never tests whether the Effector really is
+    safe to call concurrently; that finding is a reminder, not a check
+  - No `warn` level: against the host every wiring point is required — a missing point is a missing organ, there is no "half-wired pass" (sub-slots implied by a parent — `P3b`/`P5b`/`P5c`/`P6b`/`P7b` — and the api-injected `G1` are not checked separately; swapping the parent swaps the whole port)
 - `New` runs three steps in order: **validate** the blueprint against the graph, **boot** every
   organ that declared `Bootable` (§2.9), then **construct** the cell. Nothing after a failing boot
   is reached, and the failed attempt is released through the host `Closer`
@@ -418,16 +424,17 @@ agent, err := meowire.New(bp)
 ### 5.1 Dynamic wiring: `Replace` (runtime organ swap)
 
 ```go
-oldPort, err := agent.Replace(meowire.SlotSandbox, stricterMembrane) // takes effect at the next Stimulate
+oldPort, err := agent.Replace(meowire.SlotSandbox, stricterMembrane) // takes effect at the next Stimulate/Resume
 ```
 
 - Swappable slots: `SlotAct` / `SlotSandbox` / `SlotBudget` / `SlotMem` / `SlotHooks` (the
-  blueprint's `WirePoint.Slot` field is the single source; `Connectome()` / `SwappableSlots()`
-  enumerate it and a guard test pins the constants to it);
-  `Closer` (resource binding) and `PauseGate` (framework wiring) are never swappable — and
+  blueprint's `WirePoint.Slot` field is the single source; filter `Connectome()` on
+  `WirePoint.Slot != ""` to enumerate it (`WiringDiagram(o)` adds each edge's `Filled` state; `SwappableSlots`
+  is an internal derivation, not on the public surface) and a guard test pins the constants to it);
+  `Closer` (resource binding) and the pause gate (framework wiring) are never swappable — and
   **the brain has no slot**: a different model is a new `New` with different `Brain` parameters
-- Semantics: each `Stimulate` snapshots ports into a fresh LoopContext — an **in-flight
-  Stimulate is unaffected**; the swap takes effect at the next Stimulate; the previous
+- Semantics: each `Stimulate`/`Resume` snapshots ports into a fresh LoopContext — an **in-flight
+  run is unaffected**; the swap takes effect at the next `Stimulate`/`Resume`; the previous
   port is returned (host decides whether to shut the old implementation down — the framework never
   closes an organ it swapped out); an incoming organ that declares `Bootable` is booted once the slot
   has accepted it and before the swap commits, so a failing boot — or a mistyped slot name —
@@ -437,8 +444,30 @@ oldPort, err := agent.Replace(meowire.SlotSandbox, stricterMembrane) // takes ef
 - **Audit event**: every successful Replace records a `ReplaceAudit{CellID, Slot, OldType, NewType}`
   emitted as `EventReplace` at the start of the next Stimulate/Resume (the moment the swap
   takes effect — same level as `EventSandbox`, persistable); failed swaps record nothing;
-  zero output without swaps. The host closes its model-switch audit loop from the event
+  zero output without swaps. The host closes its organ-swap audit loop from the event
   stream instead of maintaining a hand-rolled state machine
+
+### 5.2 Assembly self-check: the graph and its readers
+
+```go
+for _, is := range meowire.Validate(o, cfg) { // error findings New also rejects; info ones are visible only here
+    fmt.Println(is.Level, is.Wire, is.Msg)
+}
+for _, sl := range meowire.WiringDiagram(o) { // one blueprint edge + whether this assembly filled it
+    fmt.Println(sl.Wire.ID, sl.Wire.TargetID, sl.Filled)
+}
+fmt.Println(meowire.RenderDiagram(o))          // the same state as ASCII
+fmt.Println(meowire.PortOrder())               // boot order: Act, Closer, Hooks, Sandbox, Budget, Mem
+```
+
+- `Connectome()` (edges) and `ConnectomeNodes()` (data-object nodes) **are** the blueprint;
+  `WiringDiagram(o)` is that blueprint crossed with one host assembly, and each `Slot` carries the
+  whole `WirePoint` plus `Filled`. `RenderDiagram`/`RenderJSON` render the same graph for humans and
+  machines; `Validate` reports against it.
+- Node and edge counts live in the code — take them from `Connectome()` at runtime instead of copying
+  a number into a document, which would rot on the next blueprint change.
+- Framework built-ins (`F1` tool feedback, `F2` brain, `G1` pause gate) always read as filled: they
+  are not host slots.
 
 ---
 
@@ -461,6 +490,9 @@ EventState(thinking) → [EventUsage(optional)] → EventSandbox(utterance rulin
 EventState(thinking) → [EventUsage] → EventSandbox(utterance ruling) → EventText → EventState(acting)
   → (EventToolCall → EventSandbox(call ruling) → EventToolResult) × N → back to EventState(thinking) → …
 ```
+(The serial path's shape. With `ParallelActs` on and more than one call in a batch it becomes three
+phases: the whole batch's `EventToolCall`s are announced in call order → the batch is gated (`EventSandbox`)
+→ `EventToolResult`s land in call order; the gap point sits before the batch, see §2.4.)
 
 **Pause path (takes effect at gap points; snapshot suspension — the iterator ends normally, Resume continues):**
 
@@ -485,11 +517,16 @@ EventState(thinking) → [EventUsage] → EventSandbox(ask) → EventState(waiti
   → [that round's tools run as usual → back to EventState(thinking)] or [nothing left → EventState(done) → EventDone]
 ```
 
-**Port-swap audit (at the start of the next Stimulate/Resume, before any other event; multiple in order):**
+**Wiring/config audit (at the start of the next Stimulate/Resume, before any other event; both kinds in order):**
 
 ```
-EventReplace(slot/old/new) → normal sequence follows
+EventReplace(slot/old/new) × N → EventConfig(old/new) × M → normal sequence follows
 ```
+
+Undelivered audits are not lost: when the run dies in its prelude (a refused `BeforeStimulate`, a
+cancelled context, a consumer that stopped mid-list), the cell requeues the tail that never reached
+the host and the next call leads with it — the exactly-once audit promise survives a failed prelude
+(`TestAbandonedStreamRequeuesItsAudits`, `TestCellReplaceAuditSurvivesFailedPrelude`).
 
 **Error path:**
 
@@ -517,7 +554,7 @@ it, so a non-empty `Dropped` means "this event was restored from a log".
 | `EventSandbox` | `Verdict *SandboxVerdict` | Membrane ruling audit record (ruling Ruling: allow/deny/**ask**, the gated tool or a zero value for the text side, policy reason, ask question, evaluation error); one record per ruling on either side of the loop, an ask chain closes with its terminal second record |
 | `EventState` | `State LoopState` | Loop state (idle/thinking/acting/paused/**waiting**/done/error) |
 | `EventDone` | `Output` | Accumulated text output of the whole cycle |
-| `EventError` | `Err` | Unrecoverable error (incl. `ErrMaxRounds`, `ErrCellClosed`) |
+| `EventError` | `Err` | Unrecoverable error: the sentinels `ErrMaxRounds`/`ErrCellClosed`/`ErrForeignSession` match with `errors.Is`; a zero-value handle passed to `Resume` yields `nerve: resume: invalid session` (not a sentinel — match it by text; resuming the same handle twice is not detected — the remaining tool calls replay, see §6.4); a refused hook, an exhausted Think retry, a failed `Recall` and a cancelled context all land here too |
 | `EventUsage` | `Usage *Usage` | Token usage of the last Think |
 | `EventWaitInput` | `Wait *WaitInput` | The loop waits on external input: `WaitInput{CellID, Call, Question, Session}` — the four flavours are named by `Session.Kind()` (`WaitTool` a tool's own request, `WaitCallAsk` a pre-execution confirmation, `WaitUtterance` an utterance confirmation, `WaitPause` a pause); `Call` + `Question` say who is asked, not which of the first two it is; the host **saves the Session**, shows the question, and resumes via `agent.Resume(sess, resp)` |
 | `EventPaused` | `Wait *WaitInput` | A pause request took effect: `WaitInput{CellID, Session}` (Call zero value, Question empty, `Session.Kind() == WaitPause`) — the host saves the Session and resumes via `agent.Resume(sess, meowire.Response{})` (the same channel every suspension uses) |
@@ -639,8 +676,9 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   pause snapshot keeps the whole unexecuted batch (Resume replays it); a WaitInput
   suspension inside a `ParallelActs` batch is empty (the batch fully executed — Resume
   only injects the answer, never replays)
-- **Persistence**: `sess.Marshal()` produces versioned JSON bytes (the version carries the
-  owning cell, the wait kind and the withheld draft); the host
+- **Persistence**: `sess.Marshal()` produces versioned JSON bytes (the serialized record carries
+  the owning cell, the wait kind and the withheld draft; the version field is only the format number);
+  the host
   persists them; after a restart `meowire.UnmarshalSession(data)` restores the handle
   and Resume continues — suspensions and pauses recover across processes; a version
   mismatch or an unknown wait name is rejected (a stale or future handle must not be replayed)
@@ -661,6 +699,10 @@ for ev := range agent.Resume(ctx, sess, ans) {  // stream isomorphic with Stimul
   `Answer` is an empty result. An answer is never parsed for a directive inside it: text the
   host put in `Answer` stays text even when it begins with `[denied:`.
   Timeouts are host-controlled (default deny: `Response{Deny: "timeout"}`)
+- **One suspension per round**: once a call in the batch has suspended, a later sibling's own
+  `WaitInput` is refused before it is delivered, as tool feedback
+  (`one wait per round: <name> already waits`) — the snapshot has no second suspension to spend, so it
+  is better for the model to read the refusal than for a wait to sit unanswered forever
 - **Remaining tools**: when the suspension happens mid-list, Resume first runs the rest
   of the round's tools, then re-enters Think
 - **Resume hooks are identical to Stimulate** (`BeforeStimulate` fires as usual; with
@@ -683,7 +725,7 @@ for ev := range agent.Stimulate(ctx, text) {
 ev, err := meowire.DecodeEvent(line)
 ```
 
-- Every record carries `WireEvent.Version`; a mismatch is rejected, never read as a close enough
+- Every record carries `WireEvent.Version` (**currently v2**, and only v2 onward carries `Seq`/`TS`); a mismatch is rejected, never read as a close enough
   match. Kinds, states and membrane rulings travel **by name**, so reordering an enum in a new
   release cannot silently reinterpret a log written by the last one
 - `EventError` identity: a framework sentinel (`ErrMaxRounds`, `ErrForeignSession`, `ErrCellClosed`) comes back as
@@ -704,8 +746,10 @@ ev, err := meowire.DecodeEvent(line)
 
 ### 7.1 `Close() error`
 
-Idempotent (CAS); closes the cell then the host Closer; errors are joined
-with `errors.Join`. Stimulate/Resume after Close returns `ErrCellClosed`. The host
+Idempotent (CAS): only the call that flips open→closed runs the host `Closer`, and its
+error is wrapped as `meow: closer: ...`; the cell itself produces no error, so Close has nothing to
+join. After Close, `Stimulate`/`Resume` yield `EventError` whose chain carries `ErrCellClosed`
+(`errors.Is` matches it), while `Replace` returns that error directly. The host
 should `defer agent.Close()`.
 
 ### 7.2 Multi-agent = the host composes instances
@@ -716,12 +760,16 @@ addressed to a neighbour and `Prompt` has no inbound track. `test/wiring_free_te
 that boundary mechanically (a host-side file containing a channel, a goroutine or a receive,
 or an extra neighbour-facing field on `Organs`, fails the build).
 
+**Reading the name back**: `agent.ID()` returns the `Organs.ID` declared at assembly — the same fact
+every `Event.CellID` carries and every `Session` is checked against. It is the only public way to tell
+two instances apart once they are built.
+
 **Flat model**: one `Agent` = one kernel, and the host owns every instance. Sub-agents are
 created inside host Effector tools (`New(bp) → Stimulate → consume the stream`), transparent to
 the main loop; if A must wait for B, make B a tool of A. One `Blueprint` can `New` many times,
 but `Organs.ID` names the instance (events are attributed to it and a Session is checked against
 it) and each instance shares its `Organs.Context` slice and `Hooks` closures, so a second agent
-overrides them per instance (see [reference-host.md](reference-host.md) Step 8).
+overrides them per instance (see [reference-host.md](reference-host.md) Step 7).
 
 ### 7.3 Multi-agent state visibility: the host-side trio
 
@@ -833,7 +881,7 @@ case "update_plan":
 	hub.updatePlan(a.CellID, a.Call.Args)
 	return &meowire.Effect{Result: "ok"}, nil
 
-// Hooks.BeforeThink: re-inject p.Plan (pointer, takes effect next Think)
+// Hooks.BeforeThink: re-inject p.Plan (pointer; this round's Think reads it)
 BeforeThink: func(ctx context.Context, p *meowire.Prompt) error {
 	p.Plan = hub.plan(id) // id captured by closure
 	return nil
@@ -856,6 +904,7 @@ case "spawn_agent":
 			Closer:  closerStub,
 			Sandbox: sandboxStub,
 			Budget:  passBudget, // pass-through trimmers: Trimmer + TrimResults + MaxTokens>0
+			Mem:     sameMemory, // required port: Recall + Remember (§8 skeleton does the same)
 			Tools:   subTools,
 		},
 		Config: subCfg,
@@ -894,6 +943,7 @@ func (e *effector) Act(ctx context.Context, a meowire.Action) (*meowire.Effect, 
 
 // ③ Assemble + run (Blueprint define-once, multi-instance reuse)
 func main() {
+	ctx := context.Background()
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
 			ID:      "agent-001",
@@ -943,8 +993,9 @@ func main() {
 
 1. **`Hooks.BeforeThink` must replace `p.Context` as a whole** — appending can
    corrupt the loop context via the shared backing array (§2.5)
-2. **Port concurrency safety**: Thinker/Effector are called concurrently if the
-   same Agent is stimulated concurrently
+2. **Port concurrency safety**: Effector is called concurrently if the same
+   Agent is stimulated concurrently (the bundled brain is stateless — safe by
+   construction)
 3. **Host ports must respect ctx cancellation**; `ask_user` must never block
    inside Effector (framework-level suspension protocol, §6.4) — the host-side
    wait timeout is self-controlled (default deny: `Resume(sess, Response{Deny: "timeout"})`)
@@ -954,15 +1005,19 @@ func main() {
    tool calls and the round budget is exhausted; Step-Resume to continue is the intended use
 6. **The event stream is an observation mirror**: the host never feeds data
    back into an open iterator; feedback goes through the next `Stimulate`
-7. **Streaming UX lives in the Thinker**: `EventText` is always whole-segment;
-   token deltas never enter the event stream
-8. **Error handling**: errors from host ports are wrapped by the framework
-   (`nerve.hookBeforeThink: ...` etc.) and surface via `EventError`; classify
-   with `errors.Is` (e.g. `meowire.ErrMaxRounds`)
+7. **Streaming UX lives in `WithSink`**: `EventText` is always whole-segment;
+   token deltas never enter the event stream and reach the Sink before the
+   output membrane rules
+8. **Errors take three channels, not one**: a hook's error and an exhausted Think retry
+   surface via `EventError` (classify with `errors.Is`, e.g. `meowire.ErrMaxRounds`); an error from
+   `Sandbox` never reaches `EventError` — it fails closed as `[sandbox-denied: sandbox error: ...]`
+   feedback; an error from the `Effector` lands in `ToolResults.Err` and the loop continues; an error
+   from `Memory.Remember` only reaches `Hooks.OnError` and cannot rewrite the round's terminal
+   (a failed `Recall` is the one that yields `EventError`)
 9. **Pause never interrupts a running tool**: Pause takes effect at gap points;
    interrupt a running tool with ctx cancellation instead (§2.4)
 10. **hub lifecycle belongs to the host** (§7.3): a full streaming channel blocks
-   the agent loop (Thinker forwarding is synchronous); the host must manage
+   the agent loop (Sink forwarding is synchronous); the host must manage
    backpressure (buffer size) and cleanup (close/delete the channel after the
    agent ends); the framework does not participate
 11. **Sub-agents must be injected with the same hub instance as the main agent**

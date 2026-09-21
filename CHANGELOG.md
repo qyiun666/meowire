@@ -5,6 +5,60 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.11] - 2026-09-20
+
+### Changed
+
+- **A failed prelude no longer spends the audits** — the cell now requeues the `EventReplace`/
+  `EventConfig` records its snapshot drained but the run never delivered (a refused
+  `BeforeStimulate`, a cancelled context, a consumer that stopped mid-list), so the next
+  `Stimulate`/`Resume` leads with them in swap order. Before this they were drained and lost while
+  the swaps they describe had already taken effect; `TestCellReplaceAuditSurvivesFailedPrelude`
+  pins the new promise.
+- **A round with no tools sends no `tools` field** — the bundled brain returns `nil` instead of an
+  empty array when `Prompt.Tools` is empty, because some OpenAI-compatible endpoints reject the
+  empty array outright. Model-visible request bodies change for tool-less rounds
+  (`TestNoToolsOmitsField`).
+- **The facade hands back the cell's iterator** — `Agent.Stimulate`/`Agent.Resume` return
+  `iter.Seq[Event]` directly instead of re-ranging it. The re-wrap existed to translate a host's
+  `false` into a stop, which is what the yield already does. `TestAbandonedStreamRequeuesItsAudits`
+  pins the promise that made the wrapper look load-bearing: a stream abandoned mid-list still leaves
+  its undelivered `EventReplace`/`EventConfig` audits at the head of the next run, because the cell
+  that requeues them is now the only owner of the iteration.
+
+### Removed
+
+- **Three wiring-inspection names (Breaking)** — `BuildGraph`, the `WiringGraph` type, and
+  `SlotsByTarget`. `RenderJSON` emits the same graph and every edge carries its `TargetID`, so
+  "who touches this data object" is one pass a host makes over `Connectome`/`WiringDiagram`; the
+  graph type existed only to be marshalled once.
+- **`meowire.PauseGate` (Breaking)** — the alias named a type no host can hand to the framework:
+  `Organs` has no field for it and `Replace` has no slot for it, because the pause gate is framework
+  wiring behind `Pause`/`Unpause`. It sat in the block documenting *host-provided ports*, which made
+  it read like a seventh organ.
+
+### Internal
+
+- **One rule for a membrane's answer** — `normalizeRuling` folds together what `consultSandbox` and
+  `consultEmit` each spelled out: an evaluation error is a fail-closed Deny, a ruling the name table
+  has no entry for is a Deny (`knownRuling`), and an Ask carries its reason as the question. Each
+  side still consults its own port method, with the one `Action` the gate had already built.
+  `guardStack` keeps its own error handling — it swallows the failure rather than forwarding it — and
+  shares only the reason text.
+- **Field plumbing is guarded** — `test/field_plumbing_test.go` reads the `Prompt` and `LoopConfig`
+  declarations and demands each name appear in the loop context, in `buildPrompt`, in the cell's
+  per-invocation snapshot, and in a request the bundled brain renders. A declared field missing from
+  a copy list compiles, vets and passes every behavioral test while never reaching the model; it now
+  names the omission instead.
+- **Guards that could not fail are made able** — the blueprint's node→edge map is pinned by an
+  expected set in both directions (nerve), the enum wire tables by their literal contents rather
+  than their length (a rename keeps every value addressable and still corrupts a journal), and the
+  guides' required-port rows by port name rather than by count. `internal/brain` joins the file and
+  function-size budget, which had covered every other production package.
+- **Test scaffolding calls the helpers it duplicated** — `test/` and `api/` build their hook sets
+  with `FullHooks`, the lifecycle fixtures use `testutil.Sandbox`, and the nerve fixtures collapse
+  their constant port literals behind `textThink`/`okEffector`.
+
 ## [1.3.10] - 2026-09-19
 
 ### Added

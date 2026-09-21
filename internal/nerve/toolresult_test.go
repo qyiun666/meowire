@@ -89,9 +89,7 @@ func TestDecisionLoopToolResultsDeniedExcluded(t *testing.T) {
 				{ID: "call_001", Name: "tool1"}, {ID: "call_002", Name: "tool2"},
 			}}, nil
 		}},
-		Act: mockEffector{fn: func(ctx context.Context, a Action) (*Effect, error) {
-			return &Effect{Result: "ok"}, nil
-		}},
+		Act: okEffector(),
 	}
 	events := collectEvents(context.Background(), lc)
 	if events[len(events)-1].Kind != EventDone {

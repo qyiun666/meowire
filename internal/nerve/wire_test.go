@@ -4,7 +4,10 @@
 // wire_test.go — Connectome blueprint integrity tests.
 package nerve
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestConnectomeUniqueIDs verifies every blueprint slot has a unique ID.
 func TestConnectomeUniqueIDs(t *testing.T) {
@@ -103,20 +106,56 @@ func TestConnectomeSemanticsValid(t *testing.T) {
 	}
 }
 
-// TestConnectomeNodeCoverage verifies the node set covers every data object
-// the slots describe (a slot added with a new TargetID forces a node).
+// TestConnectomeNodeCoverage pins the graph in both directions: every data
+// object is touched by exactly the listed slots (in blueprint order), and the
+// node set is exactly the objects the slots describe. A re-pointed edge, a slot
+// added beside an existing one, a node nothing touches and a node declared but
+// untargeted all fail here. The expected sets are written out rather than derived
+// from Connectome — a guard that recomputes its own answer can never disagree.
 func TestConnectomeNodeCoverage(t *testing.T) {
-	want := []string{
-		"prompt", "context", "plan", "bounds", "decision", "action",
-		"effect", "err", "output", "timing", "resources", "hooks",
+	want := map[string][]string{
+		"prompt":      {"H1", "F2"},
+		"context":     {"P6", "H3"},
+		"toolresults": {"P6b", "F1"},
+		"memories":    {"P7"},
+		"plan":        nil, // host-side text: no slot reads or mutates it
+		"bounds":      {"P5b"},
+		"decision":    {"H4"},
+		"action":      {"P2", "P5", "H5"},
+		"effect":      {"H6"},
+		"err":         {"H7"},
+		"output":      {"P5c", "P7b", "H2", "H8"},
+		"timing":      {"G1"},
+		"resources":   {"P3", "P3b"},
+		"hooks":       {"P4"},
 	}
-	nodeIDs := make(map[string]bool)
+
+	touched := map[string][]string{}
+	for _, wp := range Connectome() {
+		touched[wp.TargetID] = append(touched[wp.TargetID], wp.ID)
+	}
+	for id, slots := range want {
+		if !slices.Equal(touched[id], slots) {
+			t.Errorf("node %q touched by %v, want %v", id, touched[id], slots)
+		}
+		delete(touched, id)
+	}
+	for id, slots := range touched {
+		t.Errorf("slots %v target %q, which is not a declared node", slots, id)
+	}
+
+	nodes := map[string]bool{}
 	for _, n := range ConnectomeNodes() {
-		nodeIDs[n.ID] = true
+		nodes[n.ID] = true
 	}
-	for _, id := range want {
-		if !nodeIDs[id] {
+	for id := range want {
+		if !nodes[id] {
 			t.Errorf("node set missing %q", id)
+		}
+	}
+	for id := range nodes {
+		if _, ok := want[id]; !ok {
+			t.Errorf("node %q is declared but no slot targets it", id)
 		}
 	}
 }

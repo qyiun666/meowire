@@ -34,7 +34,7 @@ func TestNewAggregatesMissingPorts(t *testing.T) {
 // wiring point is required (explicit no-op, not absence).
 func TestNewRejectsIncompleteHooks(t *testing.T) {
 	o := testOrgans(t, meowire.Organs{})
-	o.Hooks = fullHooks()
+	o.Hooks = meowire.FullHooks(meowire.Hooks{})
 	o.Hooks.BeforeThink = nil
 	if _, err := meowire.New(meowire.Blueprint{Organs: o}); err == nil {
 		t.Fatal("New with a missing hook callback should error")
@@ -55,7 +55,7 @@ func TestNewRejectsIncompleteBudget(t *testing.T) {
 // hook callback as an error.
 func TestValidateSurfacesMissingHook(t *testing.T) {
 	o := testOrgans(t, meowire.Organs{})
-	o.Hooks = fullHooks()
+	o.Hooks = meowire.FullHooks(meowire.Hooks{})
 	o.Hooks.AfterThink = nil
 	found := false
 	for _, is := range meowire.Validate(o, meowire.Config{}) {

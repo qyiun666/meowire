@@ -7,7 +7,7 @@ Meowire is a minimal decision-loop kernel for building agent hosts. It wires the
 implement), and leaves the rest to you: the tools, the memory, the security policy. No framework
 opinion about your stack — just a clean loop you can rely on.
 
-> Requires Go 1.27+ (uses `iter.Seq`).
+> Requires Go 1.27+ (the stream is an `iter.Seq`, and a parallel Act batch rides `sync.WaitGroup.Go` — 1.23 and 1.25 respectively; the ceiling comes from `go.mod`).
 
 ## Why Meowire
 
@@ -20,9 +20,12 @@ opinion about your stack — just a clean loop you can rely on.
 - **You own everything else.** Meowire provides no tool framework, no memory backend — it injects
   six host ports and expects you to implement them. The framework never hides what your agent
   actually does.
-- **One dependency, pinned.** `github.com/openai/openai-go/v3` at v3.61.0 (chosen and upgraded
-  deliberately, never ridden along); everything else is the standard library.
-- **Small and readable.** ~4k lines of Go (production code; tests are another ~8.5k). The decision loop reads as one concern
+- **One direct dependency, pinned.** `github.com/openai/openai-go/v3` at v3.61.0 (chosen and
+  upgraded deliberately, never ridden along); the kernel itself is standard library, and the only
+  other entries in `go.mod` are the four `tidwall/*` indirects that SDK carries.
+- **Small and readable.** ~4.7k lines of Go (production code: `api/` plus `internal/`, excluding
+  `*_test.go` and the `internal/testutil` doubles; all `*_test.go` together are another ~9.6k).
+  The decision loop reads as one concern
   per file (`internal/nerve/`: loop, gate, pause, retry, feedback, parallel).
 - **Sealed internals.** All implementation lives under `internal/` — the Go compiler guarantees
   the only importable surface is the `api/` package (`New` / `Stimulate` / `Close` + contract types).
@@ -39,11 +42,12 @@ opinion about your stack — just a clean loop you can rely on.
   on either side of the loop) yields one `EventSandbox` record (the gated tool, or a zero tool for a
   text ruling; plus reason and error); persist the event stream for a complete
   "who/what/why was permitted" audit, per the Authority security model
-- **Wiring graph inspection** — `Connectome`/`Validate`/`RenderDiagram`/`RenderJSON` treat the
-  assembly as a graph (data-object nodes + slot edges) and render it for humans or machines
+- **Wiring graph inspection** — `Connectome` (edges) / `ConnectomeNodes` (data-object nodes) /
+  `WiringDiagram` (blueprint × this assembly, filled or not) / `Validate` / `RenderDiagram` /
+  `RenderJSON` treat the assembly as a graph and render it for humans or machines
 - **Dynamic wiring (swap an organ at runtime)** — `Agent.Replace(slot, port)` swaps
-  `Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate`,
-  an in-flight `Stimulate` keeps the ports it started with; every successful swap is
+  `Act`/`Sandbox`/`Budget`/`Mem`/`Hooks` at runtime; takes effect at the next `Stimulate` or
+  `Resume`, an in-flight run keeps the ports it started with; every successful swap is
   audited as `EventReplace` at the start of the next Stimulate/Resume. The brain has no slot:
   a different model is a new assembly with different `Brain` parameters
 - **Runtime config updates** — `Agent.UpdateConfig(cfg)` / `Agent.GetConfig()` tune
@@ -86,9 +90,11 @@ opinion about your stack — just a clean loop you can rely on.
   once. `Session.RemainingCalls()` exposes the pending calls of a
   suspension (empty when nothing is left to replay)
 - **The stream is journalable** — `EncodeEvent`/`DecodeEvent` write one versioned JSON
-  record per event, carry enums by name, restore framework errors by identity, refuse an enum its
+  record per event (wire format v2), carry enums by name, restore framework errors by identity, refuse an enum its
   own name table cannot spell, and name anything that could not cross in the event's `Dropped` field; every event carries the `CellID` of the cell
-  that produced it, so one log can hold events from several agents
+  that produced it plus `Seq` (1-based, strictly increasing per cell across `Stimulate` and `Resume`)
+  and `TS` (Unix milliseconds), so one log can hold events from several agents **and** still tell
+  "this agent had nothing to say" from "a record went missing"
 - **Tri-state rulings on both sides & reflection primitives** — `Sandbox.Allow` (before a tool
   runs) and `Sandbox.Emit` (before a round's text is heard) each return a
   `Verdict`: Deny (zero value, fail-closed), Allow, or Ask — a value outside those three named
@@ -105,7 +111,28 @@ opinion about your stack — just a clean loop you can rely on.
 - **Resistance is feedback, not failure** — denied tools and tool errors flow back into the
   loop as `EventToolResult` feedback; the loop continues
 
-## Upgrading to v1.2.0
+## Upgrading
+
+### v1.3.x — the current surface (three Breaking rounds since v1.2.0)
+
+- **v1.3.8 — the inter-agent layer is gone (Breaking)**: `internal/synapse` (the synapse graph, the
+  `Hebbian`/`STDP`/`Prune` learning rules) and the cell-side delegation pairing were deleted
+  wholesale. Addressing, routing, delivery, capability discovery and synaptic weight belong to the
+  host; one `Agent` is one kernel, and multi-agent means the host `New`s several instances.
+- **v1.3.9 — identity and shape**: `Organs.ID` became required with no default (every event is
+  attributed by it and every `Session` is checked against it); a suspension now names its own cause
+  through `Session.Kind()`, and `Resume` takes one typed `Response{Answer, Deny}` for all four
+  flavours; the answer/denial tracks were separated.
+- **v1.3.10 — the brain is bundled (Breaking)**: `Organs.Thinker`, the `SlotThink` constant,
+  `Replace("think", …)`, the blueprint's `P1` point and `FallbackThinker` are gone. Pass
+  `BrainConfig{BaseURL, Key, Model, Stream, Mode}` on `Organs` instead — no host writes a Thinker,
+  and the public surface has no `Thinker` type. A different model is a new `New`, not a swap.
+- **v1.3.11 — wiring inspection narrowed (Breaking)**: `BuildGraph`, the `WiringGraph` type,
+  `SlotsByTarget` and the `meowire.PauseGate` alias were removed. `Connectome()` /
+  `ConnectomeNodes()` / `WiringDiagram(o)` / `RenderDiagram` / `RenderJSON` cover the same ground,
+  and every edge carries its own `TargetID`.
+
+### v1.2.0
 
 - **Every wiring point is now required** — hooks H1–H8 must all be set
   (explicit no-op where no behavior is wanted); a missing callback fails
@@ -120,23 +147,29 @@ opinion about your stack — just a clean loop you can rely on.
 - **`Replace` rejects nil/incomplete ports** — swapped organs must be
   complete.
 - **`Sandbox` requires `Bounds() string`** — return the execution boundary
-  description; the framework snapshots it once per `Stimulate` and surfaces
+  description; the framework snapshots it once per `Stimulate`/`Resume` and surfaces
   it read-only to hooks and the brain via `Prompt.Bounds`:
   ```go
   func (s *MySandbox) Bounds() string { return "read-only /workspace" }
   ```
-- **Missing-port errors are `errors.Join`-aggregated** — match with
-  `errors.Is` / `strings.Contains`, never exact string equality.
+- **Missing-port errors are `errors.Join`-aggregated** — match with `errors.Is` (a joined error
+  answers `Is` for each of its parts); never compare error strings.
 
 ## Architecture
 
 ```
 meowire (module root)
-  └── api/            facade + composition root — the sole public surface
-      ├── internal/brain    the bundled openai-go brain (the one provider package)
-      ├── internal/cell     agent kernel (ID + ports + DecisionLoop)
-      └── internal/nerve    decision loop, ports (incl. memory), hooks, events, guards
+  ├── api/                facade + composition root — the sole public surface
+  ├── internal/brain      the bundled openai-go brain (the one provider package)
+  ├── internal/cell       agent kernel (ID + ports + DecisionLoop)
+  ├── internal/nerve      decision loop, ports (incl. memory), hooks, events, guards
+  ├── internal/testutil   shared doubles for the six host ports, used by test/
+  └── test/               integration suite and contract guards
 ```
+
+Only `api/` is importable; the `internal/*` packages sit beside it at the module root, and
+`internal/nerve` never imports `internal/brain` — the composition root in `api/` builds the
+brain and hands it to the cell as the loop's Thinker.
 
 | Concept | Where | Role |
 |---|---|---|
@@ -219,7 +252,7 @@ func main() {
 	// instance (flat-model multi-agent)
 	bp := meowire.Blueprint{
 		Organs: meowire.Organs{
-			ID:      "agent-001", // required: events and resume handles are attributed to it
+			ID:      "agent-001",                                                             // required: events and resume handles are attributed to it
 			Brain:   meowire.BrainConfig{Model: "gpt-5.2", Key: os.Getenv("OPENAI_API_KEY")}, // the bundled brain
 			Act:     effector{},
 			Closer:  closer{},
@@ -230,7 +263,7 @@ func main() {
 				Trimmer:     func(c []string, max int) []string { return c },
 				TrimResults: func(rs []meowire.ToolResult, max int) []meowire.ToolResult { return rs },
 			},
-			Mem:     memory{},
+			Mem: memory{},
 		},
 		Config: meowire.Config{},
 	}
@@ -335,6 +368,8 @@ agents stays with the host**.
   tool of A
 - `Organs.ID` names one instance and has no default: `New` rejects an unnamed agent, because that
   is the identity every event carries and every `Session` is checked against
+- `Agent.ID()` reads that name back from a built instance — the same value every `Event.CellID`
+  carries, which is what a host keys event routing and log attribution on across several agents
 
 ## Development
 
@@ -355,6 +390,7 @@ GOWORK=off go vet ./...
 | MemHop | [github.com/qyiun666/memhop](https://github.com/qyiun666/memhop) |
 | MeowDesk | [github.com/qyiun666/MeowDesk](https://github.com/qyiun666/MeowDesk) |
 | Website | [qyiun666.github.io/meowagent.github.io](https://qyiun666.github.io/meowagent.github.io/) |
+| 中文 README | [README.zh-CN.md](README.zh-CN.md) |
 | Host Integration Guide | [host-integration.en.md](host-integration.en.md) |
 | Brain spec (openai-go) | [thinker-openai-go.md](thinker-openai-go.md) — the bundled brain's placement table and protocol reference |
 | Reference Host (zh-CN) | [reference-host.md](reference-host.md) — step-by-step runnable AI host |

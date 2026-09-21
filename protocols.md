@@ -1,6 +1,7 @@
 # 协议映射指南：meowire 与 2026 行业标准
 
-> meowire 是一个纯接线内核：不内置任何厂商协议，也不禁止任何协议。
+> meowire 是一个接线内核：内置大脑说 OpenAI 兼容线协议，除此之外不内置
+> 任何互操作协议，也不禁止任何协议。
 > 本文说明宿主如何把 meowire 的端口/事件/契约映射到 2026 年主流的
 > Agent 互操作标准（MCP / A2A / AGENTS.md / Authority），作为宿主侧
 > 实现的执行指南。框架本身不消费这些协议——实现全部在宿主域。
@@ -19,14 +20,14 @@
   harness 变薄）→ 3.0 Attention（harness 只留权限、身份、信任、
   可解释性，即 human attention policy surface）。
 
-meowire 的设计（纯接线、七端口、动作级拦截、事件流观测）与上述
-坐标天然对齐：协议是宿主域，接线是框架域。
+meowire 的设计（纯接线、六个宿主端口 + 内置大脑、动作级拦截、事件流观测）与上述
+坐标天然对齐：互操作协议是宿主域，接线是框架域。
 
 ## 映射总表
 
 | meowire 概念 | 行业标准/模式 | 宿主实现位置 |
 |---|---|---|
-| `Thinker` 端口 | LLM 适配（任意厂商，模型无关） | `Organs.Think` |
+| 内置大脑 | LLM 调用（OpenAI 兼容端点，模型经参数指定） | `Organs.Brain` 传参 |
 | `Effector` 端口 | MCP client（工具调用） | `Organs.Act` |
 | `ToolSpec` | MCP server 的 `tools` 列表投影 | `Organs.Tools` |
 | `Sandbox.Allow` | Authority 动作级授权（每次执行前） | `Organs.Sandbox` |
@@ -58,15 +59,24 @@ meowire 采用扁平模型：一个 Agent 一个内核，宿主管实例（`spaw
 
 - **任务状态映射**：宿主把一次 `Stimulate` 当作 A2A 的一个 task 来跑，收尾时按
   `OnCycleEnd(ctx, output, outcome)` 给的 `CycleOutcome` 写状态——
-  Done→completed、Suspended→needs-input、Error/MaxRounds→failed（ctx 被取消即
-  cancelled）、消费者中途放弃迭代器→不产生状态也不回话（没完成的事不编）。
-  六态语义归协议，写入者归宿主。
-- **能力发现**：`Organs.Methods`（gene projection，只描述不消费）就是 A2A Card 的
+  Done→completed、Suspended→needs-input、Error/MaxRounds→failed、消费者中途放弃迭代器→
+  Aborted。**框架四条都给判词**，`OutcomeAborted` 不是沉默——「不回话」是宿主策略，不是框架没算完。
+  两个映射要宿主自己补：ctx 取消在框架侧只落 `OutcomeError`（`OnCycleEnd` 分不清它和器官失败），
+  要映射成 cancelled 得从 `EventError.Err` 上 `errors.Is(err, context.Canceled)` 判；`OutcomeError`
+  也不区分是哪根轨失败。六态语义归协议，写入者归宿主。
+- **能力发现**：`Organs.Methods`（能力清单，只描述不消费）就是 A2A Card 的
   skills 名单来源，宿主自行渲染成 JSON 并发布到 `/.well-known/agent-card.json`；
   框架不产出卡片。
 - **传输与路由**：A 怎么找到 B（channel/HTTP/Redis/gRPC）、谁能被寻址，全是宿主的事。
   跨进程时把 `EncodeEvent` 的 JSON 记录直接当传输单元即可——每条自带产出它的
-  `CellID`、按名字编码的枚举与版本闸门，读端不认就拒读。
+  `CellID`、`Seq`、`TS`、按名字编码的枚举与版本闸门（事件线格式当前 v2，Session 线格式当前 v4），
+  读端不认就拒读，不做降级解释。
+  可携带性是有边界的：三枚框架哨兵（`ErrMaxRounds`/`ErrForeignSession`/`ErrCellClosed`）按 code
+  原样恢复，`errors.Is` 照旧成立；宿主自己的错误只回来同样的文本，并在 `Dropped` 里点名 `err.identity`；
+  膜的裁决错误同理点名为 `verdict.err.identity`。**写侧直接拒**的是名字表拼不出的值（未知 kind、
+  未知 state、非 state 事件却带 state 名、未知 ruling）以及序列化失败的 `Session`——制造一条永远读不回的记录，
+  比拒绝它更糟。枚举名表住在哪里：12 个事件名 `internal/nerve/event.go`、7 个状态名 `state.go`、
+  4 个挂起成因名 `port.go`、3 个裁决名 `sandbox.go`；字段级说明见 `host-integration.md` §6.2/§6.5。
 - 参考实现：[A2A 官方仓库](https://github.com/a2aproject/A2A)（Linux
   Foundation）。
 
@@ -93,7 +103,7 @@ meowire 采用扁平模型：一个 Agent 一个内核，宿主管实例（`spaw
   零值）、裁决（Ruling）、策略原因/征询问题与评估错误；ask 裁决以终结的第二条记录闭合
   审计链。宿主持久化事件流即得到完整审计日志（谁、代表谁、何时、做了什么、
   为什么被允许）。
-- `Sandbox.Bounds()` 在每次 `Stimulate` 开始时快照进 `Prompt.Bounds`，
+- `Sandbox.Bounds()` 在每次 `Stimulate`/`Resume` 的序言里快照进 `Prompt.Bounds`，
   把执行边界告知 LLM——边界既是拦截也是提示。
 
 ## 5. 长时任务（状态外化）
@@ -104,7 +114,8 @@ Anthropic 长时 Agent 的核心结论：上下文压缩不够，**状态必须�
 
 - Step-Resume：每个 `Stimulate` 是无状态 step；宿主在 step 之间把
   中间产物（计划、进度、交接物）落盘，下次 `Stimulate` 前经
-  `Hooks.BeforeThink` 注入。
+  `Hooks.BeforeStimulate` 注入原型（写回即全轮生效）。`BeforeThink` 是**每轮**都触发的槽，
+  且它与循环共享底层数组（只能整体替换 `p.Context`，不能 append），跨 step 的常驻注入不要放它那里。
 - 事件流即日志：把 `iter.Seq[Event]` 序列化（append-only 事件日志 /
   WAL），宿主可随时重建或审计任意 step 的执行轨迹。
 - 崩溃恢复：宿主重放事件日志 → 重建上下文 → 重新 `Stimulate`。
@@ -112,8 +123,8 @@ Anthropic 长时 Agent 的核心结论：上下文压缩不够，**状态必须�
 ## 5b. 动态接线（运行时换器官）
 
 `Agent.Replace(slot, port)` 支持在两次 `Stimulate` 之间替换运行端口
-（think/act/sandbox/budget/mem/hooks）：换 LLM 提供商、换沙箱策略、
-换工具集都不必重建 Agent。这与 DeepSeek Harness 的运行时热插拔是
+（act/sandbox/budget/mem/hooks）：换沙箱策略、换工具集都不必重建
+Agent；大脑无槽，换模型是重新 `New`。这与 DeepSeek Harness 的运行时热插拔是
 同一哲学，但 meowire 保持编译期类型安全（Replace 做端口类型断言）
 与"飞行中的 Stimulate 不受影响"的语义——每次 `Stimulate` 快照
 端口构造全新 LoopContext，替换只在下次生效。
@@ -130,7 +141,7 @@ DeepSeek Harness（2026.08 开源，MIT）以 Cordis 元框架实现
 |---|---|---|
 | 接线时机 | 编译期装配（`New` 校验）+ 运行时替换（`Replace`） | 运行时（热插拔） |
 | 内核职责 | 决策循环 + 事件流 | 插件加载/卸载/依赖管理 |
-| 语言 | Go，零依赖 | TypeScript 生态 |
+| 语言 | Go，内核零三方依赖（模块带 openai-go 大脑） | TypeScript 生态 |
 | 适用 | 嵌入宿主程序的 Agent 内核 | 独立 Agent 运行时平台 |
 
 选择建议：需要嵌入、最小依赖、可审计的内核 → meowire；需要运行时

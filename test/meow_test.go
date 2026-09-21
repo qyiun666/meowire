@@ -7,6 +7,7 @@ package meowire_test
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"slices"
 	"strings"
 	"testing"
@@ -16,20 +17,6 @@ import (
 )
 
 // --- shared test helpers (used by all files in this package) ---
-
-// fullHooks returns a Hooks with all eight required callbacks set (no-ops).
-func fullHooks() *meowire.Hooks {
-	return &meowire.Hooks{
-		BeforeStimulate: func(ctx context.Context, p *meowire.Prompt) error { return nil },
-		AfterStimulate:  func(ctx context.Context, output string) {},
-		BeforeThink:     func(ctx context.Context, p *meowire.Prompt) error { return nil },
-		AfterThink:      func(ctx context.Context, d *meowire.Decision) error { return nil },
-		BeforeAct:       func(ctx context.Context, a *meowire.Action) error { return nil },
-		AfterAct:        func(ctx context.Context, a *meowire.Action, e *meowire.Effect, err error) {},
-		OnError:         func(ctx context.Context, err error) {},
-		OnCycleEnd:      func(ctx context.Context, output string, _ meowire.CycleOutcome) {},
-	}
-}
 
 // fullOrgans returns an Organs with all six required host ports wired plus a
 // brain answering script (an empty script answers a plain "ok"; the last
@@ -43,7 +30,7 @@ func fullOrgans(t *testing.T, script ...testutil.FakeCompletion) meowire.Organs 
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 		Closer:  &testutil.Closer{},
-		Hooks:   fullHooks(),
+		Hooks:   meowire.FullHooks(meowire.Hooks{}),
 		Sandbox: testutil.Sandbox{},
 		Budget:  &meowire.ContextBudget{MaxTokens: 100, Trimmer: func(ctx []string, max int) []string { return ctx }, TrimResults: func(rs []meowire.ToolResult, _ int) []meowire.ToolResult { return rs }},
 		Mem:     testutil.Memory{},
@@ -67,32 +54,7 @@ func testOrgans(t *testing.T, o meowire.Organs, script ...testutil.FakeCompletio
 		base.Closer = o.Closer
 	}
 	if o.Hooks != nil {
-		merged := fullHooks()
-		if o.Hooks.BeforeStimulate != nil {
-			merged.BeforeStimulate = o.Hooks.BeforeStimulate
-		}
-		if o.Hooks.AfterStimulate != nil {
-			merged.AfterStimulate = o.Hooks.AfterStimulate
-		}
-		if o.Hooks.BeforeThink != nil {
-			merged.BeforeThink = o.Hooks.BeforeThink
-		}
-		if o.Hooks.AfterThink != nil {
-			merged.AfterThink = o.Hooks.AfterThink
-		}
-		if o.Hooks.BeforeAct != nil {
-			merged.BeforeAct = o.Hooks.BeforeAct
-		}
-		if o.Hooks.AfterAct != nil {
-			merged.AfterAct = o.Hooks.AfterAct
-		}
-		if o.Hooks.OnError != nil {
-			merged.OnError = o.Hooks.OnError
-		}
-		if o.Hooks.OnCycleEnd != nil {
-			merged.OnCycleEnd = o.Hooks.OnCycleEnd
-		}
-		base.Hooks = merged
+		base.Hooks = meowire.FullHooks(*o.Hooks)
 	}
 	if o.Sandbox != nil {
 		base.Sandbox = o.Sandbox
@@ -143,6 +105,20 @@ func testNew(o meowire.Organs, cfg meowire.Config) (*meowire.Agent, error) {
 	return meowire.New(meowire.Blueprint{Organs: o, Config: cfg})
 }
 
+// collect drains an event stream into a slice for assertions afterwards.
+func collect(seq iter.Seq[meowire.Event]) []meowire.Event {
+	var out []meowire.Event
+	for ev := range seq {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// hasKind reports whether a stream carried an event of the given kind.
+func hasKind(events []meowire.Event, k meowire.EventKind) bool {
+	return slices.ContainsFunc(events, func(ev meowire.Event) bool { return ev.Kind == k })
+}
+
 // --- tests ---
 
 // TestNewAndStimulate verifies creating an Agent and consuming events.
@@ -154,10 +130,7 @@ func TestNewAndStimulate(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	var events []meowire.Event
-	for ev := range a.Stimulate(context.Background(), "work") {
-		events = append(events, ev)
-	}
+	events := collect(a.Stimulate(context.Background(), "work"))
 
 	if len(events) != 5 {
 		t.Fatalf("events count = %d, want 5", len(events))
@@ -319,7 +292,7 @@ func TestFullOrgansWiring(t *testing.T) {
 			return &meowire.Effect{Result: "ok"}, nil
 		}},
 		Closer: &testutil.Closer{},
-		Hooks:  fullHooks(),
+		Hooks:  meowire.FullHooks(meowire.Hooks{}),
 		Sandbox: testutil.Sandbox{Fn: func(ctx context.Context, a meowire.Action) (meowire.Verdict, string, error) {
 			sandboxCalled = true
 			return meowire.VerdictAllow, "", nil

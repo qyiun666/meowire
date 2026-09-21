@@ -21,8 +21,13 @@ import (
 // JSON Schema text and the SDK wants the object; a malformed schema is a
 // wiring mistake and fails the round loudly. ToolSpec.Output has no seat in
 // the chat protocol (it accepts no output schema), so it is folded into the
-// description — still text the model reads.
+// description — still text the model reads. A round with no tools sends no
+// tools field at all: nil (which the wire omits) rather than an empty array,
+// which some OpenAI-compatible endpoints reject.
 func toolParams(p *nerve.Prompt) ([]openai.ChatCompletionToolUnionParam, error) {
+	if len(p.Tools) == 0 {
+		return nil, nil
+	}
 	tools := make([]openai.ChatCompletionToolUnionParam, 0, len(p.Tools))
 	for _, spec := range p.Tools {
 		schema, err := toolSchema(spec)

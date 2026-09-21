@@ -193,20 +193,20 @@ func TestWaitKindContractSynced(t *testing.T) {
 	assertSameSet(t, "api/types.go WaitKind aliases (right side)", rhs, kinds)
 }
 
-// TestRequiredPortCountSyncedWithGuides pins the port count the guides
+// TestRequiredPortNamesSyncedWithGuides pins the port names the guides
 // advertise to the blueprint: the Organs table of each host-integration guide
-// carries one required row per required phase-2 slot. A port added to the
-// blueprint without an organ row (or the reverse) fails here.
-func TestRequiredPortCountSyncedWithGuides(t *testing.T) {
-	want := 0
+// carries one required row per required phase-2 slot, and the rows name exactly
+// those ports. A port added to the blueprint without an organ row (or the
+// reverse, or a rename that keeps the count) fails here — counts alone would
+// let a swap of two ports through.
+func TestRequiredPortNamesSyncedWithGuides(t *testing.T) {
 	var names []string
 	for _, wp := range meowire.Connectome() {
 		if wp.Phase == phaseHostPort && wp.Required {
-			want++
 			names = append(names, wp.Name)
 		}
 	}
-	if want == 0 {
+	if len(names) == 0 {
 		t.Fatal("blueprint advertises no required host port — the phase filter is wrong")
 	}
 
@@ -215,17 +215,16 @@ func TestRequiredPortCountSyncedWithGuides(t *testing.T) {
 		{hostENMD, "yes"},
 	} {
 		table := organsTable(t, tc.path)
-		rowRe := regexp.MustCompile("(?m)^\\| `\\w+`.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
-		got := len(rowRe.FindAllString(table, -1))
-		// `ID` is a required assembly field, not a port: its row carries the
-		// same required mark as a port row but must not enter the port count
-		// (the blueprint's phase-2 slots have no ID entry to pair with).
-		idRe := regexp.MustCompile("(?m)^\\| `ID` \\|.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
-		got -= len(idRe.FindAllString(table, -1))
-		if got != want {
-			t.Errorf("%s advertises %d required organ rows, blueprint requires %d ports (%s)",
-				tc.path, got, want, strings.Join(names, "/"))
+		rowRe := regexp.MustCompile("(?m)^\\| `(\\w+)`.*\\| \\*\\*" + tc.mark + "\\*\\* \\|$")
+		var got []string
+		for _, m := range rowRe.FindAllStringSubmatch(table, -1) {
+			got = append(got, m[1])
 		}
+		// `ID` is a required assembly field, not a port: its row carries the
+		// same required mark as a port row but must not enter the port set
+		// (the blueprint's phase-2 slots have no ID entry to pair with).
+		got = slices.DeleteFunc(got, func(s string) bool { return s == "ID" })
+		assertSameSet(t, tc.path+" required organ rows", got, names)
 	}
 }
 

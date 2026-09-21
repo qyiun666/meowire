@@ -88,9 +88,12 @@ func responseInput(p *nerve.Prompt) responses.ResponseInputParam {
 
 // responseToolParams maps the round's tool list onto the Responses function
 // tool shape — same every-round rebuild (BeforeStimulate may rewrite p.Tools
-// wholesale), same schema parsing, same Output-in-description fold as the
-// chat wire.
+// wholesale), same schema parsing, same Output-in-description fold and same
+// empty-list omission (nil, so the field is not sent) as the chat wire.
 func responseToolParams(p *nerve.Prompt) ([]responses.ToolUnionParam, error) {
+	if len(p.Tools) == 0 {
+		return nil, nil
+	}
 	tools := make([]responses.ToolUnionParam, 0, len(p.Tools))
 	for _, spec := range p.Tools {
 		schema, err := toolSchema(spec)

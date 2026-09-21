@@ -22,10 +22,7 @@ func TestConfigApplied(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	var events []meowire.Event
-	for ev := range a.Stimulate(context.Background(), "loop") {
-		events = append(events, ev)
-	}
+	events := collect(a.Stimulate(context.Background(), "loop"))
 
 	thinkCount := 0
 	for _, e := range events {
@@ -45,13 +42,7 @@ func TestConfigMaxToolOutput(t *testing.T) {
 		t.Fatalf("new: %v", err)
 	}
 
-	var gotDone bool
-	for ev := range a.Stimulate(context.Background(), "work") {
-		if ev.Kind == meowire.EventDone {
-			gotDone = true
-		}
-	}
-	if !gotDone {
+	if !hasKind(collect(a.Stimulate(context.Background(), "work")), meowire.EventDone) {
 		t.Fatal("expected EventDone")
 	}
 }

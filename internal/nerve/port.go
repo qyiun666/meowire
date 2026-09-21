@@ -85,9 +85,9 @@ type ToolSpec struct {
 // e.g. call_xxx). Result carries the successful output and Err the failure
 // text — Err non-empty means the call failed, and exactly one of the two is
 // set; both are post-truncation when MaxToolOutput applies. Rendering
-// (tool-role messages, [tool_call_id=xxx] markers, plain text) is the host
-// Thinker's decision. Sandbox denials are verdicts, not tool results, and
-// never appear here.
+// (tool-role messages, [tool_call_id=xxx] markers, plain text) is the
+// bundled brain's, not the kernel's. Sandbox denials are verdicts, not tool
+// results, and never appear here.
 type ToolResult struct {
 	ID     string // Tool call ID (LLM-provided, e.g. call_xxx)
 	Name   string // Tool name (echo of ToolCall.Name)
