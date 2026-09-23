@@ -307,7 +307,7 @@ func TestFullOrgansWiring(t *testing.T) {
 		Mem: testutil.Memory{
 			RecallFn: func(context.Context, meowire.MemoryQuery) ([]meowire.Record, error) {
 				recallCalled = true
-				return []meowire.Record{{Key: "k1", CellID: "wired-agent", Content: []byte("note")}}, nil
+				return []meowire.Record{{Key: "k1", Content: []byte("note")}}, nil
 			},
 			RememberFn: func(_ context.Context, f meowire.CycleFacts) error {
 				rememberCalled = true

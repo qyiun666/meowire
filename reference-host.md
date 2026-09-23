@@ -236,7 +236,6 @@ func (m *hostMemory) Remember(_ context.Context, f meowire.CycleFacts) error {
 	}
 	m.entries = append(m.entries, meowire.Record{
 		Key:     fmt.Sprintf("%s-%d", f.CellID, len(m.entries)),
-		CellID:  f.CellID,
 		Kind:    "turn", // f.Outcome 告诉你这次是善终、挂起还是被放弃
 		Content: []byte(f.Output),
 	})

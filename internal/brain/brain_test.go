@@ -78,7 +78,7 @@ func fullPrompt() *nerve.Prompt {
 			{ID: "call_1", Name: "search", Result: "42"},
 			{ID: "call_2", Name: "web", Err: "boom"},
 		},
-		Memories: []nerve.Record{{Key: "k1", Kind: "note", Content: []byte("remembered"), Created: 1720000000}},
+		Memories: []nerve.Record{{Key: "k1", Kind: "note", Content: []byte("remembered"), Created: 1720000000000}},
 	}
 }
 
@@ -140,7 +140,7 @@ func TestPromptFieldPlacement(t *testing.T) {
 	for _, want := range []string{
 		"be helpful", "a test agent", "m1", "only /workspace",
 		"base line", "[sandbox-denied: web is off]", "step 1 then step 2",
-		"last time the tool args were wrong", "k1", "remembered",
+		"last time the tool args were wrong", "k1", "remembered", "@1720000000000",
 	} {
 		if !strings.Contains(sys.Content, want) {
 			t.Errorf("system bundle missing %q:\n%s", want, sys.Content)
@@ -379,7 +379,7 @@ func TestResponsesRoundTrip(t *testing.T) {
 	for _, want := range []string{
 		"be helpful", "a test agent", "m1", "only /workspace",
 		"base line", "[sandbox-denied: web is off]", "step 1 then step 2",
-		"last time the tool args were wrong", "k1", "remembered",
+		"last time the tool args were wrong", "k1", "remembered", "@1720000000000",
 	} {
 		if !strings.Contains(req.Instructions, want) {
 			t.Errorf("instructions missing %q:\n%s", want, req.Instructions)

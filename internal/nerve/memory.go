@@ -13,10 +13,9 @@ import (
 // interprets Content; Key/Kind/Created exist for the organ's own bookkeeping.
 type Record struct {
 	Key     string // unique key within the store
-	CellID  string // owning cell
 	Kind    string // category, organ-defined
 	Content []byte // payload
-	Created int64  // Unix seconds, organ-written
+	Created int64  // Unix milliseconds, organ-written
 }
 
 // MemoryQuery is everything the framework can name at a recall point without

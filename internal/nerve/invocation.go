@@ -26,7 +26,7 @@ type LoopContext struct {
 	Pause *PauseGate
 
 	// Config
-	MaxRounds       int           // Hard round limit (<=0 uses DefaultMaxRounds)
+	MaxRounds       int           // Hard round limit
 	MaxToolOutput   int           // Tool output truncation length (<=0 = no truncation)
 	MaxRetries      int           // Think retry count (<=0 = no retry)
 	ToolTimeout     time.Duration // Per-tool execution timeout (<=0 = no timeout)

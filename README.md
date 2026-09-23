@@ -113,7 +113,7 @@ opinion about your stack — just a clean loop you can rely on.
 
 ## Upgrading
 
-### v1.3.x — the current surface (three Breaking rounds since v1.2.0)
+### v1.3.x — the current surface (four Breaking rounds since v1.2.0)
 
 - **v1.3.8 — the inter-agent layer is gone (Breaking)**: `internal/synapse` (the synapse graph, the
   `Hebbian`/`STDP`/`Prune` learning rules) and the cell-side delegation pairing were deleted
@@ -131,6 +131,13 @@ opinion about your stack — just a clean loop you can rely on.
   `SlotsByTarget` and the `meowire.PauseGate` alias were removed. `Connectome()` /
   `ConnectomeNodes()` / `WiringDiagram(o)` / `RenderDiagram` / `RenderJSON` cover the same ground,
   and every edge carries its own `TargetID`.
+- **v1.3.12 — a fact gets one carrier (Breaking)**: `Record` lost `CellID` (`MemoryQuery` already
+  names the cell that is asking, so copying it onto every returned row left two carriers with no
+  arbiter), `Record.Created` is Unix milliseconds like every other timestamp in the loop, and
+  `Issue.ID` is gone because an empty `Issue.Wire` is what "assembly-level" already means. A host
+  that stores how a cycle ended as a word keeps no vocabulary of its own now that `CycleOutcome` has
+  `String()`; `RenderDiagram` prints each edge's `Target`, so neither face of the wiring graph drops
+  the reading the blueprint takes.
 
 ### v1.2.0
 

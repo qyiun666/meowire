@@ -94,7 +94,7 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 
 ## 升级
 
-### v1.3.x —— 当前表面（v1.2.0 之后三次 Breaking）
+### v1.3.x —— 当前表面（v1.2.0 之后四次 Breaking）
 
 - **v1.3.8 —— agent 间那一整套从公开面净删除（Breaking）**：`internal/synapse` 整包（突触图、
   `Hebbian`/`STDP`/`Prune` 学习规则）与 cell 侧的委托/应答配对簿记一并删除。寻址、路由、投递、能力
@@ -109,6 +109,11 @@ Meowire 是一个用于构建 agent 宿主的极简决策循环内核。它负�
 - **v1.3.11 —— 接线检视面收窄（Breaking）**：删除 `BuildGraph`、`WiringGraph` 类型、`SlotsByTarget`
   与 `meowire.PauseGate` 别名。同一张图由 `Connectome()` / `ConnectomeNodes()` / `WiringDiagram(o)` /
   `RenderDiagram` / `RenderJSON` 覆盖，每条边自带 `TargetID`。
+- **v1.3.12 —— 一个事实只留一个载体（Breaking）**：`Record` 去掉 `CellID`（`MemoryQuery` 已经点名是
+  谁在问，每返回一行再抄一份，就多出一个没有裁决者的第二份）；`Record.Created` 与循环里其余时间戳
+  同源，改为 Unix 毫秒；`Issue.ID` 删除——「整份装配的问题」这件事 `Issue.Wire` 为空已经说完。
+  `CycleOutcome` 现在有了 `String()`，把终态按词存起来的宿主不再自带一张词表；`RenderDiagram` 也打
+  每条边的 `Target`，接线图的两个面不再一个说得出、一个说不出。
 
 ### v1.2.0
 

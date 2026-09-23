@@ -75,7 +75,7 @@ func (r *ChatCompletionService) NewStreaming(ctx context.Context, body ChatCompl
 | `Plan` | `string` | 同一消息里的计划段，或 assistant 预填充 |
 | `Context` | `[]string` | 同一消息里的背景段：宿主基线 + 框架追加的裁决文本——`[sandbox-denied: 原因]`（`internal/nerve/gate.go:52` 的 `deniedText`）。**被膜拒掉的调用只落在这里**（`ToolResult` 的文档就写着"Sandbox denials are verdicts, not tool results"），因此它们没有配对，别送进 `tool` 消息轨 |
 | `Reflection` | `string` | 同一消息里的自查段（宿主在 `BeforeStimulate` 写、跨轮同值，框架从不写；空 = 无） |
-| `Memories` | `[]Record{Key, CellID, Kind, Content []byte, Created}` | 检索段文本；`Content` 是 `[]byte`，转字符串前自己决定解码。每轮整体替换、不进 `Session` 快照 |
+| `Memories` | `[]Record{Key, Kind, Content []byte, Created}` | 检索段文本；`Content` 是 `[]byte`，转字符串前自己决定解码；`Created` 是 Unix 毫秒。每轮整体替换、不进 `Session` 快照 |
 | `Input` | `string` | `openai.UserMessage(p.Input)` |
 | `Tools` | `[]ToolSpec{Name, Desc, Input, Output}` | `params.Tools`，`Output` 折进 description（chat 协议无输出 schema 位），见 §5。**这是每轮现读的数据**：`BeforeStimulate` 可以整体改写它（`internal/nerve/hooks.go:66`），缓存到启动期会静默丢掉改写 |
 | `ToolResults` | `[]ToolResult{ID, Name, Result, Err}` | `assistant(tool_calls)` + `tool` 成对消息，见 §3 |

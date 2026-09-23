@@ -53,6 +53,7 @@ type FakeCompletion struct {
 // arrived).
 type FakeBrain struct {
 	server *httptest.Server
+	t      *testing.T // failures in a rendered stream land here, not in a void
 
 	mu     sync.Mutex
 	script []FakeCompletion
@@ -69,7 +70,7 @@ func NewFakeBrain(t *testing.T, script ...FakeCompletion) *FakeBrain {
 	if len(script) == 0 {
 		script = []FakeCompletion{{Text: "ok"}}
 	}
-	fb := &FakeBrain{script: script}
+	fb := &FakeBrain{t: t, script: script}
 	fb.server = httptest.NewServer(http.HandlerFunc(fb.serve))
 	t.Cleanup(fb.server.Close)
 	return fb
@@ -134,9 +135,9 @@ func (fb *FakeBrain) serve(w http.ResponseWriter, r *http.Request) {
 	var respond func(w http.ResponseWriter, c FakeCompletion, stream bool)
 	switch r.URL.Path {
 	case "/chat/completions":
-		respond = respondChat
+		respond = fb.respondChat
 	case "/responses":
-		respond = respondResponses
+		respond = fb.respondResponses
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -173,18 +174,18 @@ func (fb *FakeBrain) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // respondChat renders one scripted answer on the chat-completions wire.
-func respondChat(w http.ResponseWriter, c FakeCompletion, stream bool) {
+func (fb *FakeBrain) respondChat(w http.ResponseWriter, c FakeCompletion, stream bool) {
 	if stream {
-		writeSSE(w, c)
+		fb.writeSSE(w, c)
 		return
 	}
 	writeJSONCompletion(w, c)
 }
 
 // respondResponses renders one scripted answer on the responses wire.
-func respondResponses(w http.ResponseWriter, c FakeCompletion, stream bool) {
+func (fb *FakeBrain) respondResponses(w http.ResponseWriter, c FakeCompletion, stream bool) {
 	if stream {
-		writeResponsesSSE(w, c)
+		fb.writeResponsesSSE(w, c)
 		return
 	}
 	writeResponsesJSON(w, c)
@@ -231,20 +232,40 @@ func writeErr(w http.ResponseWriter, status int) {
 	}})
 }
 
+// sseEmitter opens one event stream on w and returns its two writers: emit for
+// a payload to marshal as one frame, raw for a line the wire sends verbatim
+// (the chat side's [DONE] sentinel is not JSON). Both wires stream and the frame
+// shape is the same on both, so the opening lives here. A payload that will not
+// marshal is a bug in this file's own script, and the test asserting on this
+// stream hears about it from the reporter — a silently short stream reads as a
+// brain that answered less, which is the one thing a fake must not say.
+func (fb *FakeBrain) sseEmitter(w http.ResponseWriter) (emit func(map[string]any), raw func(string)) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		fb.t.Errorf("testutil: response writer %T cannot flush a stream", w)
+		return func(map[string]any) {}, func(string) {}
+	}
+	raw = func(line string) {
+		fmt.Fprint(w, line)
+		flusher.Flush()
+	}
+	emit = func(payload map[string]any) {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			fb.t.Errorf("testutil: SSE payload will not marshal: %v", err)
+			return
+		}
+		raw("data: " + string(body) + "\n\n")
+	}
+	return emit, raw
+}
+
 // writeSSE answers the same script as a chunk stream: role and text deltas
 // (the text split in two, so a sink sees real increments), one delta per tool
 // call, the finish marker, the usage-only final chunk, then [DONE].
-func writeSSE(w http.ResponseWriter, c FakeCompletion) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	flusher := w.(http.Flusher)
-	emit := func(payload map[string]any) {
-		line, err := json.Marshal(payload)
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "data: %s\n\n", line)
-		flusher.Flush()
-	}
+func (fb *FakeBrain) writeSSE(w http.ResponseWriter, c FakeCompletion) {
+	emit, raw := fb.sseEmitter(w)
 	chunk := func(delta map[string]any, finish string) map[string]any {
 		choice := map[string]any{"index": 0, "delta": delta}
 		if finish != "" {
@@ -283,8 +304,7 @@ func writeSSE(w http.ResponseWriter, c FakeCompletion) {
 			"total_tokens":      c.Usage.Total,
 		},
 	})
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	raw("data: [DONE]\n\n")
 }
 
 // writeResponsesJSON answers one whole Responses API run: the response body
@@ -347,17 +367,8 @@ func responsesOutput(c FakeCompletion) []any {
 // whole response (calls and usage included, the fold's only other input) or
 // failed carrying the failure — or, with StreamError, a bare error event
 // that ends the stream with no terminal state at all.
-func writeResponsesSSE(w http.ResponseWriter, c FakeCompletion) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	flusher := w.(http.Flusher)
-	emit := func(payload map[string]any) {
-		line, err := json.Marshal(payload)
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "data: %s\n\n", line)
-		flusher.Flush()
-	}
+func (fb *FakeBrain) writeResponsesSSE(w http.ResponseWriter, c FakeCompletion) {
+	emit, _ := fb.sseEmitter(w)
 	if c.StreamError {
 		emit(map[string]any{
 			"type": "error", "code": "scripted_failure", "message": "scripted stream error",

@@ -11,6 +11,7 @@
 - **重试单层**：client `WithMaxRetries(0)`，预算归内核 `Config.MaxRetries`。两层相乘会把一次故障放大成 MaxRetries × SDK 次请求。
 - **流式走 Sink**：`WithSink(ctx, …)` 挂在调用 context 上；delta 在出口膜（Sandbox.Emit）裁决之前推出，宿主收到 EventText 时整段替换已推内容。事件流不加 token 增量（09-18 裁定维持）。
 - **Tools 每轮现读** `p.Tools`：BeforeStimulate 可整体改写，缓存到构造期会静默丢掉改写。本轮无工具时返回 nil（线格式整个省略 `tools` 字段），不发空数组——部分 OpenAI 兼容端点会拒它。
+- **召回段的时间戳原样进文本**：`describeRecords` 把 `Record.Created` 拼成 `@<十进制>`，单位就是端口的约定（Unix 毫秒）——本包不做换算、不排序、不判断新旧，那些都在器官里。
 - **错误形状**：非 2xx 是 `*openai.Error`（无 Unwrap），`errors.As` 经 `%w` 可达；status 拼进错误文本让永久错误（400/401/403）早死，别烧重试预算。网络错误 SDK 原样透出。
 
 ## 陷阱

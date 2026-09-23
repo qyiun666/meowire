@@ -34,9 +34,10 @@ const (
 	LevelInfo  IssueLevel = "info"  // notable default, not a problem
 )
 
-// Issue is a single wiring finding from Validate.
+// Issue is a single wiring finding from Validate. Wire names the slot the
+// finding is about; "" is a finding about the assembly as a whole, which no
+// slot list can point at.
 type Issue struct {
-	ID    string // "assembly" for assembly-level findings, else wire id
 	Level IssueLevel
 	Wire  string // wire id ("" for assembly-level findings)
 	Msg   string
@@ -135,7 +136,6 @@ func Validate(o Organs, cfg Config) []Issue {
 		}
 		if s.Wire.Required && !s.Filled {
 			issues = append(issues, Issue{
-				ID:    "assembly",
 				Level: LevelError,
 				Wire:  s.Wire.ID,
 				Msg:   fmt.Sprintf("required port %s not injected", s.Wire.Name),
@@ -151,7 +151,6 @@ func Validate(o Organs, cfg Config) []Issue {
 	// cannot regulate what reaches the brain.
 	if o.Budget != nil && !nerve.CompleteBudget(o.Budget) {
 		issues = append(issues, Issue{
-			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "P6",
 			Msg:   "ContextBudget must have a Trimmer, a TrimResults and MaxTokens > 0 (a budget that does not trim both tracks is not a budget)",
@@ -164,7 +163,6 @@ func Validate(o Organs, cfg Config) []Issue {
 	// than guessed.
 	if o.ID == "" {
 		issues = append(issues, Issue{
-			ID:    "assembly",
 			Level: LevelError,
 			Msg:   "Organs.ID is empty (an agent must name itself; the ID is what events are attributed to and what a Session is checked against)",
 		})
@@ -182,7 +180,6 @@ func brainParams(o Organs) []Issue {
 	var issues []Issue
 	if o.Brain.Model == "" {
 		issues = append(issues, Issue{
-			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "F2",
 			Msg:   "Brain.Model is empty (the bundled brain has no model to call)",
@@ -190,7 +187,6 @@ func brainParams(o Organs) []Issue {
 	}
 	if o.Brain.Key == "" {
 		issues = append(issues, Issue{
-			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "F2",
 			Msg:   "Brain.Key is empty (the bundled brain has no credential)",
@@ -198,7 +194,6 @@ func brainParams(o Organs) []Issue {
 	}
 	if m := o.Brain.Mode; m != 0 && m != BrainModeChat && m != BrainModeResponses {
 		issues = append(issues, Issue{
-			ID:    "assembly",
 			Level: LevelError,
 			Wire:  "F2",
 			Msg:   fmt.Sprintf("Brain.Mode = %d is not a wire the brain speaks (1 = chat, 2 = responses)", m),
@@ -212,28 +207,30 @@ func brainParams(o Organs) []Issue {
 func defaultNotes(o Organs, cfg Config) []Issue {
 	var notes []Issue
 	if o.Identity == "" {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "F2", Msg: "Identity empty (agent has no persona)"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "F2", Msg: "Identity empty (agent has no persona)"})
 	}
 	if len(o.Tools) == 0 {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "Tools empty (no tools declared)"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "P2", Msg: "Tools empty (no tools declared)"})
 	}
 	if len(o.Context) == 0 {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P6", Msg: "Context empty"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "P6", Msg: "Context empty"})
 	}
 	if cfg.MaxRounds <= 0 {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "", Msg: "MaxRounds<=0 uses DefaultMaxRounds(8)"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "", Msg: "MaxRounds<=0 uses DefaultMaxRounds(8)"})
 	}
 	if cfg.ParallelActs {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "P2", Msg: "ParallelActs enabled (the Effector must be safe for concurrent Act calls)"})
 	} else if cfg.MaxParallelActs > 0 {
-		notes = append(notes, Issue{ID: "assembly", Level: LevelInfo, Wire: "P2", Msg: "MaxParallelActs set while ParallelActs is off (no batch runs concurrently, so the ceiling binds nothing)"})
+		notes = append(notes, Issue{Level: LevelInfo, Wire: "P2", Msg: "MaxParallelActs set while ParallelActs is off (no batch runs concurrently, so the ceiling binds nothing)"})
 	}
 	return notes
 }
 
 // RenderDiagram renders the assembly as an ASCII wiring graph: the data
 // nodes first, then one line per slot (edge) marked [x] wired / [ ] unwired,
-// with slot metadata and its target node.
+// with slot metadata, its target node and the edge as the blueprint reads it
+// (the bracketed text — the same string RenderJSON carries, so neither face of
+// the graph drops it).
 func RenderDiagram(o Organs) string {
 	var b strings.Builder
 	b.WriteString("meowire wiring graph\n")
@@ -249,9 +246,9 @@ func RenderDiagram(o Organs) string {
 		if s.Filled {
 			mark = "[x]"
 		}
-		fmt.Fprintf(&b, "  %s %-5s %-16s %d %-7s %-10s -> %-8s %s\n",
+		fmt.Fprintf(&b, "  %s %-5s %-16s %d %-7s %-10s -> %-8s [%s] %s\n",
 			mark, s.Wire.ID, s.Wire.Name, s.Wire.Phase, s.Wire.Category,
-			s.Wire.Semantics, s.Wire.TargetID, s.Wire.Desc)
+			s.Wire.Semantics, s.Wire.TargetID, s.Wire.Target, s.Wire.Desc)
 	}
 	return b.String()
 }

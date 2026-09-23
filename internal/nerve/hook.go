@@ -20,6 +20,23 @@ const (
 	OutcomeAborted                           // consumer stopped early (yield returned false) before any terminal
 )
 
+// cycleOutcomeNames is the name of each outcome, indexed by value. Slot 0 is
+// empty because the zero value is not an outcome: it means no terminal point
+// was reached. A guard test pins the table against the last constant, so an
+// outcome added to the iota without a name is caught at build time.
+var cycleOutcomeNames = []string{
+	"", "done", "suspended", "max_rounds", "error", "aborted",
+}
+
+// String returns the outcome's name; the zero value and any value outside the
+// table read as "unknown" rather than being guessed at.
+func (o CycleOutcome) String() string {
+	if name := nameOf(cycleOutcomeNames, o); name != "" {
+		return name
+	}
+	return "unknown"
+}
+
 // Hooks are the wiring interception points; all eight are required. An
 // explicit no-op is a declared decision, an absent callback a missing organ —
 // so a nil callback fails assembly.

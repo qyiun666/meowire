@@ -56,7 +56,7 @@ type hostMemory struct{ touch *hostTouch }
 
 func (h *hostMemory) Recall(_ context.Context, q meowire.MemoryQuery) ([]meowire.Record, error) {
 	h.touch.note("recall")
-	return []meowire.Record{{Key: "k", CellID: q.CellID, Kind: "note", Content: []byte("v")}}, nil
+	return []meowire.Record{{Key: "k", Kind: "note", Content: []byte("v")}}, nil
 }
 
 func (h *hostMemory) Remember(_ context.Context, f meowire.CycleFacts) error {

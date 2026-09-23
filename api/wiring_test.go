@@ -285,6 +285,13 @@ func TestRenderDiagram(t *testing.T) {
 	if !strings.Contains(out, "-> context") {
 		t.Error("edges should render their target node")
 	}
+	// A node id cannot say what an edge spans: P2 acts on an Action and leaves
+	// an Effect, and that reading lives only in the blueprint's Target. The JSON
+	// face has always carried it; the ASCII face dropping it would make the two
+	// renderings of one graph disagree.
+	if !strings.Contains(out, "[Action → Effect]") {
+		t.Error("edges should render the blueprint's reading of the edge")
+	}
 }
 
 // TestRenderJSON: the machine-readable graph is valid JSON carrying the

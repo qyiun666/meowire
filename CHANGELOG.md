@@ -5,6 +5,53 @@ All notable changes to meowire are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.12] - 2026-09-23
+
+### Added
+
+- **`CycleOutcome` names itself** — `String()` returns `done` / `suspended` / `max_rounds` / `error` /
+  `aborted`; the zero value (no terminal point reached) and any value outside the table return
+  `unknown` rather than a guessed word. A host that stores the outcome as a word — which is what a
+  memory organ does with it — used to re-declare that five-row table itself, because the enum arrived
+  as a bare `int`. `TestCycleOutcomeNamesCoverEveryOutcome` pins the table against the last constant,
+  so an outcome added to the `iota` without a name fails the build instead of shipping as `unknown`.
+
+### Changed
+
+- **`Record.Created` is Unix milliseconds (Breaking)** — the same unit every other timestamp in the
+  loop uses. A host whose memory backend stores milliseconds was converting to seconds on the way in
+  and back on the way out, purely to satisfy this one field; both conversions are now gone.
+  `internal/brain` renders the field verbatim into the recalled-memories block, so the model-visible
+  text carries thirteen digits (`TestPromptFieldPlacement`, `TestResponsesRoundTrip`).
+- **`RenderDiagram` prints the edge the way the blueprint reads it** — each slot line now carries its
+  `Target` in brackets alongside the target node id. One node id cannot say what an edge spans: `P2`
+  acts on an `Action` and leaves an `Effect`, `H1` writes back eight `Prompt` fields, and that reading
+  lived only in `Target`, which until now the JSON face alone carried. The two renderings of one
+  graph no longer disagree (`TestRenderDiagram`).
+
+### Removed
+
+- **`Record.CellID` (Breaking)** — the framework never reads it, and `MemoryQuery` already tells the
+  organ which cell is asking, so the field asked the host to copy that same value back onto every row
+  it returned: one fact, two carriers, no arbiter if they disagree. Identity attribution stays on the
+  query and on every `Event`, where the framework does the writing (`internal/nerve/memory.go`).
+- **`Issue.ID` (Breaking)** — a finding about the assembly as a whole and about a slot are already
+  distinguished by `Issue.Wire` being empty; `ID` held the same literal `"assembly"` in all twelve
+  construction sites, was read by nothing in this repository, and never reached `RenderJSON` because
+  `Validate` returns issues rather than marshalling them.
+
+### Internal
+
+- **One SSE emitter for both fake wires** — `internal/testutil` shares the stream opening (content
+  type, flusher, one-frame writer) between the chat and responses scripts, and a payload that will not
+  marshal now reports through the owning `*testing.T` instead of ending the stream one frame early — a
+  silently short stream reads as a brain that answered less, which is the one thing a fake must not
+  say.
+- **One owner for the zero-value rule of `MaxRounds`** — `LoopConfig`'s doc is the authority
+  (`<=0` means `DefaultMaxRounds`); the copy on the framework-internal `LoopContext` field said the
+  same thing to a reader who cannot reach it. `api.Config` keeps its own copy on purpose: `internal/`
+  is not importable, so `go doc` is a host's only entry point.
+
 ## [1.3.11] - 2026-09-20
 
 ### Changed

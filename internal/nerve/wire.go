@@ -63,8 +63,10 @@ func ConnectomeNodes() []WireNode {
 // WirePoint is one wiring slot — an edge in the wiring graph.
 // Phase: 1 = framework-defined (always active), 2 = host-implemented port,
 // 3 = host runtime update (hook function).
-// TargetID: graph node this slot reads or mutates (see ConnectomeNodes);
-// Target is the human-readable rendering of that edge.
+// TargetID: graph node this slot reads or mutates (see ConnectomeNodes).
+// Target: this edge rendered as words — what the slot takes and what it leaves
+// behind, which one node id cannot say (P2 spans Action → Effect, H1 writes
+// back eight Prompt fields). RenderDiagram and RenderJSON both carry it.
 // Required: New rejects a missing required slot; optional slots are not
 // re-checked (P5b is implied by P5, G1 is api-injected).
 type WirePoint struct {
