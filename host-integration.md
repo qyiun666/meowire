@@ -146,7 +146,7 @@ type Hooks struct {
 | `BeforeAct` | 每个工具执行前 | 审批、改写工具参数 |
 | `AfterAct` | 工具执行后 | 工具日志、失败降级（`err` 非 nil 即执行器失败） |
 | `OnError` | 不可恢复错误时 | 告警上报 |
-| `OnCycleEnd` | **每次 Stimulate/Resume（一个 Cycle）恰好一次**（正常/错误/挂起/消费者提前停止四臂都触发） | 结算、持久化最终输出；`outcome` 分类本轮结束方式（Done/Suspended/MaxRounds/Error/Aborted，零值保留 = 提前弃用迭代器 → Aborted） |
+| `OnCycleEnd` | **每次 Stimulate/Resume（一个 Cycle）恰好一次**（正常/错误/挂起/消费者提前停止四臂都触发） | 结算、持久化最终输出；`outcome` 分类本轮结束方式（Done/Suspended/MaxRounds/Error/Aborted，零值保留 = 提前弃用迭代器 → Aborted）；`CycleOutcome` 自带 `String()`（`done`/`suspended`/`max_rounds`/`error`/`aborted`，表外的值一律 `unknown`），要把终态按词存下来的宿主调它，不再自己维护对照表 |
 
 **⚠️ `BeforeThink` 必须整体替换 `p.Context`（`p.Context = append(p.Context[:0], newCtx...)` 或直接赋新切片）——它与循环上下文共享底层数组，直接 append 会污染 循环内上下文；`p.ToolResults` 同理（与循环结构化轨共享底层数组），整体替换、禁止原地 append。**
 

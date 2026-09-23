@@ -185,7 +185,7 @@ type Hooks struct {
 | `BeforeAct` | Before each tool execution | Approval, rewrite tool arguments |
 | `AfterAct` | After tool execution | Tool logging, failure degradation (`err` non-nil = effector failure) |
 | `OnError` | On unrecoverable error | Alerting |
-| `OnCycleEnd` | **Exactly once per cycle** (normal, error, suspension and early-consumer-stop arms) | Settlement, persist final output; `outcome` classifies how the cycle ended (Done/Suspended/MaxRounds/Error/Aborted; zero reserved = iterator abandoned early → Aborted) |
+| `OnCycleEnd` | **Exactly once per cycle** (normal, error, suspension and early-consumer-stop arms) | Settlement, persist final output; `outcome` classifies how the cycle ended (Done/Suspended/MaxRounds/Error/Aborted; zero reserved = iterator abandoned early → Aborted); `CycleOutcome` names itself via `String()` (`done`/`suspended`/`max_rounds`/`error`/`aborted`, anything outside the table reads `unknown`), so a host that stores the terminal state as a word calls that instead of keeping its own lookup table |
 
 **⚠️ `BeforeThink` must replace `p.Context` as a whole (`p.Context = append(p.Context[:0], newCtx...)` or assign a new slice) — it shares the backing array with the loop's accumulated context; appending into it can corrupt the loop context. The same applies to `p.ToolResults` (shared with the loop's structured track): replace wholesale, never append in place.**
 
